@@ -1,0 +1,48 @@
+/*
+ * Bundled brand fonts — ported from the reference mock (which copied them from
+ * the real TradingView desktop asset bundle):
+ *
+ *   Euclid Circular B Medium  (weight 600)
+ *   Euclid Circular B Regular (weight 400)
+ *   Monaco                    (weight 400)
+ *
+ * Without this file `--font-family-base` was undefined and the app fell back to
+ * the UA default typeface. The vars are defined here (the real app keeps them
+ * alongside the @font-face blocks); tokens.css references them.
+ *
+ * Note: the original declares `font-style: bold` on the Medium variant — that's
+ * invalid CSS (bold is a weight), so we write `normal` to reflect the paint.
+ */
+
+@font-face {
+  font-family: 'Monaco';
+  src: url('../assets/fonts/Monaco.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Euclid Circular B';
+  src: url('../assets/fonts/EuclidCircularB-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Euclid Circular B';
+  src: url('../assets/fonts/EuclidCircularB-Medium.ttf') format('truetype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --font-family-base: -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto,
+    SegoeUI, Ubuntu, sans-serif;
+  /* Brand font — used by accent classes (big numbers / marketing). */
+  --font-family-accent: 'Euclid Circular B', -apple-system, BlinkMacSystemFont,
+    'Trebuchet MS', Roboto, SegoeUI, Ubuntu, sans-serif;
+  --font-family-mono: 'Monaco', Menlo, Consolas, 'Liberation Mono', monospace;
+}
