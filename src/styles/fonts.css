@@ -1,17 +1,16 @@
 /*
- * Bundled brand fonts — ported from the reference mock (which copied them from
- * the real TradingView desktop asset bundle):
+ * Bundled brand fonts:
  *
  *   Euclid Circular B Medium  (weight 600)
  *   Euclid Circular B Regular (weight 400)
  *   Monaco                    (weight 400)
  *
  * Without this file `--font-family-base` was undefined and the app fell back to
- * the UA default typeface. The vars are defined here (the real app keeps them
- * alongside the @font-face blocks); tokens.css references them.
+ * the UA default typeface. The vars are defined here, alongside the
+ * @font-face blocks; tokens.css references them.
  *
- * Note: the original declares `font-style: bold` on the Medium variant — that's
- * invalid CSS (bold is a weight), so we write `normal` to reflect the paint.
+ * Note: the Medium variant uses `font-style: normal`, not `bold`; bold is a
+ * weight, so `font-style: bold` would be invalid CSS.
  */
 
 @font-face {
