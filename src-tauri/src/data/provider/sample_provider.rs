@@ -180,7 +180,8 @@ fn apply_splits(mut bars: Vec<Candle>, splits: &[SplitEvent], adjusted: bool) ->
     if !adjusted || splits.is_empty() {
         return bars;
     }
-    let mut asc = splits.to_vec();
+    // Oldest-first without cloning (`SplitEvent` is not `Clone`): sort refs.
+    let mut asc: Vec<&SplitEvent> = splits.iter().collect();
     asc.sort_by(|a, b| a.date.partial_cmp(&b.date).unwrap_or(std::cmp::Ordering::Equal));
     for b in &mut bars {
         let mut f = 1.0;
@@ -663,7 +664,7 @@ struct LiveState {
     min_v: f64,
 }
 
-fn live_state_for(states: &mut HashMap<String, LiveState>, symbol: &str) -> &mut LiveState {
+fn live_state_for<'a>(states: &'a mut HashMap<String, LiveState>, symbol: &str) -> &'a mut LiveState {
     if !states.contains_key(symbol) {
         let to = today_utc();
         let dates = trading_days_back(5, to);
