@@ -407,6 +407,27 @@ const UNIVERSE: &[UniverseRow] = &[
     UniverseRow { ticker: "WIPRO", name: "Wipro Ltd.", exchange: "NSE", kind: "EQ", sector: "Technology" },
     UniverseRow { ticker: "TATASTEEL", name: "Tata Steel Ltd.", exchange: "BSE", kind: "EQ", sector: "Metals" },
     UniverseRow { ticker: "SENSEX", name: "BSE SENSEX Index", exchange: "BSE", kind: "IX", sector: "Index" },
+    // NSE indices.
+    UniverseRow { ticker: "NIFTY", name: "Nifty 50 Index", exchange: "NSE", kind: "IX", sector: "Index" },
+    UniverseRow { ticker: "BANKNIFTY", name: "Nifty Bank Index", exchange: "NSE", kind: "IX", sector: "Index" },
+    UniverseRow { ticker: "FINNIFTY", name: "Nifty Financial Services Index", exchange: "NSE", kind: "IX", sector: "Index" },
+    UniverseRow { ticker: "INDIAVIX", name: "India VIX Volatility Index", exchange: "NSE", kind: "IX", sector: "Index" },
+    // BSE venue-qualified equities (same issuer, BSE venue) + BSE index.
+    UniverseRow { ticker: "RELIANCE", name: "Reliance Industries Ltd.", exchange: "BSE", kind: "EQ", sector: "Energy" },
+    UniverseRow { ticker: "INFY", name: "Infosys Ltd.", exchange: "BSE", kind: "EQ", sector: "Banking" },
+    UniverseRow { ticker: "TCS", name: "Tata Consultancy Services", exchange: "BSE", kind: "EQ", sector: "Technology" },
+    UniverseRow { ticker: "BANKEX", name: "BSE Bankex Index", exchange: "BSE", kind: "IX", sector: "Index" },
+    // NFO derivatives (short readable tickers; full contract detail in description).
+    UniverseRow { ticker: "NIFTYFUT", name: "Nifty Futures, Monthly Expiry", exchange: "NFO", kind: "FUT", sector: "Derivatives" },
+    UniverseRow { ticker: "BANKNIFTYFUT", name: "Bank Nifty Futures, Monthly Expiry", exchange: "NFO", kind: "FUT", sector: "Derivatives" },
+    UniverseRow { ticker: "NIFTY26000CE", name: "Nifty 26000 Call, 30 Oct Expiry", exchange: "NFO", kind: "OPT", sector: "Derivatives" },
+    UniverseRow { ticker: "NIFTY26000PE", name: "Nifty 26000 Put, 30 Oct Expiry", exchange: "NFO", kind: "OPT", sector: "Derivatives" },
+    UniverseRow { ticker: "BANKNIFTY55000CE", name: "Bank Nifty 55000 Call, 29 Oct Expiry", exchange: "NFO", kind: "OPT", sector: "Derivatives" },
+    // MCX commodities (futures).
+    UniverseRow { ticker: "GOLD", name: "Gold Futures", exchange: "MCX", kind: "FUT", sector: "Commodities" },
+    UniverseRow { ticker: "SILVER", name: "Silver Futures", exchange: "MCX", kind: "FUT", sector: "Commodities" },
+    UniverseRow { ticker: "CRUDEOIL", name: "Crude Oil Futures", exchange: "MCX", kind: "FUT", sector: "Commodities" },
+    UniverseRow { ticker: "NATURALGAS", name: "Natural Gas Futures", exchange: "MCX", kind: "FUT", sector: "Commodities" },
 ];
 
 fn today_utc() -> NaiveDate {
@@ -507,7 +528,15 @@ impl ReferenceProvider for SampleProvider {
     async fn ticker_info(&self, ticker: &str) -> Result<TickerInfo> {
         let t = bare(ticker);
         let m = model_for(&t);
-        let known = UNIVERSE.iter().find(|r| r.ticker == t);
+        // Prefer the venue-qualified row when the caller passes one
+        // ("BSE:RELIANCE"); otherwise the primary (first) listing.
+        let head = upper(ticker);
+        let head = head.split(',').next().unwrap_or("");
+        let parts: Vec<&str> = head.split(':').collect();
+        let venue = if parts.len() > 1 { Some(parts[0]) } else { None };
+        let known = venue
+            .and_then(|ex| UNIVERSE.iter().find(|r| r.ticker == t && r.exchange == ex))
+            .or_else(|| UNIVERSE.iter().find(|r| r.ticker == t));
         let exchange = known.map(|r| r.exchange).unwrap_or("NSE").to_string();
         let h = fnv1a(&format!("ref|{t}"));
         Ok(TickerInfo {
@@ -519,7 +548,13 @@ impl ReferenceProvider for SampleProvider {
             exchange: Some(exchange.clone()),
             industry: Some(known.map(|r| r.sector).unwrap_or("Sample").to_string()),
             sector: Some(known.map(|r| r.sector).unwrap_or("Sample").to_string()),
-            currency: Some(if exchange == "NSE" || exchange == "BSE" { "INR".to_string() } else { "USD".to_string() }),
+            currency: Some(
+                if ["NSE", "BSE", "NFO", "MCX"].contains(&exchange.as_str()) {
+                    "INR".to_string()
+                } else {
+                    "USD".to_string()
+                },
+            ),
             description: Some(format!("{t} — deterministic sample instrument for backend development.")),
             homepage_url: None,
             total_employees: Some(10000.0 + ((h % 150000) as f64)),
@@ -583,8 +618,13 @@ impl ReferenceProvider for SampleProvider {
                 r#type: Some(r.kind.to_string()),
             })
             .collect();
-        // Always allow opening exactly what was typed.
+        // Always allow opening exactly what was typed. It carries the
+        // requested filter type so it survives filtering.
         if !out.iter().any(|r| r.ticker == q) {
+            let fallback_type = match filter {
+                "" => "EQ",
+                f => f,
+            };
             out.insert(
                 0,
                 SymbolSearchResult {
@@ -593,7 +633,7 @@ impl ReferenceProvider for SampleProvider {
                     market: Some("stocks".to_string()),
                     locale: Some("us".to_string()),
                     primary_exchange: Some("NSE".to_string()),
-                    r#type: Some("EQ".to_string()),
+                    r#type: Some(fallback_type.to_string()),
                 },
             );
         }

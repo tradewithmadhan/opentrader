@@ -692,6 +692,27 @@ const UNIVERSE: UniverseRow[] = [
   { ticker: "WIPRO", name: "Wipro Ltd.", exchange: "NSE", type: "EQ", sector: "Technology" },
   { ticker: "TATASTEEL", name: "Tata Steel Ltd.", exchange: "BSE", type: "EQ", sector: "Metals" },
   { ticker: "SENSEX", name: "BSE SENSEX Index", exchange: "BSE", type: "IX", sector: "Index" },
+  // NSE indices.
+  { ticker: "NIFTY", name: "Nifty 50 Index", exchange: "NSE", type: "IX", sector: "Index" },
+  { ticker: "BANKNIFTY", name: "Nifty Bank Index", exchange: "NSE", type: "IX", sector: "Index" },
+  { ticker: "FINNIFTY", name: "Nifty Financial Services Index", exchange: "NSE", type: "IX", sector: "Index" },
+  { ticker: "INDIAVIX", name: "India VIX Volatility Index", exchange: "NSE", type: "IX", sector: "Index" },
+  // BSE venue-qualified equities (same issuer, BSE venue) + BSE index.
+  { ticker: "RELIANCE", name: "Reliance Industries Ltd.", exchange: "BSE", type: "EQ", sector: "Energy" },
+  { ticker: "INFY", name: "Infosys Ltd.", exchange: "BSE", type: "EQ", sector: "Banking" },
+  { ticker: "TCS", name: "Tata Consultancy Services", exchange: "BSE", type: "EQ", sector: "Technology" },
+  { ticker: "BANKEX", name: "BSE Bankex Index", exchange: "BSE", type: "IX", sector: "Index" },
+  // NFO derivatives (short readable tickers; full contract detail in description).
+  { ticker: "NIFTYFUT", name: "Nifty Futures, Monthly Expiry", exchange: "NFO", type: "FUT", sector: "Derivatives" },
+  { ticker: "BANKNIFTYFUT", name: "Bank Nifty Futures, Monthly Expiry", exchange: "NFO", type: "FUT", sector: "Derivatives" },
+  { ticker: "NIFTY26000CE", name: "Nifty 26000 Call, 30 Oct Expiry", exchange: "NFO", type: "OPT", sector: "Derivatives" },
+  { ticker: "NIFTY26000PE", name: "Nifty 26000 Put, 30 Oct Expiry", exchange: "NFO", type: "OPT", sector: "Derivatives" },
+  { ticker: "BANKNIFTY55000CE", name: "Bank Nifty 55000 Call, 29 Oct Expiry", exchange: "NFO", type: "OPT", sector: "Derivatives" },
+  // MCX commodities (futures).
+  { ticker: "GOLD", name: "Gold Futures", exchange: "MCX", type: "FUT", sector: "Commodities" },
+  { ticker: "SILVER", name: "Silver Futures", exchange: "MCX", type: "FUT", sector: "Commodities" },
+  { ticker: "CRUDEOIL", name: "Crude Oil Futures", exchange: "MCX", type: "FUT", sector: "Commodities" },
+  { ticker: "NATURALGAS", name: "Natural Gas Futures", exchange: "MCX", type: "FUT", sector: "Commodities" },
 ];
 
 export function sampleSearch(query: string, typeFilter: string | null): SymbolSearchResult[] {
@@ -710,14 +731,17 @@ export function sampleSearch(query: string, typeFilter: string | null): SymbolSe
     type: r.type,
   }));
   // Always allow opening exactly what was typed (custom/unknown tickers work).
+  // It carries the requested filter type so it survives filtering and lands
+  // on the matching tab.
   if (!rows.some((r) => r.ticker === q)) {
+    const fallbackType = typeFilter || "EQ";
     rows.unshift({
       ticker: q,
       name: `${q} (sample)`,
       market: "stocks",
       locale: "us",
       primaryExchange: "NSE",
-      type: "EQ",
+      type: fallbackType,
     });
   }
   return rows.slice(0, 50);
@@ -727,7 +751,14 @@ export function sampleTickerInfo(symbol: string): TickerInfo {
   assertSampleSymbol(symbol);
   const t = bare(symbol);
   const m = modelFor(t);
-  const known = UNIVERSE.find((r) => r.ticker === t);
+  // Prefer the venue-qualified row when the caller passes one
+  // ("BSE:RELIANCE"); otherwise the primary (first) listing. Live series
+  // stay keyed by bare ticker (one series per issuer).
+  const venue = norm(symbol).split(",")[0].trim().split(":");
+  const known =
+    (venue.length > 1
+      ? UNIVERSE.find((r) => r.ticker === t && r.exchange === venue[0])
+      : undefined) ?? UNIVERSE.find((r) => r.ticker === t);
   const exchange = known?.exchange ?? "NSE";
   return {
     ticker: t,
@@ -735,7 +766,7 @@ export function sampleTickerInfo(symbol: string): TickerInfo {
     exchange,
     industry: known?.sector ?? "Sample",
     sector: known?.sector ?? "Sample",
-    currency: exchange === "NSE" || exchange === "BSE" ? "INR" : "USD",
+    currency: ["NSE", "BSE", "NFO", "MCX"].includes(exchange) ? "INR" : "USD",
     description: `${known?.name ?? t} — deterministic sample instrument for browser development.`,
     homepageUrl: null,
     totalEmployees: 10000 + (hashStr(`emp|${t}`) % 150000),

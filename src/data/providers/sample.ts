@@ -8,8 +8,8 @@
  *   • exchange-code normalization — sample codes are already display-ready
  *     ("NSE"/"BSE"), so this is the identity with a small alias table;
  *   • symbol-search mapping — turning raw search results (sample security
- *     types "EQ"/"IX") into dialog rows, plus the Type-filter dropdown
- *     options. The generic ranking/filtering stays in ../symbol-search.
+ *     types "EQ"/"FUT"/"OPT"/"IX") into dialog rows, plus the Type-filter
+ *     dropdown options. The generic ranking/filtering stays in ../symbol-search.
  */
 import type { SymbolSearchResult } from "../../bindings";
 import type { SymbolRow, SymbolCategoryId, TypeFilter } from "../symbol-search";
@@ -39,18 +39,24 @@ export function exchangeName(code: string | null | undefined): string {
 export const typeFilters: TypeFilter[] = [
   { label: "All types", code: null },
   { label: "Equity", code: "EQ" },
+  { label: "Futures", code: "FUT" },
+  { label: "Options", code: "OPT" },
   { label: "Index", code: "IX" },
 ];
 
 /** Sample security type → the short marketType label shown on the chip. */
 const TYPE_LABELS: Record<string, string> = {
   EQ: "stock",
+  FUT: "futures",
+  OPT: "options",
   IX: "index",
 };
 
 /** Sample security type → category-tab override. Everything not listed lands
  *  in Stocks via the market mapping below. */
 const TYPE_CATEGORY: Partial<Record<string, SymbolCategoryId>> = {
+  FUT: "futures",
+  OPT: "options",
   IX: "indices",
 };
 
