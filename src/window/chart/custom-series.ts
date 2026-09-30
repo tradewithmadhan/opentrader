@@ -36,6 +36,8 @@ import type { ChartTokens } from "./chart-tokens";
 import type { OHLC } from "./chart-types";
 import type { KagiItem, PnfItem } from "./series-transforms";
 import type { SvpStyle } from "../header/chart-settings";
+import { activeSession } from "../../data/datafeed";
+import type { MarketSessionDef } from "../../data/datafeed";
 export type { KagiItem, PnfItem } from "./series-transforms";
 
 type DrawTarget = Parameters<ICustomSeriesPaneRenderer["draw"]>[0];
@@ -224,31 +226,47 @@ export type ProfileItem = {
 
 const TPO_ROWS = 24;
 
-/** New York calendar-date key (session split for intraday charts). */
-const nyDate = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "America/New_York",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-const nyMinute = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour12: false, hour: "2-digit", minute: "2-digit" });
-function etMinuteOf(sec: number): number {
-  const [h, m] = nyMinute.format(new Date(sec * 1000)).split(":").map(Number);
+/** Session-calendar date key (session split for intraday charts), in the
+ *  given session's timezone. Defaults to the active provider's session, so an
+ *  NSE day (09:15–15:30 IST) isn't split by the New York date line. */
+const dateFmtCache = new Map<string, Intl.DateTimeFormat>();
+const minuteFmtCache = new Map<string, Intl.DateTimeFormat>();
+
+function sessDate(tz: string): Intl.DateTimeFormat {
+  let f = dateFmtCache.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+    dateFmtCache.set(tz, f);
+  }
+  return f;
+}
+
+function sessMinute(tz: string): Intl.DateTimeFormat {
+  let f = minuteFmtCache.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour12: false, hour: "2-digit", minute: "2-digit" });
+    minuteFmtCache.set(tz, f);
+  }
+  return f;
+}
+
+function minuteOf(sec: number, tz: string): number {
+  const [h, m] = sessMinute(tz).format(new Date(sec * 1000)).split(":").map(Number);
   return (h % 24) * 60 + m;
 }
 
-function sessionKey(sec: number, unit: "day" | "month" | "year"): string {
-  const d = nyDate.format(new Date(sec * 1000)); // YYYY-MM-DD
+function sessionKey(sec: number, unit: "day" | "month" | "year", sess: MarketSessionDef = activeSession()): string {
+  const d = sessDate(sess.tz).format(new Date(sec * 1000)); // YYYY-MM-DD
   if (unit === "day") return d;
   if (unit === "month") return d.slice(0, 7);
   return d.slice(0, 4);
 }
 
-/** US equity session part of a bar (ET): pre 04:00-09:30, market
- *  09:30-16:00, post 16:00-20:00. */
-function partOf(sec: number): "pre" | "market" | "post" {
-  const m = etMinuteOf(sec);
-  return m < 570 ? "pre" : m < 960 ? "market" : "post";
+/** Session part of a bar: pre (before open), market (open–close), post (from
+ *  close). Bounds come from the given session (defaults to active). */
+function partOf(sec: number, sess: MarketSessionDef = activeSession()): "pre" | "market" | "post" {
+  const m = minuteOf(sec, sess.tz);
+  return m < sess.openMin ? "pre" : m < sess.closeMin ? "market" : "post";
 }
 
 /** "HHMM-HHMM" → [start, end) minutes, null when malformed. */
@@ -299,7 +317,7 @@ export function toProfile(raw: OHLC[], mode: "svp" | "tpo", st?: SvpStyle): Prof
     if (sessions === "Market only") return part === "market" ? day : null;
     if (sessions === "Post-market only") return part === "post" ? day : null;
     if (custom) {
-      const m = etMinuteOf(sec);
+      const m = minuteOf(sec, activeSession().tz);
       return m >= custom[0] && m < custom[1] ? day : null;
     }
     return day;
