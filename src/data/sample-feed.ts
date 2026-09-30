@@ -445,7 +445,7 @@ export function sampleDividends(symbol: string): DividendEvent[] {
       y -= 1;
     }
     const m = q * 3 + 1;
-    const amt = 0.2 + ((h >> (i % 24)) % 230) / 100;
+    const amt = 0.2 + ((h >>> (i % 24)) % 230) / 100;
     out.push({ date: Date.UTC(y, m, 15, 12) / 1000, amount: Math.round(amt * 100) / 100 });
   }
   return out.sort((a, b) => b.date - a.date);
