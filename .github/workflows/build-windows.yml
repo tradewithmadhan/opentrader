@@ -1,0 +1,31 @@
+name: Build Windows check
+
+# Windows-only Rust compile check for the sample-web line.
+# Run manually: Actions tab -> "Build Windows check" -> Run workflow ->
+#   branch sample-web. Proves the Rust backend (including the pulled
+#   time-sync/history changes) compiles without error. No installers,
+#   no release — use release.yml for those.
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+
+      # Compiles the lib (all commands + data providers) and runs the
+      # specta bindings-export test — the same step release.yml uses.
+      # No gateway token needed: the build runs without market data.
+      - name: Check Rust build + export bindings
+        working-directory: src-tauri
+        run: cargo test --lib export_bindings

@@ -133,7 +133,10 @@ function App() {
   // Per-window: detached windows scope their own tab storage by window label
   // and open seeded from the handoff payload the detach left behind.
   const windowLabel = currentWindowLabel();
-  const initial = loadTabs(windowLabel, takeDetachPayload(windowLabel));
+  // Single-view shell outside Tauri (browser): no tab strip — tabs are a
+  // desktop windowing concept. `Show` below hides the whole `.tab-bar` row.
+  const singleView = !isTauri();
+  const initial = loadTabs(windowLabel, takeDetachPayload(windowLabel), singleView);
   const [tabs, setTabs] = createSignal<TabChart[]>(initial.tabs);
   const [activeTabId, setActiveTabId] = createSignal<string>(initial.activeId);
   const activeTab = () => tabs().find((t) => t.id === activeTabId()) ?? tabs()[0];
@@ -1100,6 +1103,7 @@ function App() {
     setSelectedDrawingId(null);
   }
   function newTab() {
+    if (singleView) return; // single-view shell: exactly one tab, no UI to reach the rest
     const t = makeTab();
     setTabs([...tabs(), t]);
     activateTab(t.id);
@@ -1864,6 +1868,7 @@ function App() {
 
   return (
     <div class="flex h-full w-full flex-col">
+      <Show when={!singleView}>
       <div class="tab-bar" data-tauri-drag-region>
         <TabPanel
           tabs={tabs()}
@@ -1895,6 +1900,7 @@ function App() {
         />
         <WindowControls />
       </div>
+      </Show>
       <HeaderToolbar
         symbol={symbol()}
         interval={interval()}
