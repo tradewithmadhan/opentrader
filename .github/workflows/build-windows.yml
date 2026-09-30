@@ -93,12 +93,15 @@ jobs:
         run: cargo test --lib export_bindings
 
       # No tagName: builds only, no release. Produces the NSIS .exe + .msi
-      # under src-tauri/target/release/bundle/.
+      # under src-tauri/target/release/bundle/. `--no-sign` skips updater
+      # signing (no TAURI_SIGNING_PRIVATE_KEY in test builds); real releases
+      # via release.yml sign normally.
       - name: Build Tauri bundles
         uses: tauri-apps/tauri-action@v0
         with:
           projectPath: opentrader
           assetNamePattern: '[name]_[platform]_[arch][setup][ext]'
+          args: '--no-sign'
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
