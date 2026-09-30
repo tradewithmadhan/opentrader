@@ -1,12 +1,22 @@
 name: Build Windows check
 
-# Windows-only Rust compile check for the sample-web line.
+# Windows-only Rust compile check (used to validate feature branches).
 # Run manually: Actions tab -> "Build Windows check" -> Run workflow ->
-#   branch sample-web. Proves the Rust backend (including the pulled
-#   time-sync/history changes) compiles without error. No installers,
-#   no release — use release.yml for those.
+#   use the branch dropdown to pick the branch to test (e.g. sample-web-clean).
+#
+# Two modes (checkbox when running):
+#   - unchecked (default): fast compile check only (`cargo test --lib
+#     export_bindings`). Proves the Rust backend builds without error.
+#   - checked "Full Tauri build": also builds the SolidJS frontend and the
+#     Windows installers, uploading OpenTrader_*_setup.exe (+ .msi) as a
+#     7-day artifact. No release is created — use release.yml for those.
 on:
   workflow_dispatch:
+    inputs:
+      build_exe:
+        description: "Full Tauri build + upload installer exe"
+        type: boolean
+        default: false
 
 jobs:
   check:
@@ -29,3 +39,73 @@ jobs:
       - name: Check Rust build + export bindings
         working-directory: src-tauri
         run: cargo test --lib export_bindings
+
+  build-exe:
+    if: inputs.build_exe
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # Compiled in by src-tauri/build.rs. Empty is fine: the exe builds
+      # and runs, but charts get no market data.
+      OPENTRADER_GATEWAY_TOKEN: ${{ secrets.OPENTRADER_GATEWAY_TOKEN }}
+    steps:
+      # Two checkouts side by side, the layout vite.config.ts expects.
+      - name: Checkout OpenTrader
+        uses: actions/checkout@v4
+        with:
+          path: opentrader
+
+      - name: Checkout drawing core
+        uses: actions/checkout@v4
+        with:
+          repository: deepentropy/lightweight-charts-drawing
+          ref: v0.2.2
+          path: lightweight-charts-drawing
+
+      - name: Warn on missing gateway token
+        shell: bash
+        run: |
+          if [ -z "$OPENTRADER_GATEWAY_TOKEN" ]; then
+            echo "::warning::OPENTRADER_GATEWAY_TOKEN secret is not set: the exe will build but charts get no market data."
+          fi
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'opentrader/src-tauri -> target'
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: opentrader/package-lock.json
+
+      - name: Install npm dependencies
+        working-directory: opentrader
+        run: npm ci
+
+      - name: Generate TypeScript bindings
+        working-directory: opentrader/src-tauri
+        run: cargo test --lib export_bindings
+
+      # No tagName: builds only, no release. Produces the NSIS .exe + .msi
+      # under src-tauri/target/release/bundle/.
+      - name: Build Tauri bundles
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: opentrader
+          assetNamePattern: '[name]_[platform]_[arch][setup][ext]'
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 7
+          name: opentrader-windows-exe
+          if-no-files-found: error
+          path: |
+            opentrader/src-tauri/target/release/bundle/nsis/*.exe
+            opentrader/src-tauri/target/release/bundle/msi/*.msi
