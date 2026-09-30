@@ -18,7 +18,9 @@
 pub mod capabilities;
 pub mod entitlements;
 mod massive;
+mod sample_provider;
 pub use massive::MassiveProvider;
+pub use sample_provider::SampleProvider;
 
 use capabilities::{DataStatus, HistoryProbe, ProviderCapabilities, StreamCaps};
 use crate::data::types::{
@@ -138,6 +140,7 @@ pub fn build() -> Provider {
     let name = std::env::var("DATA_PROVIDER").unwrap_or_else(|_| "massive".into());
     match name.as_str() {
         "massive" => Arc::new(MassiveProvider),
+        "sample" => Arc::new(SampleProvider),
         other => {
             eprintln!("[provider] unknown DATA_PROVIDER={other:?}; falling back to massive");
             Arc::new(MassiveProvider)
