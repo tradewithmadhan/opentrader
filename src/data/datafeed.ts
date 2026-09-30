@@ -219,12 +219,13 @@ export type SymbolInfo = {
 };
 
 /** Resolve a symbol (bare ticker or "EXCHANGE:TICKER") to its display metadata
- *  via the backend reference lookup. The normalized place to turn a user's
- *  symbol into exchange/description/currency. */
+ *  via the backend reference lookup. An explicitly qualified venue wins (the
+ *  user picked it); otherwise the provider reference decides (it maps raw
+ *  exchange codes to display names). */
 export async function resolveSymbol(symbol: string): Promise<SymbolInfo> {
   const { exchange, ticker } = splitSymbol(symbol);
   const info = await getTickerInfo(ticker);
-  const ex = exchangeName(info.exchange) || exchange;
+  const ex = symbol.includes(":") ? exchange : exchangeName(info.exchange) || exchange;
   return {
     exchange: ex,
     ticker,
@@ -294,6 +295,7 @@ export type SessionId = "RTH" | "ETH";
 // transport default before caps arrive. This is what makes RTH filtering
 // follow the feed's exchange (US vs NSE) instead of assuming US hours.
 import type { MarketSessionDef } from "./sources/types";
+import { bareSymbol } from "./sources/types";
 export type { MarketSessionDef } from "./sources/types";
 function activeSession(): MarketSessionDef {
   const capsSession = providerCapabilities()?.session;
@@ -667,7 +669,9 @@ export async function subscribeBars(
 ): Promise<UnlistenFn> {
   const isCharted = (s: string) => {
     const sym = getSymbol();
-    return !!sym && s.toUpperCase() === sym.toUpperCase();
+    // Bare-to-bare: the backend emits bare tickers while panes may carry a
+    // venue qualifier ("BSE:RELIANCE").
+    return !!sym && bareSymbol(s).toUpperCase() === bareSymbol(sym).toUpperCase();
   };
   const [offMinute, offSecond] = await Promise.all([
     onChartAggregate((tick) => {

@@ -36,6 +36,15 @@ export type SourceSeeds = {
   watchlistGroups: { name: string; tickers: string[] }[];
 };
 
+/** Bare ticker from a possibly qualified `"EXCHANGE:TICKER"` (or comma-list
+ *  head) symbol. The single canonical strip: backend calls need bare tickers
+ *  while panes/rows stay qualified for display. Dependency-free by design so
+ *  any layer (including `sources/tauri.ts`, which must not import `datafeed`)
+ *  can use it without a cycle. */
+export function bareSymbol(s: string): string {
+  return s.split(",")[0].trim().split(":").pop() ?? s;
+}
+
 export interface DataSource {
   /** Stable id — matches the backend `DataProvider::name()` / frontend
    *  adapter key (`massive`, `sample`, …). */

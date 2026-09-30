@@ -16,6 +16,7 @@
 import { createRoot, createEffect } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import * as kv from "./kv";
+import { bareSymbol } from "./sources/types";
 
 /** A side of the condition. Price = the symbol's last/close; value = a fixed
  *  number; drawing = a chart drawing's price level (horizontal line/ray, trend
@@ -181,12 +182,13 @@ export const alertStore = {
   },
   enabledRules: (): AlertRule[] => state.rules.filter((r) => r.enabled),
 
-  /** Create a rule and return its id. */
+  /** Create a rule and return its id. Symbols normalize to bare tickers:
+   *  ticks arrive bare from every transport, so matching stays exact. */
   add(rule: NewAlertRule): string {
     const id = uid("al");
     const full: AlertRule = {
       ...rule,
-      symbol: rule.symbol.toUpperCase(),
+      symbol: bareSymbol(rule.symbol).toUpperCase(),
       enabled: rule.enabled ?? true,
       id,
       createdAt: Date.now(),
@@ -195,10 +197,11 @@ export const alertStore = {
     return id;
   },
 
-  /** Patch an existing rule in place. */
+  /** Patch an existing rule in place (symbol patches normalize like `add`). */
   update(id: string, patch: Partial<Omit<AlertRule, "id">>): void {
     const i = state.rules.findIndex((r) => r.id === id);
     if (i < 0) return;
+    if (patch.symbol !== undefined) patch = { ...patch, symbol: bareSymbol(patch.symbol).toUpperCase() };
     setState("rules", i, produce((r: AlertRule) => Object.assign(r, patch)));
   },
 

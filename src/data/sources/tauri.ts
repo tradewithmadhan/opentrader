@@ -12,6 +12,7 @@ import { commands, events, type Candle, type ProviderCapabilities } from "../../
 import type { ChartAggregate, SecondAggregate, TradeTick } from "../datafeed-live";
 import type { NewsItem, Snapshot, TickerInfo } from "../datafeed-rest";
 import type { DataSource, MarketSessionDef, SourceSeeds } from "./types";
+import { bareSymbol } from "./types";
 
 function unwrap<T>(res: { status: "ok"; data: T } | { status: "error"; error: string }): T {
   if (res.status === "error") throw new Error(res.error);
@@ -49,16 +50,16 @@ export const tauriSource: DataSource = {
 
   // ── History ────────────────────────────────────────────────────
   async dailyAggs(symbol: string, days: number, adjusted: boolean): Promise<Candle[]> {
-    return unwrap(await commands.getDailyHistory(symbol, days, adjusted));
+    return unwrap(await commands.getDailyHistory(bareSymbol(symbol), days, adjusted));
   },
   async minuteAggs(symbol: string, days: number, intervalMin: number, adjusted: boolean): Promise<Candle[]> {
-    return unwrap(await commands.getMinuteHistory(symbol, days, intervalMin, adjusted));
+    return unwrap(await commands.getMinuteHistory(bareSymbol(symbol), days, intervalMin, adjusted));
   },
   async secondAggs(symbol: string, mult: number, days: number, adjusted: boolean): Promise<Candle[]> {
-    return invoke<Candle[]>("get_second_history", { symbol, mult, days, adjusted });
+    return invoke<Candle[]>("get_second_history", { symbol: bareSymbol(symbol), mult, days, adjusted });
   },
   async secondTail(symbol: string, mult: number, sinceSec: number, adjusted: boolean): Promise<Candle[]> {
-    return invoke<Candle[]>("get_second_history_tail", { symbol, mult, sinceSec, adjusted });
+    return invoke<Candle[]>("get_second_history_tail", { symbol: bareSymbol(symbol), mult, sinceSec, adjusted });
   },
   async aggregatesBefore(
     symbol: string,
@@ -69,7 +70,7 @@ export const tauriSource: DataSource = {
     adjusted: boolean,
   ): Promise<Candle[]> {
     return invoke<Candle[]>("get_aggregates_before", {
-      symbol,
+      symbol: bareSymbol(symbol),
       timespan,
       mult,
       beforeSec,
@@ -83,32 +84,37 @@ export const tauriSource: DataSource = {
     spanDays: number,
     adjusted: boolean,
   ): Promise<Candle[]> {
-    return invoke<Candle[]>("get_daily_history_before", { symbol, beforeSec, spanDays, adjusted });
+    return invoke<Candle[]>("get_daily_history_before", {
+      symbol: bareSymbol(symbol),
+      beforeSec,
+      spanDays,
+      adjusted,
+    });
   },
 
   // ── Reference ──────────────────────────────────────────────────
   async tickerInfo(symbol: string): Promise<TickerInfo> {
-    return invoke<TickerInfo>("get_ticker_info", { symbol });
+    return invoke<TickerInfo>("get_ticker_info", { symbol: bareSymbol(symbol) });
   },
   async tickerSnapshot(symbol: string): Promise<Snapshot> {
-    return invoke<Snapshot>("get_ticker_snapshot", { symbol });
+    return invoke<Snapshot>("get_ticker_snapshot", { symbol: bareSymbol(symbol) });
   },
   async search(query: string, type: string | null) {
     return unwrap(await commands.searchTickers(query, type));
   },
   async dividends(symbol: string) {
-    return unwrap(await commands.getDividends(symbol));
+    return unwrap(await commands.getDividends(bareSymbol(symbol)));
   },
   async splits(symbol: string) {
-    return unwrap(await commands.getSplits(symbol));
+    return unwrap(await commands.getSplits(bareSymbol(symbol)));
   },
   async latestNews(symbol: string, limit: number): Promise<NewsItem[]> {
-    return invoke<NewsItem[]>("get_latest_news", { symbol, limit });
+    return invoke<NewsItem[]>("get_latest_news", { symbol: bareSymbol(symbol), limit });
   },
 
   // ── Live ───────────────────────────────────────────────────────
   async setChartSubscription(symbol: string | null, pane = "0"): Promise<void> {
-    await invoke("set_chart_subscription", { pane, symbol });
+    await invoke("set_chart_subscription", { pane, symbol: symbol == null ? null : bareSymbol(symbol) });
   },
   async setWatchlistSubscription(symbols: string[]): Promise<void> {
     await invoke("set_watchlist_subscription", { symbols });

@@ -1087,19 +1087,17 @@ function App() {
   }
 
   function onSymbolPicked(symbolName: string) {
-    const ticker = symbolName.includes(":")
-      ? symbolName.split(":").pop()!
-      : symbolName;
+    // Compare overlay keeps the bare ticker (backend snapshot endpoints need
+    // it — see sources/tauri.ts); the charted pane keeps the full
+    // "EXCHANGE:TICKER" so the venue survives in legend, titles and links.
     if (compareMode()) {
-      // Add (or, if already compared, remove) the symbol's overlay on the
-      // focused pane. The dialog closes after the pick (its commit closes it),
-      // so it's one symbol per "Compare symbols" press — re-open to add more.
+      const ticker = symbolName.includes(":") ? symbolName.split(":").pop()! : symbolName;
       toggleCompareSymbol(ticker);
       setCompareMode(false);
       setSymbolDialogOpen(false);
       return;
     }
-    setSymbol(ticker);
+    setSymbol(symbolName);
     setSymbolDialogOpen(false);
   }
 
