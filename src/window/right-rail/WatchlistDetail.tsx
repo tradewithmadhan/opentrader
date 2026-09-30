@@ -165,6 +165,9 @@ function loadNotes(): Record<string, string> {
 
 export function WatchlistDetail(props: Props) {
   const short = () => shortFromSymbol(props.activeSymbol);
+  /** Full venue-qualified symbol for data fetches (info/snapshot/bars split
+   *  the venue back out); display + notes stay on the bare short. */
+  const full = () => (props.activeSymbol ?? "").toUpperCase();
 
   // Header-button state: persisted prefs + per-symbol notes, and which header
   // popover (if any) is open.
@@ -238,7 +241,7 @@ export function WatchlistDetail(props: Props) {
   // Fast path: reference info + live snapshot, in parallel — these populate the
   // header, price, company, range and key-stats almost immediately. (An empty
   // `short` is falsy, so the resource simply doesn't fetch.)
-  const [quote] = createResource<QuoteData, string>(short, async (sym) => {
+  const [quote] = createResource<QuoteData, string>(full, async (sym) => {
     const [info, snap] = await Promise.allSettled([
       getTickerInfo(sym),
       getTickerSnapshot(sym),
@@ -252,7 +255,7 @@ export function WatchlistDetail(props: Props) {
   // Slow path: a separate resource for the 52w range / performance / avg volume
   // derived from daily candles (S3 flat files — cold-cache slow). Kept apart so
   // the rest of the panel never waits on it; these fields fill in when it lands.
-  const [yr] = createResource<YearRange | null, string>(short, async (sym) => {
+  const [yr] = createResource<YearRange | null, string>(full, async (sym) => {
     try {
       const { bars } = await getBars(sym, "1D");
       return computeYearRange(bars);
