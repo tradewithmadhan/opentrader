@@ -210,7 +210,7 @@ function fire(rule: AlertRule, ctx: EvalContext, barRefMs: number): void {
     // tauri.localhost, so most receivers reject its CORS preflight. Plain fetch
     // covers the browser / headless-verify harness (which stubs invoke).
     if (HAS_TAURI) {
-      void commands.postWebhook(webhookUrl, payload).then((r) => {
+      void commands.postWebhook(webhookUrl, payload).then((r: { status: string; error?: string }) => {
         if (r.status === "error") console.warn("[alerts] webhook post failed", r.error);
       });
     } else {

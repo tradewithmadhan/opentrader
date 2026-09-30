@@ -8,6 +8,7 @@
  * feed replaces the values.
  */
 import type { IconName } from '../components/Icon';
+import { source } from './sources';
 
 export type Row = {
   ticker: string;
@@ -74,33 +75,20 @@ export const HEADER_ITEMS: HeaderItem[] = [
   }
 ];
 
-// Default watchlist for a new profile (the "Watchlist" list): broad index
-// ETFs and large caps. Quote fields are placeholders; the live feed fills
-// them in. The flat ROWS export below drives the quote subscription and any
-// section-agnostic consumer.
-export const GROUPS: Group[] = [
-  {
-    name: "INDEX",
-    rows: [
-      { ticker: "AMEX:SPY", short: "SPY", last: "—", changePercent: "", prePostChange: "" },
-      { ticker: "NASDAQ:QQQ", short: "QQQ", last: "—", changePercent: "", prePostChange: "" },
-      { ticker: "AMEX:DIA", short: "DIA", last: "—", changePercent: "", prePostChange: "" },
-      { ticker: "AMEX:IWM", short: "IWM", last: "—", changePercent: "", prePostChange: "" },
-    ],
-  },
-  {
-    name: "LARGE CAPS",
-    rows: [
-      { ticker: "NASDAQ:AAPL", short: "AAPL", last: "—", changePercent: "", prePostChange: "" },
-      { ticker: "NASDAQ:MSFT", short: "MSFT", last: "—", changePercent: "", prePostChange: "" },
-      { ticker: "NASDAQ:NVDA", short: "NVDA", last: "—", changePercent: "", prePostChange: "" },
-      { ticker: "NASDAQ:AMZN", short: "AMZN", last: "—", changePercent: "", prePostChange: "" },
-      { ticker: "NASDAQ:GOOGL", short: "GOOGL", last: "—", changePercent: "", prePostChange: "" },
-      { ticker: "NASDAQ:META", short: "META", last: "—", changePercent: "", prePostChange: "" },
-      { ticker: "NASDAQ:TSLA", short: "TSLA", last: "—", changePercent: "", prePostChange: "" },
-    ],
-  },
-];
+// Default watchlist for a new profile, from the active source's seeds (NSE/BSE
+// blue-chips in sample mode, US index ETFs + large caps in the shell). Quote
+// fields are placeholders; the live feed fills them in. The flat ROWS export
+// below drives the quote subscription and any section-agnostic consumer.
+export const GROUPS: Group[] = source().seeds().watchlistGroups.map((g) => ({
+  name: g.name,
+  rows: g.tickers.map((ticker) => ({
+    ticker,
+    short: ticker.split(":").pop() ?? ticker,
+    last: "—",
+    changePercent: "",
+    prePostChange: "",
+  })),
+}));
 
 /** Flat list of every row across all groups — drives the Massive snapshot
  *  subscription and any consumer that doesn't care about sections. */

@@ -1,20 +1,18 @@
 /*
  * Datafeed live-tick subscription helpers — Feature 9.
  *
- * Thin typed wrappers over the Tauri invoke + event APIs. Vendor-neutral: the
- * backend's active provider owns the live transport (REST poll vs WebSocket) and
- * emits these events. Intentionally hand-written (parallel to bindings.ts) so
- * the frontend can wire to the Rust live task before `bindings.ts` regenerates
- * on the next debug-build run. Once tauri-specta regenerates, these wrappers
- * remain valid — they just duplicate names the generator also produces.
+ * Thin typed wrappers over the active `DataSource` (see `sources/`): which
+ * backend serves a call — Tauri IPC or the sample engine — is the selector's
+ * concern. Intentionally hand-written (parallel to bindings.ts) so the
+ * frontend can wire to the live task before `bindings.ts` regenerates.
  *
  * Event-name convention (`tauri_specta::Event`): struct name → kebab-case
  *   ChartAggregate  → "chart-aggregate"
  *   SecondAggregate → "second-aggregate"
  *   TradeTick       → "trade-tick"
  */
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import { source } from "./sources";
 
 export type ChartAggregate = {
   symbol: string;
@@ -73,7 +71,7 @@ export type TradeTick = {
  *  it "<window>:<pane>"), so multi-pane layouts each hold their own symbol
  *  instead of overwriting a single global slot. */
 export async function setChartSubscription(symbol: string | null, pane = "0"): Promise<void> {
-  await invoke("set_chart_subscription", { pane, symbol });
+  await source().setChartSubscription(symbol, pane);
 }
 
 /** Replace THIS WINDOW's watchlist subscription with this exact set. Several
@@ -81,21 +79,21 @@ export async function setChartSubscription(symbol: string | null, pane = "0"): P
  *  tab titles — see data/subscriptions.ts); the backend merges the per-window
  *  sets, so another window's union can't clobber this one. */
 export async function setWatchlistSubscription(symbols: string[]): Promise<void> {
-  await invoke("set_watchlist_subscription", { symbols });
+  await source().setWatchlistSubscription(symbols);
 }
 
 export function onChartAggregate(
   fn: (ev: ChartAggregate) => void,
 ): Promise<UnlistenFn> {
-  return listen<ChartAggregate>("chart-aggregate", (e) => fn(e.payload));
+  return source().onChartAggregate(fn);
 }
 
 export function onSecondAggregate(
   fn: (ev: SecondAggregate) => void,
 ): Promise<UnlistenFn> {
-  return listen<SecondAggregate>("second-aggregate", (e) => fn(e.payload));
+  return source().onSecondAggregate(fn);
 }
 
 export function onTradeTick(fn: (ev: TradeTick) => void): Promise<UnlistenFn> {
-  return listen<TradeTick>("trade-tick", (e) => fn(e.payload));
+  return source().onTradeTick(fn);
 }

@@ -3197,7 +3197,7 @@ export function ChartView(props: Props) {
       const ticker = splitSymbol(props.symbol ?? "").ticker || "chart";
       if (action === "open") {
         const b64 = canvas.toDataURL("image/png").split(",")[1] ?? "";
-        void commands.openSnapshot(b64).then((r) => {
+        void commands.openSnapshot(b64).then((r: { status: string; error?: string }) => {
           if (r.status === "error") console.warn("[snapshot] open failed:", r.error);
         });
         return;

@@ -9,7 +9,8 @@
  * the gates then fall back to the datafeed's own tables.
  */
 import { createSignal } from "solid-js";
-import { commands, events, type ProviderCapabilities } from "../../bindings";
+import type { ProviderCapabilities } from "../../bindings";
+import { source } from "../sources";
 
 const [caps, setCaps] = createSignal<ProviderCapabilities | null>(null);
 
@@ -38,18 +39,25 @@ export function providerServes(kind: BarKind, mult = 1): boolean {
 }
 
 async function sync(): Promise<void> {
+  // The active source owns both halves: static caps (sample) or a live fetch
+  // plus a push subscription (Tauri entitlement probe). Listen first so a
+  // change emitted during the initial fetch is not lost; an event is always
+  // newer than the fetch reply, so it wins.
+  const s = source();
+  let pushed = false;
   try {
-    // Listen first so a change emitted during the initial fetch is not lost;
-    // an event is always newer than the fetch reply, so it wins.
-    let pushed = false;
-    await events.providerCapabilities.listen((e) => {
+    await s.watchCapabilities((c) => {
       pushed = true;
-      setCaps(e.payload);
+      setCaps(c);
     });
-    const initial = await commands.getProviderCapabilities();
-    if (!pushed) setCaps(initial);
   } catch {
-    // No Tauri backend (browser/offline dev): keep null, gates fall back.
+    // Static source (no pushes) — fall through to the fetch below.
+  }
+  try {
+    const initial = await s.capabilities();
+    if (!pushed && initial) setCaps(initial);
+  } catch {
+    // No backend (browser/offline dev): keep null, gates fall back.
   }
 }
 

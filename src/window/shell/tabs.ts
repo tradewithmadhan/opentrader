@@ -16,6 +16,7 @@ import { linkGroup, setLinkGroup } from "../../data/link-groups";
 import { defaultLayoutSync, reviveLayoutSync, type LayoutSyncState } from "../chart/layout-sync";
 import { cloneDraft, loadChartSettingsDefaults, reviveDraft, SETTINGS_FINGERPRINT, SETTINGS_REV, type Draft } from "../header/chart-settings";
 import type { SessionId } from "../../data/datafeed";
+import { source } from "../../data/sources";
 import type { IndicatorStyleOverrides } from "../chart/indicators/indicator-layer";
 import type { IndicatorOptions } from "../chart/indicators/indicator-options";
 
@@ -161,10 +162,14 @@ type MakeTabPartial = Partial<PaneChart> & { layout?: LayoutId; isChart?: boolea
  *  own saved list. */
 export const DEFAULT_INDICATORS: string[] = ["colored-volume"];
 
+/** Fresh-pane symbol fallback — from the active source's seeds (NSE blue-chip
+ *  in sample mode, US default in the shell). */
+export const defaultSymbol = (): string => source().seeds().defaultSymbol;
+
 export function makeTab(partial: MakeTabPartial = {}): TabChart {
   const { layout = DEFAULT_LAYOUT, isChart = true, ...pane } = partial;
   const base: Omit<PaneChart, "id"> = {
-    symbol: pane.symbol ?? "INTC",
+    symbol: pane.symbol ?? defaultSymbol(),
     interval: pane.interval ?? "1D",
     chartType: pane.chartType ?? DEFAULT_CHART_TYPE,
     session: pane.session ?? "RTH",
@@ -197,7 +202,7 @@ export function migrateTab(raw: any): TabChart {
   if (Array.isArray(raw?.panes) && raw.panes.length > 0) {
     panes = raw.panes.map((p: Partial<PaneChart>) => ({
       id: typeof p.id === "string" ? p.id : newPaneId(),
-      symbol: p.symbol ?? "INTC",
+      symbol: p.symbol ?? defaultSymbol(),
       interval: p.interval ?? "1D",
       chartType: p.chartType ?? DEFAULT_CHART_TYPE,
       session: p.session ?? "RTH",
@@ -216,7 +221,7 @@ export function migrateTab(raw: any): TabChart {
   } else {
     const base: PaneChart = {
       id: newPaneId(),
-      symbol: raw?.symbol ?? "INTC",
+      symbol: raw?.symbol ?? defaultSymbol(),
       interval: raw?.interval ?? "1D",
       chartType: raw?.chartType ?? DEFAULT_CHART_TYPE,
       session: raw?.session ?? "RTH",
@@ -296,10 +301,11 @@ function bumpSeqPast(id: string): void {
 /**
  * Load this window's tabs. `seed` (a tab handed off by a detach) wins — a
  * detached window opens showing only that one tab. Otherwise restore the
- * label-scoped persisted set, falling back to the default three on the main
- * window's first run.
+ * label-scoped persisted set, falling back to the defaults on the main
+ * window's first run. `singleView` (browser shell) seeds one tab instead of
+ * the starter set — tabs are a desktop windowing concept.
  */
-export function loadTabs(label: string, seed?: TabChart | null): Persisted {
+export function loadTabs(label: string, seed?: TabChart | null, singleView = false): Persisted {
   if (seed) {
     const tab = migrateTab(seed);
     bumpSeqPast(tab.id);
@@ -322,15 +328,15 @@ export function loadTabs(label: string, seed?: TabChart | null): Persisted {
   } catch {
     /* malformed / unavailable — fall through to defaults */
   }
-  // Detached windows that lost their handoff shouldn't resurrect the default
-  // three; only the main window seeds the starter set.
+  // Detached windows that lost their handoff shouldn't resurrect the defaults;
+  // only the main window seeds the starter set (from the active source) —
+  // or a single tab in single-view (browser) mode.
+  const seeds = source().seeds().starterTabs;
   const tabs =
     label === "main"
-      ? [
-          makeTab({ symbol: "INTC", interval: "1D" }),
-          makeTab({ symbol: "AAPL", interval: "60" }),
-          makeTab({ symbol: "TSLA", interval: "240" }),
-        ]
+      ? (singleView && seeds.length > 0 ? [seeds[0]] : seeds).map((s) =>
+          makeTab({ symbol: s.symbol, interval: s.interval }),
+        )
       : [makeTab()];
   return { tabs, activeId: tabs[0].id };
 }

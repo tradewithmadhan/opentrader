@@ -27,7 +27,7 @@ let started = false;
 export function initAppUpdate(): void {
   if (started || !isTauri()) return;
   started = true;
-  void events.appUpdateStatus.listen((e) => setStatus(e.payload));
+  void events.appUpdateStatus.listen((e: { payload: AppUpdateStatus }) => setStatus(e.payload));
   void commands.appUpdateStatus().then(setStatus);
   // Before the installer runs: write this window's pending settings, then confirm.
   void events.appUpdateBeforeInstall.listen(() => {
@@ -43,7 +43,7 @@ export function checkForUpdates(): void {
 /** "Relaunch to update": save, install, restart. */
 export function installUpdate(): void {
   if (!isTauri()) return;
-  void commands.appUpdateInstall().then((r) => {
+  void commands.appUpdateInstall().then((r: { status: string; error?: string }) => {
     if (r.status === "error") console.error("[app-update] install failed", r.error);
   });
 }

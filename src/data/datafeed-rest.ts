@@ -1,13 +1,12 @@
 /*
- * Datafeed REST wrappers — typed `invoke()` shims over the backend history and
- * reference commands (aggregates, scroll-back pagers, ticker info/snapshot).
- * Vendor-neutral: which provider serves a call is the backend's concern (see
- * `data/provider`). Hand-written (parallel to bindings.ts) so the chart can wire
- * new commands before bindings.ts regenerates on the next debug-build run; once
- * tauri-specta regenerates, these wrappers stay valid alongside it.
+ * Datafeed REST wrappers — typed shims over the active `DataSource` (see
+ * `sources/`): history/scroll-back pagers plus ticker info/snapshot. Which
+ * source serves a call is the selector's concern. Hand-written (parallel to
+ * bindings.ts) so the chart can wire new commands before bindings.ts
+ * regenerates on the next debug-build run.
  */
-import { invoke } from "@tauri-apps/api/core";
 import type { Candle } from "../bindings";
+import { source } from "./sources";
 
 /** Fetch `mult`-second OHLC bars for `symbol` over the trailing `days`.
  *  Throws on backend error (the caller wraps in try/catch). */
@@ -17,7 +16,7 @@ export async function getSecondHistory(
   days: number,
   adjusted = true,
 ): Promise<Candle[]> {
-  return invoke<Candle[]>("get_second_history", { symbol, mult, days, adjusted });
+  return source().secondAggs(symbol, mult, days, adjusted);
 }
 
 /** Live-tail refresh for the seconds frames: `mult`-second bars strictly newer
@@ -29,7 +28,7 @@ export async function getSecondHistoryTail(
   sinceSec: number,
   adjusted = true,
 ): Promise<Candle[]> {
-  return invoke<Candle[]>("get_second_history_tail", { symbol, mult, sinceSec, adjusted });
+  return source().secondTail(symbol, mult, sinceSec, adjusted);
 }
 
 /** Scroll-back pager for the REST frames (seconds + minutes): one older window
@@ -44,14 +43,7 @@ export async function getAggregatesBefore(
   spanDays: number,
   adjusted = true,
 ): Promise<Candle[]> {
-  return invoke<Candle[]>("get_aggregates_before", {
-    symbol,
-    timespan,
-    mult,
-    beforeSec,
-    spanDays,
-    adjusted,
-  });
+  return source().aggregatesBefore(symbol, timespan, mult, beforeSec, spanDays, adjusted);
 }
 
 /** Scroll-back pager for the daily family (1D/1W/1M): older daily candles
@@ -64,7 +56,7 @@ export async function getDailyHistoryBefore(
   spanDays: number,
   adjusted = true,
 ): Promise<Candle[]> {
-  return invoke<Candle[]>("get_daily_history_before", { symbol, beforeSec, spanDays, adjusted });
+  return source().dailyBefore(symbol, beforeSec, spanDays, adjusted);
 }
 
 // ── WatchlistDetail data (Feature 6a) ────────────────────────────────────
@@ -100,11 +92,11 @@ export type Snapshot = {
 };
 
 export async function getTickerInfo(symbol: string): Promise<TickerInfo> {
-  return invoke<TickerInfo>("get_ticker_info", { symbol });
+  return source().tickerInfo(symbol);
 }
 
 export async function getTickerSnapshot(symbol: string): Promise<Snapshot> {
-  return invoke<Snapshot>("get_ticker_snapshot", { symbol });
+  return source().tickerSnapshot(symbol);
 }
 
 /** One headline for the chart's "Latest news" lollipop (newest first). */
@@ -120,5 +112,5 @@ export type NewsItem = {
 
 /** Newest `limit` headlines tagged with `symbol`; `[]` on backend failure. */
 export async function getLatestNews(symbol: string, limit = 1): Promise<NewsItem[]> {
-  return invoke<NewsItem[]>("get_latest_news", { symbol, limit });
+  return source().latestNews(symbol, limit);
 }

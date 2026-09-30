@@ -17,6 +17,8 @@ import { commands } from "../../bindings";
 import type { SymbolSearchResult } from "../../bindings";
 import type { SymbolRow, TypeFilter } from "../symbol-search";
 import { massive } from "./massive";
+import { sample } from "./sample";
+import { source } from "../sources";
 
 /** The vendor-specific presentation an adapter must provide. */
 export interface FrontendProvider {
@@ -34,10 +36,11 @@ export interface FrontendProvider {
 
 /** Frontend adapters keyed by provider name. Add a sibling adapter + entry here
  *  when the backend gains a new provider. */
-const REGISTRY: Record<string, FrontendProvider> = { massive };
+const REGISTRY: Record<string, FrontendProvider> = { massive, sample };
 
-/** Currently active adapter — the bundled default until `syncProvider()` runs. */
-let active: FrontendProvider = massive;
+/** Currently active adapter — selected from the active data source's name
+ *  (`sources/`), refined by `syncProvider()` once the backend answers. */
+let active: FrontendProvider = REGISTRY[source().name] ?? massive;
 
 /** The active adapter object (use when you need the whole adapter). */
 export function activeProvider(): FrontendProvider {

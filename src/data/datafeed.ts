@@ -17,7 +17,8 @@
  * Time is UNIX seconds everywhere (lightweight-charts UTCTimestamp), matching
  * the backend `Candle.time`.
  */
-import { commands, type Candle, type SymbolSearchResult } from "../bindings";
+import type { Candle, DividendEvent, SplitEvent, SymbolSearchResult } from "../bindings";
+import { source } from "./sources";
 import {
   getSecondHistory,
   getSecondHistoryTail,
@@ -233,18 +234,20 @@ export async function resolveSymbol(symbol: string): Promise<SymbolInfo> {
   };
 }
 
-/** Symbol typeahead via the backend symbol search. `type` is an optional
- *  vendor security-type filter (e.g. Massive's "CS", "ETF"; null = all types).
- *  Returns raw reference results; presentation/ranking into dialog rows stays in
- *  symbol-search.ts (liveResultsToRows). Throws on backend error so the caller
- *  can fall back to its static catalogue. */
+// Backend entry point: every method below delegates to the active `DataSource`
+// (see `sources/`) — Tauri commands in the shell, the sample feed in a plain
+// browser. Call sites never branch on the source.
+
+/** Symbol typeahead via the active source's symbol search. `type` is an
+ *  optional vendor security-type filter (e.g. Massive's "CS", "ETF"; null =
+ *  all types). Returns raw reference results; presentation/ranking into dialog
+ *  rows stays in symbol-search.ts (liveResultsToRows). Throws on source error
+ *  so the caller can fall back to its static catalogue. */
 export async function searchSymbols(
   query: string,
   type: string | null,
 ): Promise<SymbolSearchResult[]> {
-  const res = await commands.searchTickers(query, type);
-  if (res.status === "error") throw new Error(res.error);
-  return res.data;
+  return source().search(query, type);
 }
 
 // ── Chart events (Events tab: Dividends / Splits) ────────────────────────────
@@ -257,19 +260,15 @@ export type ChartEvent = { time: number; kind: "dividend" | "split"; label: stri
  *  endpoint contributes nothing rather than throwing (events are decorative). */
 export async function getEvents(symbol: string): Promise<ChartEvent[]> {
   const [divs, splits] = await Promise.all([
-    commands.getDividends(symbol),
-    commands.getSplits(symbol),
+    source().dividends(symbol).catch((): DividendEvent[] => []),
+    source().splits(symbol).catch((): SplitEvent[] => []),
   ]);
   const out: ChartEvent[] = [];
-  if (divs.status === "ok") {
-    for (const d of divs.data) {
-      if (d.date != null) out.push({ time: d.date, kind: "dividend", label: (d.amount ?? 0).toFixed(2) });
-    }
+  for (const d of divs) {
+    if (d.date != null) out.push({ time: d.date, kind: "dividend", label: (d.amount ?? 0).toFixed(2) });
   }
-  if (splits.status === "ok") {
-    for (const s of splits.data) {
-      if (s.date != null) out.push({ time: s.date, kind: "split", label: `${s.to ?? 1}:${s.from ?? 1}` });
-    }
+  for (const s of splits) {
+    if (s.date != null) out.push({ time: s.date, kind: "split", label: `${s.to ?? 1}:${s.from ?? 1}` });
   }
   out.sort((a, b) => a.time - b.time);
   return out;
@@ -282,30 +281,45 @@ export async function getEvents(symbol: string): Promise<ChartEvent[]> {
 // session logic, not vendor-specific):
 //   • ETH → bars as-is (midnight-aligned hour buckets already break at 04:00,
 //     the extended-session open).
-//   • RTH → keep only 09:30–16:00 ET. For seconds + 1/5/15/30-min that's an
-//     exact filter (09:30 is already a bucket edge). For 1H/2H/4H the hour
-//     buckets straddle the open (the 09:00 bar mixes premarket + open), so we
-//     fetch a 30-min base, filter, and re-aggregate anchored at 09:30.
+//   • RTH → keep only the session window (US 09:30–16:00 ET, NSE 09:15–15:30
+//     IST — see activeSession). For seconds + 1/5/15/30-min that's an
+//     exact filter (the open is already a bucket edge). For 1H/2H/4H the hour
+//     buckets straddle the open, so we
+//     fetch a 30-min base, filter, and re-aggregate anchored at the open.
 
 export type SessionId = "RTH" | "ETH";
 
-/** Regular US-equity session, defined in EXCHANGE-local time (independent of the
- *  chart's display timezone): 09:30–16:00 America/New_York. */
-const RTH_TZ = "America/New_York";
-const RTH_OPEN_MIN = 9 * 60 + 30; // 570
-const RTH_CLOSE_MIN = 16 * 60; // 960
+// Session descriptor lives with the active source (see `sources/types.ts`):
+// the feed reads the exchange session from the socket instead of branching.
+import type { MarketSessionDef } from "./sources/types";
+export type { MarketSessionDef } from "./sources/types";
+function activeSession(): MarketSessionDef {
+  return source().session();
+}
 
-// Reused formatters (DST-correct): a bar's UNIX seconds → ET time-of-day / date.
-const etTimeFmt = new Intl.DateTimeFormat("en-US", {
-  timeZone: RTH_TZ, hour12: false, hour: "2-digit", minute: "2-digit",
-});
-const etDateFmt = new Intl.DateTimeFormat("en-CA", {
-  timeZone: RTH_TZ, year: "numeric", month: "2-digit", day: "2-digit",
-});
+// Reused formatters, cached per timezone (DST-correct): a bar's UNIX seconds →
+// session-local time-of-day / date.
+const fmtCache = new Map<string, Intl.DateTimeFormat>();
+function timeFmt(tz: string): Intl.DateTimeFormat {
+  let f = fmtCache.get(`t:${tz}`);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour12: false, hour: "2-digit", minute: "2-digit" });
+    fmtCache.set(`t:${tz}`, f);
+  }
+  return f;
+}
+function dateFmt(tz: string): Intl.DateTimeFormat {
+  let f = fmtCache.get(`d:${tz}`);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+    fmtCache.set(`d:${tz}`, f);
+  }
+  return f;
+}
 
-/** Minutes since ET midnight for a bar time (UNIX seconds). */
-function etMinutes(timeSec: number): number {
-  const parts = etTimeFmt.formatToParts(new Date(timeSec * 1000));
+/** Minutes since session-local midnight for a bar time (UNIX seconds). */
+function sessMinutes(tz: string, timeSec: number): number {
+  const parts = timeFmt(tz).formatToParts(new Date(timeSec * 1000));
   let h = 0, m = 0;
   for (const p of parts) {
     if (p.type === "hour") h = +p.value;
@@ -315,32 +329,35 @@ function etMinutes(timeSec: number): number {
   return h * 60 + m;
 }
 
-/** True when a bar's ET time-of-day falls in the regular 09:30–16:00 window. */
+/** True when a bar's session-local time-of-day falls in the regular window. */
 function isRegularHours(timeSec: number): boolean {
-  const min = etMinutes(timeSec);
-  return min >= RTH_OPEN_MIN && min < RTH_CLOSE_MIN;
+  const sess = activeSession();
+  const min = sessMinutes(sess.tz, timeSec);
+  return min >= sess.openMin && min < sess.closeMin;
 }
 
 /** Drop bars outside the regular session (used for the exact-filter family:
- *  seconds + 1/5/15/30-min, whose buckets already break at 09:30). */
+ *  seconds + 1/5/15/30-min, whose buckets already break at the open). */
 function regularHoursOnly(rows: Candle[]): Candle[] {
   return rows.filter((c) => c.time != null && isRegularHours(c.time as number));
 }
 
-/** Aggregate regular-session minute bars (already filtered to 09:30–16:00,
- *  time-ascending, on a granularity that breaks at 09:30 — we use 30-min) into
+/** Aggregate regular-session minute bars (already filtered to the session,
+ *  time-ascending, on a granularity that breaks at the open — we use 30-min) into
  *  `targetMins` buckets ANCHORED AT THE SESSION OPEN. This is how 1H/2H/4H RTH
- *  bars line up at 09:30, 10:30, … (the raw provider bars can't — their hour buckets are
- *  midnight-aligned). The last bucket of a day may be short (15:30–16:00). */
+ *  bars line up at the open, 30 min later, … (the raw provider bars can't —
+ *  their hour buckets are midnight-aligned). The last bucket of a day may be
+ *  short. */
 function aggregateSessionMinutes(rows: Candle[], targetMins: number): Candle[] {
+  const sess = activeSession();
   const out: Candle[] = [];
   let curKey = "";
   let cur: Candle | null = null;
   for (const b of rows) {
     if (b.time == null || b.open == null || b.high == null || b.low == null || b.close == null) continue;
     const t = b.time as number;
-    const day = etDateFmt.format(new Date(t * 1000));
-    const bucket = Math.floor((etMinutes(t) - RTH_OPEN_MIN) / targetMins);
+    const day = dateFmt(sess.tz).format(new Date(t * 1000));
+    const bucket = Math.floor((sessMinutes(sess.tz, t) - sess.openMin) / targetMins);
     const key = `${day}#${bucket}`;
     if (key !== curKey) {
       if (cur) out.push(cur);
@@ -410,27 +427,23 @@ export async function getBars(
   const second = SECOND_INTERVALS[resolution];
   if (second) {
     const bars = await getSecondHistory(symbol, second.mult, second.days, adjusted);
-    // Second buckets always break at 09:30, so an exact filter suffices.
+    // Second buckets always break at the session open, so an exact filter suffices.
     return { bars: regular ? regularHoursOnly(bars) : bars, daily: null, aggregate: null };
   }
   const intra = INTRADAY_INTERVALS[resolution];
   if (intra) {
     // 1H/2H/4H RTH: fetch a 30-min base, filter to the session, re-aggregate
-    // anchored at the open (the raw hour buckets straddle 09:30).
+    // anchored at the open (the raw hour buckets straddle it).
     if (regular && needsSessionReaggregation(intra.mins)) {
-      const res = await commands.getMinuteHistory(symbol, intra.days, 30, adjusted);
-      if (res.status === "error") throw new Error(res.error);
-      const bars = aggregateSessionMinutes(regularHoursOnly(res.data), intra.mins);
+      const base = await source().minuteAggs(symbol, intra.days, 30, adjusted);
+      const bars = aggregateSessionMinutes(regularHoursOnly(base), intra.mins);
       return { bars, daily: null, aggregate: null };
     }
-    const res = await commands.getMinuteHistory(symbol, intra.days, intra.mins, adjusted);
-    if (res.status === "error") throw new Error(res.error);
-    return { bars: regular ? regularHoursOnly(res.data) : res.data, daily: null, aggregate: null };
+    const rows = await source().minuteAggs(symbol, intra.days, intra.mins, adjusted);
+    return { bars: regular ? regularHoursOnly(rows) : rows, daily: null, aggregate: null };
   }
   const cfg = dailyConfig(resolution);
-  const res = await commands.getDailyHistory(symbol, cfg.days, adjusted);
-  if (res.status === "error") throw new Error(res.error);
-  const daily = res.data;
+  const daily = await source().dailyAggs(symbol, cfg.days, adjusted);
   const bars = cfg.aggregate ? aggregateCandles(daily, cfg.aggregate) : daily;
   return { bars, daily, aggregate: cfg.aggregate ?? null };
 }
@@ -513,19 +526,29 @@ export type LiveBar = {
   volumeIsIncrement?: boolean;
 };
 
-/** Midnight ET of the ET calendar date containing `timeSec`, in UNIX seconds —
- *  the timestamp convention of the provider's daily bars (verified: Massive
- *  daily aggs stamp 04:00/05:00 UTC = 00:00 New York). DST-safe: probes the
- *  two possible offsets and keeps the one that formats back to 00:00 on the
- *  same ET date. */
-function etMidnightUtcSec(timeSec: number): number {
-  const dstr = etDateFmt.format(new Date(timeSec * 1000)); // en-CA → YYYY-MM-DD
-  const [y, m, d] = dstr.split("-").map(Number);
-  for (const off of [4, 5]) {
-    const cand = Date.UTC(y, m - 1, d, off) / 1000;
-    if (etMinutes(cand) === 0 && etDateFmt.format(new Date(cand * 1000)) === dstr) return cand;
+/** Midnight (00:00) of the session-local calendar date containing `timeSec`, in
+ *  UNIX seconds — the timestamp convention of the provider's daily bars.
+ *  Offset-safe (whole-hour ET and half-hour IST alike): measures the zone
+ *  offset at local noon, which never falls inside a DST transition. */
+function tzOffsetMinutes(tz: string, utcMs: number): number {
+  const parts = timeFmt(tz).formatToParts(new Date(utcMs));
+  const rec: Record<string, string> = {};
+  for (const p of parts) {
+    if (p.type !== "literal") rec[p.type] = p.value;
   }
-  return Date.UTC(y, m - 1, d, 5) / 1000; // unreachable (EST fallback)
+  const wallAsUtc = Date.UTC(
+    +rec.year, +rec.month - 1, +rec.day,
+    +rec.hour === 24 ? 0 : +rec.hour, +rec.minute,
+  );
+  return Math.round((wallAsUtc - utcMs) / 60000);
+}
+
+function etMidnightUtcSec(timeSec: number): number {
+  const sess = activeSession();
+  const dstr = dateFmt(sess.tz).format(new Date(timeSec * 1000)); // en-CA → YYYY-MM-DD
+  const [y, m, d] = dstr.split("-").map(Number);
+  const offMin = tzOffsetMinutes(sess.tz, Date.UTC(y, m - 1, d, 12));
+  return (Date.UTC(y, m - 1, d, 0, 0, 0) - offMin * 60000) / 1000;
 }
 
 /** Bucket a raw per-minute aggregate tick into a bar for `resolution`. Returns
@@ -576,14 +599,15 @@ export function bucketLiveTick(
   if (regular && !isRegularHours(tick.time)) return null;
   let bucketTime: number;
   if (regular && needsSessionReaggregation(intra.mins)) {
-    // 1H/2H/4H RTH buckets anchor at 09:30, not the UTC hour. Floor to the
-    // minute, then subtract the tick's offset INTO its session bucket (whole
-    // minutes — DST-safe, and matches the minute-aligned historical bars).
+    // 1H/2H/4H RTH buckets anchor at the session open, not the UTC hour. Floor
+    // to the minute, then subtract the tick's offset INTO its session bucket
+    // (whole minutes — DST-safe, and matches the minute-aligned historical bars).
+    const sess = activeSession();
     const tMin = Math.floor(tick.time / 60) * 60;
-    const intoBucket = (((etMinutes(tick.time) - RTH_OPEN_MIN) % intra.mins) + intra.mins) % intra.mins;
+    const intoBucket = (((sessMinutes(sess.tz, tick.time) - sess.openMin) % intra.mins) + intra.mins) % intra.mins;
     bucketTime = tMin - intoBucket * 60;
   } else {
-    // ≤30-min + seconds: midnight/UTC-hour-aligned floor already breaks at 09:30.
+    // ≤30-min: midnight/UTC-hour-aligned floors already break at the open.
     const bucketSecs = intra.mins * 60;
     bucketTime = Math.floor(tick.time / bucketSecs) * bucketSecs;
   }
@@ -599,7 +623,7 @@ export function bucketLiveTick(
 
 /** Bucket a 1-second stream bar into a bar for a second-family `resolution`
  *  (1S…45S). Null for any other family (minute / daily charts stay on the
- *  per-minute aggregates) and, in RTH, outside 09:30–16:00 ET. For buckets
+ *  per-minute aggregates) and, in RTH, outside the session window. For buckets
  *  wider than one second the bar carries `volumeIsIncrement`. */
 export function bucketSecondBar(
   resolution: string,

@@ -39,10 +39,6 @@ function persistTypeCode(code: string | null): void {
   else kv.setItem(TYPE_FILTER_KEY, code);
 }
 
-/** Live search runs only inside the Tauri shell (the Rust command hits
- *  Massive); elsewhere (browser / offline) we fall back to the static list. */
-const HAS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
 type Props = {
   /** Full symbol-name (e.g. "NASDAQ:INTC") of the currently-active chart. */
   activeSymbol?: string;
@@ -137,12 +133,13 @@ export function SymbolSearchDialog(props: Props) {
   let listEl: HTMLDivElement | undefined;
   let typeWrap: HTMLDivElement | undefined;
 
-  // Results: live Massive typeahead inside Tauri (debounced per keystroke),
-  // else the static local filter. `searching` suppresses the empty state while
-  // a request is in flight; the previous rows stay visible (no flicker).
+  // Results: live typeahead against the active source (debounced per keystroke);
+  // the static local filter covers empty queries and failed requests.
+  // `searching` suppresses the empty state while a request is in flight; the
+  // previous rows stay visible (no flicker).
   const [searching, setSearching] = createSignal(false);
   // Raw live results for the CURRENT (query, type). Null → use the static
-  // catalogue (no Tauri, empty query, or a failed request). Kept separate from
+  // catalogue (empty query, or a failed request). Kept separate from
   // the category so a tab switch re-filters instantly via the memo below,
   // instead of firing a fresh debounced request that leaves the previous tab's
   // rows on screen for ~half a second.
@@ -152,7 +149,7 @@ export function SymbolSearchDialog(props: Props) {
   createEffect(() => {
     const q = searchText().trim();
     const type = typeCode();
-    if (!HAS_TAURI || q.length < 1) {
+    if (q.length < 1) {
       reqSeq++; // cancel any in-flight request
       setLiveRaw(null);
       setSearching(false);
@@ -166,7 +163,7 @@ export function SymbolSearchDialog(props: Props) {
         if (reqSeq !== my) return; // a newer keystroke superseded this
         setLiveRaw(data);
       } catch {
-        // command errored / offline / no key → fall back to the static catalogue.
+        // source errored → fall back to the static catalogue.
         if (reqSeq === my) setLiveRaw(null);
       } finally {
         if (reqSeq === my) setSearching(false);
@@ -184,7 +181,7 @@ export function SymbolSearchDialog(props: Props) {
     const cat = category();
     const type = typeCode();
     const raw = liveRaw();
-    if (!HAS_TAURI || q.length < 1 || raw == null) return filterSymbols(cat, q);
+    if (q.length < 1 || raw == null) return filterSymbols(cat, q);
     return liveResultsToRows(raw, type ? "all" : cat, q);
   });
 
