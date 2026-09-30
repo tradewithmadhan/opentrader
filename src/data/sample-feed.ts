@@ -99,6 +99,11 @@ export function sampleCapabilities(): {
   maxBarsPerRequest: number;
   adjustedToggle: boolean;
   extendedHours: boolean;
+  session: {
+    timezone: string;
+    openMin: number;
+    closeMin: number;
+  };
   reference: {
     search: boolean;
     searchTypeFilter: boolean;
@@ -128,6 +133,11 @@ export function sampleCapabilities(): {
     maxBarsPerRequest: 50000,
     adjustedToggle: true,
     extendedHours: true,
+    session: {
+      timezone: "Asia/Kolkata",
+      openMin: 555,
+      closeMin: 930,
+    },
     reference: {
       search: true,
       searchTypeFilter: true,

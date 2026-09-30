@@ -124,7 +124,10 @@
       u32[], minutes: u32[], daily: bool, weekly_monthly_from_daily: bool },
       max_bars_per_request, adjusted_toggle, extended_hours,
       reference: { search, search_type_filter, snapshot, dividends, splits,
-      news, icons }, entitlements: None }` — static, no I/O.
+      news, icons },
+      session: { timezone (IANA), open_min, close_min (minutes since local
+      midnight — drives the frontend RTH filter; NOT the transport default) },
+      entitlements: None }` — static, no I/O.
       The resolution lists must equal the frontend `datafeed.ts` lookback
       tables (enforced by test in the reference impl).
 - [ ] `probe_history() -> HistoryProbe { data_status: Streaming |

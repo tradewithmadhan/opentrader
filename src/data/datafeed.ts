@@ -34,7 +34,7 @@ import {
   type SecondAggregate,
 } from "./datafeed-live";
 import { exchangeName, defaultExchange } from "./providers";
-import { providerServes } from "./providers/capabilities";
+import { providerCapabilities, providerServes } from "./providers/capabilities";
 import { aggregateCandles, bucketStart, type AggregateUnit } from "../window/chart/chart-aggregate";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
@@ -289,11 +289,17 @@ export async function getEvents(symbol: string): Promise<ChartEvent[]> {
 
 export type SessionId = "RTH" | "ETH";
 
-// Session descriptor lives with the active source (see `sources/types.ts`):
-// the feed reads the exchange session from the socket instead of branching.
+// Session descriptor lives with the active provider: prefer its published
+// capabilities (backend truth, works in every shell), falling back to the
+// transport default before caps arrive. This is what makes RTH filtering
+// follow the feed's exchange (US vs NSE) instead of assuming US hours.
 import type { MarketSessionDef } from "./sources/types";
 export type { MarketSessionDef } from "./sources/types";
 function activeSession(): MarketSessionDef {
+  const capsSession = providerCapabilities()?.session;
+  if (capsSession) {
+    return { tz: capsSession.timezone, openMin: capsSession.openMin, closeMin: capsSession.closeMin };
+  }
   return source().session();
 }
 
