@@ -156,6 +156,8 @@ impl DataProvider for MassiveProvider {
                 timezone: "America/New_York".to_string(),
                 open_min: 9 * 60 + 30,
                 close_min: 16 * 60,
+                pre_min: 5 * 60 + 30,
+                post_min: 4 * 60,
             },
             entitlements: None,
         }

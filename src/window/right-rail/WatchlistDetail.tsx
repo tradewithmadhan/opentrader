@@ -24,7 +24,7 @@ import {
 } from "../../data/datafeed";
 import { computeYearRange, type YearRange } from "./ticker-stats";
 import * as kv from "../../data/kv";
-import { usMarketSession, type MarketSession } from "../../data/market-session";
+import { providerMarketSession, type MarketSession } from "../../data/market-session";
 
 const DASH = "—";
 
@@ -298,10 +298,11 @@ export function WatchlistDetail(props: Props) {
     onCleanup(() => window.clearInterval(id));
   });
 
-  // Current US session, from the wall clock (America/New_York), matching the
-  // detail-panel states. Pre/Post render in accent-blue; Open/Closed in grey
-  // ("Post-market" = rgb(41,98,255); "Market closed" = rgb(140,140,140)).
-  const marketSession = (): MarketSession => usMarketSession(now());
+  // Current session of the active provider's market, from the wall clock in
+  // its timezone, matching the detail-panel states. Pre/Post render in
+  // accent-blue; Open/Closed in grey ("Post-market" = rgb(41,98,255);
+  // "Market closed" = rgb(140,140,140)).
+  const marketSession = (): MarketSession => providerMarketSession(now());
   const SESSION_LABEL: Record<MarketSession, string> = {
     open: "Market open",
     pre: "Pre-market",

@@ -875,6 +875,8 @@ impl DataProvider for SampleProvider {
                 timezone: "Asia/Kolkata".to_string(),
                 open_min: 9 * 60 + 15,
                 close_min: 15 * 60 + 30,
+                pre_min: 15,
+                post_min: 30,
             },
             entitlements: None,
         }

@@ -103,6 +103,8 @@ export function sampleCapabilities(): {
     timezone: string;
     openMin: number;
     closeMin: number;
+    preMin: number;
+    postMin: number;
   };
   reference: {
     search: boolean;
@@ -137,6 +139,8 @@ export function sampleCapabilities(): {
       timezone: "Asia/Kolkata",
       openMin: 555,
       closeMin: 930,
+      preMin: 15,
+      postMin: 30,
     },
     reference: {
       search: true,

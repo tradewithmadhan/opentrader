@@ -30,7 +30,14 @@ import {
 } from "../sample-feed";
 import type { DataSource, MarketSessionDef, SourceSeeds } from "./types";
 
-const IST_SESSION: MarketSessionDef = { tz: "Asia/Kolkata", openMin: 9 * 60 + 15, closeMin: 15 * 60 + 30 };
+/** Session served by the sample feed (NSE equities). */
+const SESSION: MarketSessionDef = {
+  tz: "Asia/Kolkata",
+  openMin: 9 * 60 + 15,
+  closeMin: 15 * 60 + 30,
+  preMin: 15,
+  postMin: 30,
+};
 
 const SAMPLE_SEEDS: SourceSeeds = {
   defaultSymbol: "RELIANCE",
@@ -96,6 +103,7 @@ export const sampleSource: DataSource = {
   // ── Meta ───────────────────────────────────────────────────────
   capabilities: () => Promise.resolve(sampleCapabilities() as ProviderCapabilities),
   watchCapabilities: () => Promise.resolve(() => {}),
-  session: () => IST_SESSION,
+  session: () => SESSION,
   seeds: () => SAMPLE_SEEDS,
+  historyLimits: () => null,
 };

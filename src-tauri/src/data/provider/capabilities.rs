@@ -77,9 +77,14 @@ pub struct ReferenceCaps {
 pub struct SessionCaps {
     /// IANA timezone for session-local wall time.
     pub timezone: String,
-    /// Session open/close, minutes since local midnight.
+    /// Regular session open/close, minutes since local midnight.
     pub open_min: u32,
     pub close_min: u32,
+    /// Extended-hours bounds as durations: pre-market runs
+    /// `[open - pre, open)`, post-market `[close, close + post)`.
+    /// US: 330/240 (04:00–09:30 / 16:00–20:00 ET); NSE: 15/30.
+    pub pre_min: u32,
+    pub post_min: u32,
 }
 
 /// Symbol `data_status` values.

@@ -47,7 +47,7 @@ import { AddAlertDialog } from "./AddAlertDialog";
 import { quoteFor as liveQuoteFor, type LiveQuote } from "../../data/quotes";
 import { getTickerInfo, resolveSymbol } from "../../data/datafeed";
 import * as kv from "../../data/kv";
-import { usMarketSession } from "../../data/market-session";
+import { providerMarketSession } from "../../data/market-session";
 
 const SETTINGS_KEY = "ot:watchlist:settings";
 
@@ -94,11 +94,11 @@ function fmtVolume(v: number): string {
 }
 
 
-/** Watchlist view of the US session: "extended" = pre/post-market (Ext
- *  column + amber status dot), "closed" = grey dot. */
+/** Watchlist view of the active provider's session: "extended" = pre/post-market
+ *  (Ext column + amber status dot), "closed" = grey dot. */
 type MarketState = "regular" | "extended" | "closed";
 function marketState(now: Date = new Date()): MarketState {
-  const s = usMarketSession(now);
+  const s = providerMarketSession(now);
   return s === "open" ? "regular" : s === "closed" ? "closed" : "extended";
 }
 

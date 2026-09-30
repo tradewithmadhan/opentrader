@@ -27,7 +27,17 @@ import type { NewsItem, Snapshot, TickerInfo } from "../datafeed-rest";
 
 /** Exchange session for regular-hours filtering (mirrors the trait's
  *  market-session contract; see `activeSession()` in `../datafeed`). */
-export type MarketSessionDef = { tz: string; openMin: number; closeMin: number };
+export type MarketSessionDef = {
+  tz: string;
+  openMin: number;
+  closeMin: number;
+  /** Extended-hours bounds as durations: pre-market runs
+   *  `[openMin - preMin, openMin)`, post-market `[closeMin, closeMin + postMin)`.
+   *  US: 330/240 (04:00–09:30 / 16:00–20:00 ET); NSE: 15/30 (09:00–09:15 /
+   *  15:30–16:00 IST). */
+  preMin: number;
+  postMin: number;
+};
 
 /** Seed content for a fresh profile (tabs + watchlist). */
 export type SourceSeeds = {
@@ -35,6 +45,12 @@ export type SourceSeeds = {
   starterTabs: { symbol: string; interval: string }[];
   watchlistGroups: { name: string; tickers: string[] }[];
 };
+
+/** Max servable lookback, in calendar days per bar family. `null` = unbounded
+ *  (the source clamps itself, e.g. the backend via its entitlement floor).
+ *  The feed clamps its default interval lookbacks to these so a vendor with
+ *  shallow history (30–90d intraday) isn't asked for years of bars. */
+export type HistoryLimits = { second: number; minute: number; day: number };
 
 /** Bare ticker from a possibly qualified `"EXCHANGE:TICKER"` (or comma-list
  *  head) symbol. The single canonical strip: backend calls need bare tickers
@@ -87,4 +103,5 @@ export interface DataSource {
   watchCapabilities(onUpdate: (c: ProviderCapabilities) => void): Promise<UnlistenFn>;
   session(): MarketSessionDef;
   seeds(): SourceSeeds;
+  historyLimits(): HistoryLimits | null;
 }

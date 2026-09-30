@@ -102,7 +102,7 @@ import { layoutSync } from "./layout-sync";
 import { dayKeyer, utcToWall, wallTimeToUtc, type WallDate, type WallTime } from "./day-key";
 import type { GotoQuery } from "./goto-query";
 import { quoteFor } from "../../data/quotes";
-import { usMarketSession } from "../../data/market-session";
+import { providerMarketSession } from "../../data/market-session";
 import { activeLink, crossWindowCrosshairOn, postLinkRange, postLinkTime } from "../../data/tab-link-bus";
 import { IndicatorLegend } from "./IndicatorLegend";
 import { IndicatorSettingsDialog } from "./IndicatorSettingsDialog";
@@ -1750,9 +1750,9 @@ export function ChartView(props: Props) {
    *  itself (daily/weekly/monthly, or intraday on the regular session).
    *  Colour by session; label text black/white from the background. No
    *  overnight ("night") price: the data plan has none. */
-  const [marketSession, setMarketSession] = createSignal(usMarketSession());
+  const [marketSession, setMarketSession] = createSignal(providerMarketSession());
   onMount(() => {
-    const id = window.setInterval(() => { if (!hidden()) setMarketSession(usMarketSession()); }, 15_000);
+    const id = window.setInterval(() => { if (!hidden()) setMarketSession(providerMarketSession()); }, 15_000);
     onCleanup(() => window.clearInterval(id));
   });
 
@@ -4191,7 +4191,7 @@ export function ChartView(props: Props) {
       paintLive(null, appended);
     }
     updateCountdown();
-    setMarketSession(usMarketSession());
+    setMarketSession(providerMarketSession());
     for (const f of [...onShownHooks]) f();
   }
   let wasShown = !hidden();

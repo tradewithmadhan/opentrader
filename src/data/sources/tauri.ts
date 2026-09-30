@@ -11,7 +11,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { commands, events, type Candle, type ProviderCapabilities } from "../../bindings";
 import type { ChartAggregate, SecondAggregate, TradeTick } from "../datafeed-live";
 import type { NewsItem, Snapshot, TickerInfo } from "../datafeed-rest";
-import type { DataSource, MarketSessionDef, SourceSeeds } from "./types";
+import type { DataSource, HistoryLimits, MarketSessionDef, SourceSeeds } from "./types";
 import { bareSymbol } from "./types";
 
 function unwrap<T>(res: { status: "ok"; data: T } | { status: "error"; error: string }): T {
@@ -19,7 +19,16 @@ function unwrap<T>(res: { status: "ok"; data: T } | { status: "error"; error: st
   return res.data;
 }
 
-const US_SESSION: MarketSessionDef = { tz: "America/New_York", openMin: 9 * 60 + 30, closeMin: 16 * 60 };
+/** Session of the default backend market (US equities). The live values
+ *  always come from the backend's published caps via `activeSession()` —
+ *  this is only the pre-caps fallback. */
+const SESSION: MarketSessionDef = {
+  tz: "America/New_York",
+  openMin: 9 * 60 + 30,
+  closeMin: 16 * 60,
+  preMin: 5 * 60 + 30,
+  postMin: 4 * 60,
+};
 
 const US_SEEDS: SourceSeeds = {
   defaultSymbol: "INTC",
@@ -143,9 +152,13 @@ export const tauriSource: DataSource = {
     return events.providerCapabilities.listen((e: { payload: ProviderCapabilities }) => onUpdate(e.payload));
   },
   session(): MarketSessionDef {
-    return US_SESSION;
+    return SESSION;
   },
   seeds(): SourceSeeds {
     return US_SEEDS;
+  },
+  historyLimits(): HistoryLimits | null {
+    // Unbounded: the backend clamps to its entitlement floor itself.
+    return null;
   },
 };

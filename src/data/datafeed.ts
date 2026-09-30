@@ -297,10 +297,16 @@ export type SessionId = "RTH" | "ETH";
 import type { MarketSessionDef } from "./sources/types";
 import { bareSymbol } from "./sources/types";
 export type { MarketSessionDef } from "./sources/types";
-function activeSession(): MarketSessionDef {
+export function activeSession(): MarketSessionDef {
   const capsSession = providerCapabilities()?.session;
   if (capsSession) {
-    return { tz: capsSession.timezone, openMin: capsSession.openMin, closeMin: capsSession.closeMin };
+    return {
+      tz: capsSession.timezone,
+      openMin: capsSession.openMin,
+      closeMin: capsSession.closeMin,
+      preMin: capsSession.preMin,
+      postMin: capsSession.postMin,
+    };
   }
   return source().session();
 }
@@ -402,6 +408,15 @@ export function isAdjusted(): boolean {
 
 // ── Historical bars ──────────────────────────────────────────────────────────
 
+/** Clamp a default interval lookback to the active source's history limits
+ *  (shallow-history vendors must not be asked for years of bars). Explicit
+ *  caller overrides (date-range sync's `spanDays`) pass through untouched. */
+function clampLookback(family: "second" | "minute" | "day", days: number): number {
+  const limits = source().historyLimits();
+  if (!limits) return days;
+  return Math.min(days, limits[family]);
+}
+
 export type BarsResult = {
   /** Display bars: aggregated for 1W/1M, raw otherwise. Time-ascending. */
   bars: Candle[];
@@ -434,7 +449,7 @@ export async function getBars(
   const adjusted = isAdjusted();
   const second = SECOND_INTERVALS[resolution];
   if (second) {
-    const bars = await getSecondHistory(symbol, second.mult, second.days, adjusted);
+    const bars = await getSecondHistory(symbol, second.mult, clampLookback("second", second.days), adjusted);
     // Second buckets always break at the session open, so an exact filter suffices.
     return { bars: regular ? regularHoursOnly(bars) : bars, daily: null, aggregate: null };
   }
@@ -443,15 +458,15 @@ export async function getBars(
     // 1H/2H/4H RTH: fetch a 30-min base, filter to the session, re-aggregate
     // anchored at the open (the raw hour buckets straddle it).
     if (regular && needsSessionReaggregation(intra.mins)) {
-      const base = await source().minuteAggs(symbol, intra.days, 30, adjusted);
+      const base = await source().minuteAggs(symbol, clampLookback("minute", intra.days), 30, adjusted);
       const bars = aggregateSessionMinutes(regularHoursOnly(base), intra.mins);
       return { bars, daily: null, aggregate: null };
     }
-    const rows = await source().minuteAggs(symbol, intra.days, intra.mins, adjusted);
+    const rows = await source().minuteAggs(symbol, clampLookback("minute", intra.days), intra.mins, adjusted);
     return { bars: regular ? regularHoursOnly(rows) : rows, daily: null, aggregate: null };
   }
   const cfg = dailyConfig(resolution);
-  const daily = await source().dailyAggs(symbol, cfg.days, adjusted);
+  const daily = await source().dailyAggs(symbol, clampLookback("day", cfg.days), adjusted);
   const bars = cfg.aggregate ? aggregateCandles(daily, cfg.aggregate) : daily;
   return { bars, daily, aggregate: cfg.aggregate ?? null };
 }
@@ -476,12 +491,17 @@ export function getBarsBefore(
   const adjusted = isAdjusted();
   const second = SECOND_INTERVALS[resolution];
   if (second)
-    return getAggregatesBefore(symbol, "second", second.mult, beforeSec, spanDays ?? second.days, adjusted).then(
-      (rows) => (regular ? regularHoursOnly(rows) : rows),
-    );
+    return getAggregatesBefore(
+      symbol,
+      "second",
+      second.mult,
+      beforeSec,
+      spanDays ?? clampLookback("second", second.days),
+      adjusted,
+    ).then((rows) => (regular ? regularHoursOnly(rows) : rows));
   const intra = INTRADAY_INTERVALS[resolution];
   if (intra) {
-    const days = spanDays ?? intra.days;
+    const days = spanDays ?? clampLookback("minute", intra.days);
     // Mirror getBars' session handling so older pages stay session-consistent.
     if (regular && needsSessionReaggregation(intra.mins)) {
       return getAggregatesBefore(symbol, "minute", 30, beforeSec, days, adjusted).then((rows) =>
@@ -492,7 +512,12 @@ export function getBarsBefore(
       (rows) => (regular ? regularHoursOnly(rows) : rows),
     );
   }
-  return getDailyHistoryBefore(symbol, beforeSec, spanDays ?? dailyConfig(resolution).days, adjusted);
+  return getDailyHistoryBefore(
+    symbol,
+    beforeSec,
+    spanDays ?? clampLookback("day", dailyConfig(resolution).days),
+    adjusted,
+  );
 }
 
 /** Seconds live tail: bars strictly newer than `sinceSec` for a second-family

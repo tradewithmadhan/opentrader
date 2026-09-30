@@ -46,7 +46,7 @@ import { LineGlyphSelect } from "../drawings/LineEndSelect";
 import { TransparencySlider } from "../drawings/ImageDialog";
 import type { LineStyle } from "lightweight-charts-drawing/tv/types";
 import * as kv from "../../data/kv";
-import { usMarketSession } from "../../data/market-session";
+import { providerMarketSession } from "../../data/market-session";
 import { showConfirm, showRename } from "../../components/Dialogs";
 
 type Props = {
@@ -522,7 +522,7 @@ export function ChartPropertiesDialog(props: Props) {
   const visible = (tab: string, r: FormRow): boolean => {
     if (tab === "symbol" && r.label === "Pre/post market hours background" && props.intraday === false) return false;
     // "Open market status" only while the market is open.
-    if (tab === "legend" && r.label === "Open market status" && usMarketSession() !== "open") return false;
+    if (tab === "legend" && r.label === "Open market status" && providerMarketSession() !== "open") return false;
     if (!r.visibleWhen) return true;
     const c = draft[keyOf(tab, r.visibleWhen.id)]?.controls?.[0];
     return !!c && c.kind === "select" && r.visibleWhen.values.includes(c.value);
