@@ -8,6 +8,22 @@
 import type { Candle } from "../bindings";
 import { source } from "./sources";
 
+/** In-flight coalescing: concurrent fetches for the same symbol share one
+ *  request. A symbol switch fires info/snapshot from the chart legend, the
+ *  detail panel and watchlist names at once — without this that's 3 identical
+ *  calls. Only the pending promise is shared (never results), so no stale
+ *  data is possible. */
+const inflight = new Map<string, Promise<unknown>>();
+function coalesce<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const hit = inflight.get(key) as Promise<T> | undefined;
+  if (hit) return hit;
+  const p = run().finally(() => {
+    if (inflight.get(key) === p) inflight.delete(key);
+  });
+  inflight.set(key, p);
+  return p;
+}
+
 /** Fetch `mult`-second OHLC bars for `symbol` over the trailing `days`.
  *  Throws on backend error (the caller wraps in try/catch). */
 export async function getSecondHistory(
@@ -92,11 +108,11 @@ export type Snapshot = {
 };
 
 export async function getTickerInfo(symbol: string): Promise<TickerInfo> {
-  return source().tickerInfo(symbol);
+  return coalesce(`info:${symbol.toUpperCase()}`, () => source().tickerInfo(symbol));
 }
 
 export async function getTickerSnapshot(symbol: string): Promise<Snapshot> {
-  return source().tickerSnapshot(symbol);
+  return coalesce(`snap:${symbol.toUpperCase()}`, () => source().tickerSnapshot(symbol));
 }
 
 /** One headline for the chart's "Latest news" lollipop (newest first). */
