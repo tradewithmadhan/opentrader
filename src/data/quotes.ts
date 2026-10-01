@@ -19,7 +19,6 @@ import { createStore } from "solid-js/store";
 import { onTradeTick, type TradeTick } from "./datafeed";
 import { setSubscription } from "./subscriptions";
 import { watchlistStore } from "./watchlist-store";
-import { bareSymbol } from "./sources/types";
 
 /** Live per-symbol quote. Fields stay null until a tick carries them, so the
  *  static seed value shows until then. `last`/`change`/`changePercent`/`volume`
@@ -37,12 +36,10 @@ export type LiveQuote = {
 // reactivity per field (a row only re-renders the cell whose value changed).
 const [quotes, setQuotes] = createStore<Record<string, LiveQuote>>({});
 
-/** Reactive read of one symbol's quote (undefined until a tick arrives). Full
- *  names hit their own listing's entry ("BSE:RELIANCE" ≠ "NSE:RELIANCE"); a
- *  bare ticker falls back to its own bare-keyed entry (older transports). */
+/** Reactive read of one symbol's quote (undefined until a tick arrives).
+ *  Keyed by full name: each listing reads its own entry. */
 export function quoteFor(symbol: string): LiveQuote | undefined {
-  const full = symbol.toUpperCase();
-  return quotes[full] ?? quotes[bareSymbol(symbol).toUpperCase()];
+  return quotes[symbol.toUpperCase()];
 }
 
 function applyTick(t: TradeTick): void {
@@ -69,8 +66,7 @@ createRoot(() => {
   createEffect(() => {
     const a = watchlistStore.active();
     const rows = a ? [...a.groups.flatMap((g) => g.rows), ...a.extras] : [];
-    // Full names: each listing subscribes (and ticks) under its own name;
-    // matching stays exact in applyTick/quoteFor.
+    // Full names: each listing subscribes (and ticks) under its own name.
     const symbols = [...new Set(rows.map((r) => r.ticker.toUpperCase()))];
     setSubscription("watchlist", symbols);
   });

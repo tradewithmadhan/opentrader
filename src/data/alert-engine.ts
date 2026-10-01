@@ -31,7 +31,6 @@ import { chartLastBarTime, indicatorPlotValue } from "./chart-state-registry";
 import { getIndicatorEntry } from "../window/chart/indicators/registry";
 import { commands } from "../bindings";
 import * as kv from "./kv";
-import { bareSymbol } from "./sources/types";
 
 /** True inside the Tauri shell — gates the native webhook route. */
 const HAS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -278,19 +277,11 @@ function fire(rule: AlertRule, ctx: EvalContext, barRefMs: number): void {
 }
 
 /** Evaluate every enabled rule for the symbol that just ticked. Ticks carry
- *  the full name; rules are stored venue-qualified (and migrated there on
- *  load), so matching is exact per listing. The bare fallback covers rules
- *  saved before the migration ran and transports that echo a bare ticker —
- *  but only when at least one side has no venue, so one listing's ticks can
- *  never fire another listing's rules. */
+ *  the full name and rules are stored venue-qualified, so matching is exact
+ *  per listing: one listing's ticks can never fire another listing's rules. */
 function onTick(t: TradeTick): void {
   const full = t.symbol.toUpperCase();
-  const bare = bareSymbol(t.symbol).toUpperCase();
-  const rules = alertStore.enabledRules().filter((r) => {
-    if (r.symbol === full) return true;
-    if (bareSymbol(r.symbol).toUpperCase() !== bare) return false;
-    return !r.symbol.includes(":") || !full.includes(":");
-  });
+  const rules = alertStore.enabledRules().filter((r) => r.symbol === full);
   if (rules.length === 0) return;
 
   const now = Date.now();

@@ -333,7 +333,6 @@ async function sessionsFor(symbol: string): Promise<SymbolSessions> {
   }
 }
 
-import { bareSymbol } from "./sources/types";
 /** Minutes after local midnight of every session open in `spec` over the
  *  week before `sec` (so day-of-week variants are seen). */
 function sessionOpenMinutes(spec: SessionSpec, sec: number): number[] {
@@ -682,9 +681,7 @@ export async function subscribeBars(
 ): Promise<UnlistenFn> {
   const isCharted = (s: string) => {
     const sym = getSymbol();
-    // Bare-to-bare: the backend emits bare tickers while panes may carry a
-    // venue qualifier ("BSE:RELIANCE").
-    return !!sym && bareSymbol(s).toUpperCase() === bareSymbol(sym).toUpperCase();
+    return !!sym && s.toUpperCase() === sym.toUpperCase();
   };
   const [offMinute, offSecond] = await Promise.all([
     onChartAggregate((tick) => {

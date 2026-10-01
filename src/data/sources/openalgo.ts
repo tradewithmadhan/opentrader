@@ -586,14 +586,42 @@ let wsWanted = false;
 let backoffMs = 1000;
 let resyncTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** Subscribed full "EXCHANGE:TICKER" names (uppercased, deduped): tick
+ *  identity resolves against this set. */
 function allSymbols(): Set<string> {
-  // Bare tickers: the broker echoes symbols bare, so matching runs bare even
-  // though subscriptions carry full "EXCHANGE:TICKER" names (see fullSymbols).
   const out = new Set<string>();
-  const add = (s: string) => out.add(splitOpenAlgo(s).ticker);
+  const add = (s: string) => out.add(s.split(",")[0].trim().toUpperCase());
   for (const s of chartSubs.values()) add(s);
   for (const set of watchSubs.values()) for (const s of set) add(s);
   return out;
+}
+
+/** Tick identity for a broker echo: the subscribed name it belongs to, or
+ *  null when no subscription matches (stale/foreign echoes are dropped, as
+ *  before). Pure: exported for tests. Rules, in order: an explicitly
+ *  qualified echo wins when subscribed; the echoed exchange + ticker wins
+ *  when subscribed; a lone subscribed listing for the ticker wins (the
+ *  common single-venue case with bare echoes); a bare subscription wins for
+ *  a bare echo. An ambiguous bare echo (two listings watched) resolves to
+ *  nothing rather than attributing one listing's ticks to the other. */
+export function resolveTickIdentity(
+  echoSymbol: string,
+  echoExchange: string,
+  subscribed: Iterable<string>,
+): string | null {
+  const subs = new Set<string>();
+  for (const s of subscribed) subs.add(s.split(",")[0].trim().toUpperCase());
+  if (subs.size === 0) return null;
+  const head = echoSymbol.split(",")[0].trim().toUpperCase();
+  if (head.includes(":") && subs.has(head)) return head;
+  const bare = splitOpenAlgo(head).ticker;
+  if (!bare) return null;
+  const ex = (echoExchange ?? "").trim().toUpperCase();
+  if (ex && subs.has(`${ex}:${bare}`)) return `${ex}:${bare}`;
+  const singles = [...subs].filter((s) => splitOpenAlgo(s).ticker === bare);
+  if (singles.length === 1) return singles[0];
+  if (subs.has(bare)) return bare;
+  return null;
 }
 
 /** Full as-given names (deduped) for subscribe frames, where the venue half
@@ -684,11 +712,12 @@ function ensureWs(): void {
   };
 }
 
-function onQuoteTick(symbol: string, _exchange: string, q: OaQuote): void {
-  // Bare matching: the broker echoes bare tickers while our subscriptions
-  // carry full "EXCHANGE:TICKER" names (see allSymbols/fullSymbols).
-  const sym = splitOpenAlgo(symbol).ticker;
-  if (!sym || !allSymbols().has(sym)) return;
+function onQuoteTick(symbol: string, exchange: string, q: OaQuote): void {
+  // Full-name ingress: the tick is attributed to its subscribed listing
+  // (see resolveTickIdentity); buckets, baselines and emits all key on the
+  // resolved name, so two listings of one ticker never share a stream.
+  const sym = resolveTickIdentity(symbol, exchange, allSymbols());
+  if (!sym) return;
   const now = Math.floor(Date.now() / 1000);
   const pc: number | undefined = q.prev_close;
   if (pc != null && Number.isFinite(pc) && pc > 0) rememberPrevClose(sym, pc);
