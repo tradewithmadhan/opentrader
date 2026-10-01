@@ -51,6 +51,10 @@ src/bindings.ts
 .claude/
 .playwright-mcp/
 
+# Agent working agreement (local only — AI reads it, never ships)
+AGENTS.md
+agents.md
+
 # Private working material, kept locally only: research probes and captures of
 # third-party apps, development log and backlog.
 research/
