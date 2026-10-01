@@ -312,6 +312,9 @@ async function sessionsFor(symbol: string): Promise<SymbolSessions> {
       `${String(Math.floor(m / 60)).padStart(2, "0")}${String(((m % 60) + 60) % 60).padStart(2, "0")}`;
     const rth = `${fmt(s.openMin)}-${fmt(s.closeMin)}`;
     const eth = `${fmt(s.openMin - s.preMin)}-${fmt(s.closeMin + s.postMin)}`;
+    // Tick as minmov/pricescale (0.05 → 5/100); uniform at every price.
+    const decimals = (String(s.mintick ?? 0.01).split(".")[1] ?? "").length;
+    const pricescale = 10 ** decimals;
     return new SymbolSessions({
       timezone: s.tz,
       session: rth,
@@ -323,6 +326,9 @@ async function sessionsFor(symbol: string): Promise<SymbolSessions> {
       ],
       holidays: "",
       corrections: "",
+      pricescale,
+      minmov: Math.round((s.mintick ?? 0.01) * pricescale),
+      variableTickSize: "",
     });
   }
 }

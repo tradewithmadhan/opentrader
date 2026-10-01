@@ -37,6 +37,9 @@ export type MarketSessionDef = {
    *  15:30–16:00 IST). */
   preMin: number;
   postMin: number;
+  /** Price grid tick (e.g. 0.01 US, 0.05 NSE) for the sessionsFor fallback's
+   *  SymbolSession. Defaults to 0.01 when absent. */
+  mintick?: number;
 };
 
 /** Seed content for a fresh profile (tabs + watchlist). */

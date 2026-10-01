@@ -37,6 +37,7 @@ const SESSION: MarketSessionDef = {
   closeMin: 15 * 60 + 30,
   preMin: 15,
   postMin: 30,
+  mintick: 0.05,
 };
 
 const SAMPLE_SEEDS: SourceSeeds = {

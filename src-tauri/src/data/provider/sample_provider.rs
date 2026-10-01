@@ -582,6 +582,10 @@ impl ReferenceProvider for SampleProvider {
             ],
             holidays: String::new(),
             corrections: String::new(),
+            // NSE tick: 0.05 INR (5 / 100), uniform at every price.
+            pricescale: 100,
+            minmov: 5,
+            variable_tick_size: String::new(),
         })
     }
 

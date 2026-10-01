@@ -27,6 +27,7 @@ const SESSION: MarketSessionDef = {
   closeMin: 16 * 60,
   preMin: 5 * 60 + 30,
   postMin: 4 * 60,
+  mintick: 0.01,
 };
 
 const US_SEEDS: SourceSeeds = {
