@@ -21,6 +21,7 @@ import type {
   ProviderCapabilities,
   SplitEvent,
   SymbolSearchResult,
+  SymbolSession,
 } from "../../bindings";
 import type { ChartAggregate, SecondAggregate, TradeTick } from "../datafeed-live";
 import type { NewsItem, Snapshot, TickerInfo } from "../datafeed-rest";
@@ -91,6 +92,10 @@ export interface DataSource {
   dividends(symbol: string): Promise<DividendEvent[]>;
   splits(symbol: string): Promise<SplitEvent[]>;
   latestNews(symbol: string, limit: number): Promise<NewsItem[]>;
+  /** Per-symbol sessions from the source's own calendar (e.g. broker holiday
+   *  APIs), preferred over the backend command when present. Rejects when the
+   *  source cannot describe the symbol — the feed falls back. */
+  symbolSessions?(symbol: string): Promise<SymbolSession>;
 
   // ── Live ───────────────────────────────────────────────────────────
   setChartSubscription(symbol: string | null, pane?: string): Promise<void>;

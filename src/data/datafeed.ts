@@ -304,6 +304,16 @@ export type { SessionId } from "./session";
  *  the shim rejects, while the browser adapter still serves bars). The
  *  fallback mirrors the source caps so RTH/ETH filtering keeps working. */
 async function sessionsFor(symbol: string): Promise<SymbolSessions> {
+  // A source with its own calendar (OpenAlgo's broker timings/holidays)
+  // answers directly — preferred over both backend and static session.
+  const local = source().symbolSessions;
+  if (local) {
+    try {
+      return new SymbolSessions(await local(symbol));
+    } catch {
+      /* calendar unreachable — try the backend, then static */
+    }
+  }
   try {
     return await symbolSessions(symbol);
   } catch {

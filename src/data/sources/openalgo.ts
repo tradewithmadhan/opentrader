@@ -13,8 +13,11 @@
  * `adjusted_toggle` is false (`/history` has no adjust flag);
  * `SecondAggregate` is synthesized per quote tick (documented approximation);
  * 240m aggregates client-side from 2h; 1W/1M aggregate client-side from daily.
+ * Sessions come from the broker calendar (`/market/timings` + `/market/holidays`,
+ * incl. SPECIAL_SESSION days) — see `openAlgoSymbolSession`; the static SESSION
+ * below is only the last-resort fallback.
  */
-import type { Candle, SymbolSearchResult } from "../../bindings";
+import type { Candle, SymbolSearchResult, SymbolSession } from "../../bindings";
 import type { Snapshot, TickerInfo } from "../datafeed-rest";import type { ChartAggregate, SecondAggregate, TradeTick } from "../datafeed-live";
 import type { DataSource, MarketSessionDef } from "./types";
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -303,6 +306,256 @@ export function mapSearchRows(rows: OaSearchRow[], type: string | null): SymbolS
       primaryExchange: r.exchange ?? "",
       type: r.instrumenttype ?? "",
     }));
+}
+
+// ── Market calendar (timings + holidays → per-exchange sessions) ─────────────
+// The broker publishes real trading calendars:
+//   POST /api/v1/market/timings  { date } → per-exchange open/close (epoch ms;
+//     empty on weekends/full holidays; special-only on special-session days)
+//   POST /api/v1/market/holidays { year } → { timezone, data: [{ date,
+//     holiday_type, closed_exchanges[], open_exchanges[] }] }
+// mapped onto the session grammar (session/subsessions/holidays/corrections;
+// corrections win over holidays, so special timings ride as corrections).
+
+export type OaTiming = { exchange: string; start_time: number; end_time: number };
+export type OaHoliday = {
+  date: string;
+  description?: string;
+  holiday_type: string;
+  closed_exchanges: string[];
+  open_exchanges: OaTiming[];
+};
+
+/** Standard regular session per exchange (broker docs table): the base spec;
+ *  the calendar only overrides it (holidays, special sessions). Bands mirror
+ *  the static SESSION (NSE pre-open 15m, post 30m); unknown bands stay 0. */
+const STANDARD_SESSION: Record<string, { open: string; close: string; pre: number; post: number }> = {
+  NSE: { open: "0915", close: "1530", pre: 15, post: 30 },
+  BSE: { open: "0915", close: "1530", pre: 15, post: 30 },
+  NFO: { open: "0915", close: "1530", pre: 15, post: 30 },
+  BFO: { open: "0915", close: "1530", pre: 15, post: 30 },
+  CDS: { open: "0900", close: "1700", pre: 0, post: 0 },
+  BCD: { open: "0900", close: "1700", pre: 0, post: 0 },
+  MCX: { open: "0900", close: "2330", pre: 0, post: 0 },
+};
+
+/** Our venue prefix → broker exchange code for calendar matching (index
+ *  venues follow their cash market). Exported for tests. */
+export function calendarExchange(prefix: string): string {
+  const base = prefix.toUpperCase().replace(/_INDEX$/, "");
+  return base || "NSE";
+}
+
+const tzFmtCache = new Map<string, Intl.DateTimeFormat>();
+function tzDayTime(tz: string): Intl.DateTimeFormat {
+  let f = tzFmtCache.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    tzFmtCache.set(tz, f);
+  }
+  return f;
+}
+
+function tzPart(tz: string, ms: number, type: string): string {
+  const parts = tzDayTime(tz).formatToParts(new Date(ms));
+  return parts.find((p) => p.type === type)?.value ?? "";
+}
+
+/** Epoch ms → "HHMM" in `tz` (exported for tests). */
+export function msToHHMM(ms: number, tz: string): string {
+  return `${tzPart(tz, ms, "hour").padStart(2, "0")}${tzPart(tz, ms, "minute").padStart(2, "0")}`;
+}
+
+/** Epoch ms → "YYYYMMDD" in `tz` (exported for tests). */
+export function msToDay(ms: number, tz: string): string {
+  return `${tzPart(tz, ms, "year")}${tzPart(tz, ms, "month").padStart(2, "0")}${tzPart(tz, ms, "day").padStart(2, "0")}`;
+}
+
+/** "YYYY-MM-DD" → "YYYYMMDD" (exported for tests). */
+export function isoToDay(iso: string): string {
+  return iso.replace(/-/g, "");
+}
+
+export type CalendarBuild = {
+  prefix: string;
+  timezone: string;
+  holidays: OaHoliday[];
+  /** Per-date timings for special days whose row carries no per-exchange
+   *  timings (SPECIAL_SESSION without open entries). */
+  specialTimings: Map<string, OaTiming[]>;
+};
+
+/** Build the provider-style session descriptor for one venue prefix from
+ *  calendar rows (exported for tests). Rules per (date, exchange):
+ *  closed-listed (without an open entry) → holidays; an open entry (or
+ *  fetched special timings) → `spec:date` corrections, which win over
+ *  holidays; settlement holidays and unmentioned exchanges are ignored
+ *  (trading is open). Unknown special timings never close a market. */
+export function buildExchangeSession(build: CalendarBuild): SymbolSession {
+  const base = calendarExchange(build.prefix);
+  const std = STANDARD_SESSION[base] ?? STANDARD_SESSION.NSE;
+  const toMin = (hhmm: string): number => parseInt(hhmm.slice(0, 2), 10) * 60 + parseInt(hhmm.slice(2), 10);
+  const fmt = (m: number): string =>
+    `${String(Math.floor(m / 60)).padStart(2, "0")}${String(((m % 60) + 60) % 60).padStart(2, "0")}`;
+  const rth = `${std.open}-${std.close}`;
+  const eth =
+    std.pre + std.post > 0 ? `${fmt(toMin(std.open) - std.pre)}-${fmt(toMin(std.close) + std.post)}` : rth;
+  const closed: string[] = [];
+  const special = new Map<string, string[]>(); // spec → dates
+  const addSpecial = (spec: string, day: string): void => {
+    const list = special.get(spec) ?? [];
+    list.push(day);
+    special.set(spec, list);
+  };
+  for (const h of build.holidays) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(h.date ?? "")) continue;
+    const day = isoToDay(h.date);
+    const closedList = (h.closed_exchanges ?? []).map((e) => String(e).toUpperCase());
+    const openList = h.open_exchanges ?? [];
+    const openHit = openList.find((o) => String(o.exchange ?? "").toUpperCase() === base);
+    if (openHit != null) {
+      addSpecial(
+        `${msToHHMM(openHit.start_time, build.timezone)}-${msToHHMM(openHit.end_time, build.timezone)}`,
+        day,
+      );
+      continue;
+    }
+    if (closedList.includes(base)) {
+      closed.push(day);
+      continue;
+    }
+    if (String(h.holiday_type ?? "").toUpperCase() === "SPECIAL_SESSION") {
+      const timings = build.specialTimings.get(h.date) ?? [];
+      const hit = timings.find((t) => String(t.exchange ?? "").toUpperCase() === base);
+      if (hit != null) {
+        addSpecial(
+          `${msToHHMM(hit.start_time, build.timezone)}-${msToHHMM(hit.end_time, build.timezone)}`,
+          day,
+        );
+      }
+      continue;
+    }
+    // SETTLEMENT_HOLIDAY and unmentioned exchanges: trading is open.
+  }
+  const corrections = [...special.entries()]
+    .map(([spec, days]) => `${spec}:${[...new Set(days)].sort().join(",")}`)
+    .join(";");
+  const subsessions: SymbolSession["subsessions"] = [
+    { id: "regular", description: "Regular Trading Hours", session: rth, corrections: "" },
+  ];
+  if (eth !== rth) {
+    subsessions.push(
+      { id: "extended", description: "Extended Trading Hours", session: eth, corrections: "" },
+      {
+        id: "premarket",
+        description: "Premarket",
+        session: `${fmt(toMin(std.open) - std.pre)}-${std.open}`,
+        corrections: "",
+      },
+      {
+        id: "postmarket",
+        description: "Postmarket",
+        session: `${std.close}-${fmt(toMin(std.close) + std.post)}`,
+        corrections: "",
+      },
+    );
+  }
+  return {
+    timezone: build.timezone,
+    session: rth,
+    subsessions,
+    holidays: [...new Set(closed)].sort().join(","),
+    corrections,
+    pricescale: 100,
+    minmov: 5,
+    variableTickSize: "",
+  };
+}
+
+const HOLIDAY_TTL_MS = 24 * 3600 * 1000;
+
+const holidaysCache = new Map<number, { at: number; timezone: string; rows: OaHoliday[] }>();
+
+/** Holidays (+response timezone) for a year, cached a day. */
+export async function fetchHolidays(year: number): Promise<{ timezone: string; rows: OaHoliday[] }> {
+  const hit = holidaysCache.get(year);
+  if (hit && Date.now() - hit.at < HOLIDAY_TTL_MS) return { timezone: hit.timezone, rows: hit.rows };
+  const cfg = openAlgoConfig();
+  const res = await post<{ status?: string; timezone?: string; data?: OaHoliday[] }>(cfg, "/api/v1/market/holidays", {
+    year,
+  });
+  const rows = Array.isArray(res.data) ? res.data : [];
+  const timezone = typeof res.timezone === "string" && res.timezone ? res.timezone : "Asia/Kolkata";
+  holidaysCache.set(year, { at: Date.now(), timezone, rows });
+  return { timezone, rows };
+}
+
+const timingsCache = new Map<string, { at: number; rows: OaTiming[] }>();
+
+/** Timings for one date (empty on holidays), cached a day. */
+export async function fetchTimings(date: string): Promise<OaTiming[]> {
+  const hit = timingsCache.get(date);
+  if (hit && Date.now() - hit.at < HOLIDAY_TTL_MS) return hit.rows;
+  const cfg = openAlgoConfig();
+  const res = await post<{ status?: string; data?: OaTiming[] }>(cfg, "/api/v1/market/timings", { date });
+  const rows = Array.isArray(res.data) ? res.data : [];
+  timingsCache.set(date, { at: Date.now(), rows });
+  return rows;
+}
+
+const sessionCache = new Map<string, { at: number; session: SymbolSession }>();
+
+/** Per-exchange session descriptor, built from the broker calendar (current
+ *  year + next, so December keeps January's specials). Throws when the
+ *  calendar is unreachable — callers fall back to the static session. */
+export async function openAlgoSymbolSession(symbol: string): Promise<SymbolSession> {
+  const { exchange } = splitOpenAlgo(symbol);
+  const prefix = exchange.toUpperCase();
+  const hit = sessionCache.get(prefix);
+  if (hit && Date.now() - hit.at < HOLIDAY_TTL_MS) return hit.session;
+  const thisYear = new Date().getUTCFullYear();
+  const settled = await Promise.allSettled([fetchHolidays(thisYear), fetchHolidays(thisYear + 1)]);
+  const ok = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+  if (ok.length === 0) throw new Error("OpenAlgo calendar unreachable");
+  const timezone = ok[0].timezone;
+  const rows = ok.flatMap((f) => f.rows);
+  // Special days whose row carries no timings for this exchange: resolve via
+  // the timings endpoint (a year holds a handful at most — bounded).
+  const base = calendarExchange(prefix);
+  const needDates = [
+    ...new Set(
+      rows
+        .filter((h) => String(h.holiday_type ?? "").toUpperCase() === "SPECIAL_SESSION")
+        .map((h) => h.date)
+        .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d ?? "")),
+    ),
+  ].filter((d) => {
+    const h = rows.find((r) => r.date === d);
+    const closedList = (h?.closed_exchanges ?? []).map((e) => String(e).toUpperCase());
+    const openList = h?.open_exchanges ?? [];
+    return (
+      !closedList.includes(base) && !openList.some((o) => String(o.exchange ?? "").toUpperCase() === base)
+    );
+  });
+  const specialTimings = new Map<string, OaTiming[]>();
+  for (const d of needDates.slice(0, 12)) {
+    try {
+      specialTimings.set(d, await fetchTimings(d));
+    } catch {
+      /* unknown timings — regular session stands */
+    }
+  }
+  const session = buildExchangeSession({ prefix, timezone, holidays: rows, specialTimings });
+  sessionCache.set(prefix, { at: Date.now(), session });
+  return session;
 }
 
 // ── Live WS engine ───────────────────────────────────────────────────────────
@@ -604,6 +857,10 @@ export const openalgoSource: DataSource = {
     if (!res.data) throw new Error(`OpenAlgo /quotes: no data for ${ticker}`);
     return shapeSnapshot(ticker, res.data);
   },
+
+  // Sessions from the broker calendar (timings + holidays, incl. special
+  // sessions) — preferred over the backend command by the feed.
+  symbolSessions: (symbol) => openAlgoSymbolSession(symbol),
 
   search: async (query, type) => {
     const q = query.trim();
