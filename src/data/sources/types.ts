@@ -34,11 +34,10 @@ export type MarketSessionDef = {
   closeMin: number;
   /** Extended-hours bounds as durations: pre-market runs
    *  `[openMin - preMin, openMin)`, post-market `[closeMin, closeMin + postMin)`.
-   *  US: 330/240 (04:00–09:30 / 16:00–20:00 ET); NSE: 15/30 (09:00–09:15 /
-   *  15:30–16:00 IST). */
+   *  US: 330/240 (04:00–09:30 / 16:00–20:00 ET). */
   preMin: number;
   postMin: number;
-  /** Price grid tick (e.g. 0.01 US, 0.05 NSE) for the sessionsFor fallback's
+  /** Price grid tick (e.g. 0.01) for the sessionsFor fallback's
    *  SymbolSession. Defaults to 0.01 when absent. */
   mintick?: number;
 };

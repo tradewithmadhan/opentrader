@@ -217,8 +217,7 @@ type MakeTabPartial = Partial<PaneChart> & { layout?: LayoutId; isChart?: boolea
  *  own saved list. */
 export const DEFAULT_INDICATORS: string[] = ["colored-volume"];
 
-/** Fresh-pane symbol fallback — from the active source's seeds (NSE blue-chip
- *  in sample mode, US default in the shell). */
+/** Fresh-pane symbol fallback — from the active source's seeds. */
 export const defaultSymbol = (): string => source().seeds().defaultSymbol;
 
 export function makeTab(partial: MakeTabPartial = {}): TabChart {

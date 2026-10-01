@@ -75,8 +75,7 @@ export const HEADER_ITEMS: HeaderItem[] = [
   }
 ];
 
-// Default watchlist for a new profile, from the active source's seeds (NSE/BSE
-// blue-chips in sample mode, US index ETFs + large caps in the shell). Quote
+// Default watchlist for a new profile, from the active source's seeds. Quote
 // fields are placeholders; the live feed fills them in. The flat ROWS export
 // below drives the quote subscription and any section-agnostic consumer.
 export const GROUPS: Group[] = source().seeds().watchlistGroups.map((g) => ({

@@ -201,7 +201,7 @@ export const alertStore = {
   enabledRules: (): AlertRule[] => state.rules.filter((r) => r.enabled),
 
   /** Create a rule and return its id. Symbols stay venue-qualified
-   *  ("BSE:RELIANCE" ≠ "NSE:RELIANCE"); ticks match the same way, so a rule
+   *  ("EXCHANGE:TICKER"); ticks match the same way, so a rule
    *  never fires on another listing's ticks. */
   add(rule: NewAlertRule): string {
     const id = uid("al");
