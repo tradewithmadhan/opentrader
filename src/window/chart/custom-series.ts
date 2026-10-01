@@ -36,8 +36,7 @@ import type { ChartTokens } from "./chart-tokens";
 import type { OHLC } from "./chart-types";
 import type { KagiItem, PnfItem } from "./series-transforms";
 import type { SvpStyle } from "../header/chart-settings";
-import { activeSession } from "../../data/datafeed";
-import type { MarketSessionDef } from "../../data/datafeed";
+import { localDay, zoneOffsetFinder, type SymbolSessions } from "../../data/session";
 export type { KagiItem, PnfItem } from "./series-transforms";
 
 type DrawTarget = Parameters<ICustomSeriesPaneRenderer["draw"]>[0];
@@ -226,47 +225,27 @@ export type ProfileItem = {
 
 const TPO_ROWS = 24;
 
-/** Session-calendar date key (session split for intraday charts), in the
- *  given session's timezone. Defaults to the active provider's session, so an
- *  NSE day (09:15–15:30 IST) isn't split by the New York date line. */
-const dateFmtCache = new Map<string, Intl.DateTimeFormat>();
-const minuteFmtCache = new Map<string, Intl.DateTimeFormat>();
-
-function sessDate(tz: string): Intl.DateTimeFormat {
-  let f = dateFmtCache.get(tz);
-  if (!f) {
-    f = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
-    dateFmtCache.set(tz, f);
-  }
-  return f;
-}
-
-function sessMinute(tz: string): Intl.DateTimeFormat {
-  let f = minuteFmtCache.get(tz);
-  if (!f) {
-    f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour12: false, hour: "2-digit", minute: "2-digit" });
-    minuteFmtCache.set(tz, f);
-  }
-  return f;
-}
-
-function minuteOf(sec: number, tz: string): number {
-  const [h, m] = sessMinute(tz).format(new Date(sec * 1000)).split(":").map(Number);
-  return (h % 24) * 60 + m;
-}
-
-function sessionKey(sec: number, unit: "day" | "month" | "year", sess: MarketSessionDef = activeSession()): string {
-  const d = sessDate(sess.tz).format(new Date(sec * 1000)); // YYYY-MM-DD
+/** Profile period key of a bar in the symbol's exchange calendar: its
+ *  trading day (intraday charts: the extended session it belongs to, so an
+ *  overnight session stays one profile), month or year. */
+function sessionKey(sec: number, unit: "day" | "month" | "year", sessions: SymbolSessions): string {
+  const day = unit === "day" ? sessions.extended.tradingDay(sec) : localDay(sessions.timeZone, sec);
+  const d = new Date(day * 86400000).toISOString().slice(0, 10); // YYYY-MM-DD
   if (unit === "day") return d;
   if (unit === "month") return d.slice(0, 7);
   return d.slice(0, 4);
 }
 
-/** Session part of a bar: pre (before open), market (open–close), post (from
- *  close). Bounds come from the given session (defaults to active). */
-function partOf(sec: number, sess: MarketSessionDef = activeSession()): "pre" | "market" | "post" {
-  const m = minuteOf(sec, sess.tz);
-  return m < sess.openMin ? "pre" : m < sess.closeMin ? "market" : "post";
+/** Session part of a bar: the symbol's pre-market, post-market, else market. */
+function partOf(sec: number, sessions: SymbolSessions): "pre" | "market" | "post" {
+  const part = sessions.extendedPart(sec);
+  return part === "pre" ? "pre" : part === "post" ? "post" : "market";
+}
+
+/** Minutes after local midnight of `sec` in the exchange time zone. */
+function exchangeMinuteOf(sec: number, sessions: SymbolSessions): number {
+  const local = sec + zoneOffsetFinder(sessions.timeZone)(sec);
+  return Math.floor((((local % 86400) + 86400) % 86400) / 60);
 }
 
 /** "HHMM-HHMM" → [start, end) minutes, null when malformed. */
@@ -296,10 +275,11 @@ function pocAndVa(total: number[], pct: number): { poc: number; lo: number; hi: 
 
 /** Group the loaded bars into sessions and build a volume- (svp) or
  *  time-at-price- (tpo) by-price profile per session. Intraday: one session
- *  per day, filtered / split by the SVP "Sessions" input; daily: month;
- *  above: year. */
-export function toProfile(raw: OHLC[], mode: "svp" | "tpo", st?: SvpStyle): ProfileItem[] {
-  if (raw.length === 0) return [];
+ *  per trading day, filtered / split by the SVP "Sessions" input; daily:
+ *  month; above: year. All in the symbol's own sessions (`symSessions`);
+ *  nothing is drawn until they are known. */
+export function toProfile(raw: OHLC[], mode: "svp" | "tpo", st: SvpStyle | undefined, symSessions: SymbolSessions | null): ProfileItem[] {
+  if (raw.length === 0 || !symSessions) return [];
   const delta = medianDelta(raw);
   const intraday = delta < 86400;
   const unit: "day" | "month" | "year" = intraday ? "day" : delta <= 86400 * 2 ? "month" : "year";
@@ -309,15 +289,15 @@ export function toProfile(raw: OHLC[], mode: "svp" | "tpo", st?: SvpStyle): Prof
   // Which bars belong to a profile, and the key that splits sessions.
   const keyOf = (i: number): string | null => {
     const sec = toSeconds(raw[i].time);
-    const day = sessionKey(sec, unit);
+    const day = sessionKey(sec, unit, symSessions);
     if (sessions === "All") return day;
-    const part = partOf(sec);
+    const part = partOf(sec, symSessions);
     if (sessions === "Each (pre-market, market, post-market)") return `${day}:${part}`;
     if (sessions === "Pre-market only") return part === "pre" ? day : null;
     if (sessions === "Market only") return part === "market" ? day : null;
     if (sessions === "Post-market only") return part === "post" ? day : null;
     if (custom) {
-      const m = minuteOf(sec, activeSession().tz);
+      const m = exchangeMinuteOf(sec, symSessions);
       return m >= custom[0] && m < custom[1] ? day : null;
     }
     return day;

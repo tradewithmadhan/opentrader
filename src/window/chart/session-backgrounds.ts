@@ -5,10 +5,10 @@
  * preMarket #FF9800 and postMarket #2962FF at transparency 92, each run of extended bars tinted edge to edge (half a bar
  * either side of the first/last bar), full pane height, under the grid.
  *
- * Bars are classed by their start in the active provider's session time
- * (`activeSession()` in `data/datafeed`): pre = [open-pre, open),
- * post = [close, close+post). The plan has no overnight data, so the
- * night-market tint has nothing to cover.
+ * Bars are classed by their start against the charted symbol's own
+ * pre-market and post-market sessions (data/session; US stocks: 04:00–09:30
+ * and 16:00–20:00 New York). No overnight session is served, so there is no
+ * night-market tint.
  */
 import type {
   IChartApi,
@@ -20,9 +20,7 @@ import type {
   SeriesType,
 } from 'lightweight-charts';
 import type { CanvasRenderingTarget2D } from 'fancy-canvas';
-import { minuteOfDayer } from './day-key';
-import { activeSession } from '../../data/datafeed';
-import type { MarketSessionDef } from '../../data/datafeed';
+import type { SymbolSessions } from '../../data/session';
 
 export type SessionRun = { from: number; to: number; kind: 'pre' | 'post' };
 
@@ -30,34 +28,13 @@ export type SessionRun = { from: number; to: number; kind: 'pre' | 'post' };
 const PRE_COLOR = 'rgba(255, 152, 0, 0.08)';
 const POST_COLOR = 'rgba(41, 98, 255, 0.08)';
 
-// One instance per session definition: per-slot zone-offset caches are keyed
-// by timezone and shared by every recompute instead of rebuilt per call.
-const minuteCache = new Map<string, (sec: number) => number>();
-
-function minuteOf(sess: MarketSessionDef): (sec: number) => number {
-  let f = minuteCache.get(sess.tz);
-  if (!f) {
-    f = minuteOfDayer(sess.tz);
-    minuteCache.set(sess.tz, f);
-  }
-  return f;
-}
-
-/** Runs of consecutive pre- or post-market bars (bar start times, UNIX s).
- *  Classified against the given session (defaults to the active provider's);
- *  pre = [open-pre, open), post = [close, close+post). */
-export function computeSessionRuns(
-  bars: ReadonlyArray<{ time: number }>,
-  sess: MarketSessionDef = activeSession(),
-): SessionRun[] {
-  const minuteOfDay = minuteOf(sess);
-  const preLo = sess.openMin - sess.preMin;
-  const postHi = sess.closeMin + sess.postMin;
+/** Runs of consecutive pre- or post-market bars (bar start times, UNIX s). */
+export function computeSessionRuns(bars: ReadonlyArray<{ time: number }>, sessions: SymbolSessions): SessionRun[] {
   const out: SessionRun[] = [];
+  if (!sessions.hasExtendedHours) return out;
   let cur: SessionRun | null = null;
   for (const b of bars) {
-    const m = minuteOfDay(b.time);
-    const kind = m >= preLo && m < sess.openMin ? 'pre' : m >= sess.closeMin && m < postHi ? 'post' : null;
+    const kind = sessions.extendedPart(b.time);
     if (kind && cur && cur.kind === kind) {
       cur.to = b.time;
     } else {

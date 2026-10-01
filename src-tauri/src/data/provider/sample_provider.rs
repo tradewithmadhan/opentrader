@@ -26,6 +26,7 @@ use super::capabilities::{
 };
 use super::{DataProvider, HistoryProvider, RealtimeProvider, ReferenceProvider};
 use crate::data::massive_ws::{ChartAggregate, SecondAggregate, SubscribeMsg, SubscriptionState, TradeTick, WsHandle};
+use crate::data::session::{Subsession, SymbolSession};
 use crate::data::types::{Candle, DividendEvent, NewsItem, Snapshot, SplitEvent, SymbolSearchResult, TickerInfo};
 use anyhow::Result;
 use chrono::{Datelike, NaiveDate};
@@ -561,6 +562,24 @@ impl ReferenceProvider for SampleProvider {
             market_cap: Some(m.base * (100000000.0 + ((fnv1a(&format!("mc|{t}")) % 900000000) as f64))),
             figi: None,
             icon_url: None,
+        })
+    }
+
+    /// Trading sessions of a symbol, mirroring the provider caps (IST,
+    /// 09:15-15:30 regular, 09:00-16:00 extended): every sample venue trades
+    /// the same session, so one descriptor covers them all.
+    async fn symbol_session(&self, _exchange: &str, _ticker: &str) -> Result<SymbolSession> {
+        Ok(SymbolSession {
+            timezone: "Asia/Kolkata".into(),
+            session: "0915-1530".into(),
+            subsessions: vec![
+                Subsession::new("regular", "Regular Trading Hours", "0915-1530"),
+                Subsession::new("extended", "Extended Trading Hours", "0900-1600"),
+                Subsession::new("premarket", "Premarket", "0900-0915"),
+                Subsession::new("postmarket", "Postmarket", "1530-1600"),
+            ],
+            holidays: String::new(),
+            corrections: String::new(),
         })
     }
 
