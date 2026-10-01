@@ -251,9 +251,11 @@ export function migrateTab(raw: any): TabChart {
   return { id, isChart, ...reconciled, sync, link, pinned, savedLayoutId, savedLayoutName };
 }
 
-/** Full "EXCHANGE:TICKER" for a bare ticker, falling back to the ticker. */
-export function fullSymbolFor(ticker: string): string {
-  return SYMBOLS.find((s) => s.ticker === ticker)?.symbolName ?? ticker;
+/** Full "EXCHANGE:TICKER" of a pane symbol (a bare ticker not migrated yet:
+ *  the static catalog's listing, else the ticker). */
+export function fullSymbolFor(symbol: string): string {
+  if (symbol.includes(":")) return symbol;
+  return SYMBOLS.find((s) => s.ticker === symbol)?.symbolName ?? symbol;
 }
 
 /** Tab strip title — "EXCHANGE:TICKER, INTERVAL" of the tab's active pane

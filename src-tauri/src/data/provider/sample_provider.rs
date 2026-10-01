@@ -27,6 +27,7 @@ use super::capabilities::{
 use super::{DataProvider, HistoryProvider, RealtimeProvider, ReferenceProvider};
 use crate::data::massive_ws::{ChartAggregate, SecondAggregate, SubscribeMsg, SubscriptionState, TradeTick, WsHandle};
 use crate::data::session::{Subsession, SymbolSession};
+use crate::data::symbol::SymbolRef;
 use crate::data::types::{Candle, DividendEvent, NewsItem, Snapshot, SplitEvent, SymbolSearchResult, TickerInfo};
 use anyhow::Result;
 use chrono::{Datelike, NaiveDate};
@@ -441,12 +442,12 @@ fn today_utc() -> NaiveDate {
 impl HistoryProvider for SampleProvider {
     async fn daily_aggs(
         &self,
-        ticker: &str,
+        sym: &SymbolRef,
         from: NaiveDate,
         to: NaiveDate,
         adjusted: bool,
     ) -> Result<Vec<Candle>> {
-        let t = bare(ticker);
+        let t = sym.ticker.clone();
         let mut dates: Vec<NaiveDate> = Vec::new();
         let mut cur = from;
         while cur <= to {
@@ -463,13 +464,13 @@ impl HistoryProvider for SampleProvider {
 
     async fn minute_aggs(
         &self,
-        ticker: &str,
+        sym: &SymbolRef,
         mult: u32,
         from: NaiveDate,
         to: NaiveDate,
         adjusted: bool,
     ) -> Result<Vec<Candle>> {
-        let t = bare(ticker);
+        let t = sym.ticker.clone();
         let mut dates: Vec<NaiveDate> = Vec::new();
         let mut cur = from;
         while cur <= to {
@@ -486,13 +487,13 @@ impl HistoryProvider for SampleProvider {
 
     async fn second_aggs(
         &self,
-        ticker: &str,
+        sym: &SymbolRef,
         mult: u32,
         from: NaiveDate,
         to: NaiveDate,
         adjusted: bool,
     ) -> Result<Vec<Candle>> {
-        let t = bare(ticker);
+        let t = sym.ticker.clone();
         let mut dates: Vec<NaiveDate> = Vec::new();
         let mut cur = from;
         while cur <= to {
@@ -509,12 +510,12 @@ impl HistoryProvider for SampleProvider {
 
     async fn second_tail(
         &self,
-        ticker: &str,
+        sym: &SymbolRef,
         mult: u32,
         since_sec: f64,
         adjusted: bool,
     ) -> Result<Vec<Candle>> {
-        let t = bare(ticker);
+        let t = sym.ticker.clone();
         let today = today_utc();
         let dates = trading_days_back(2, today);
         Ok(apply_splits(gen_seconds_unadjusted(&t, &dates, mult), &sample_splits(&t, today), adjusted)
@@ -526,18 +527,19 @@ impl HistoryProvider for SampleProvider {
 
 #[async_trait::async_trait]
 impl ReferenceProvider for SampleProvider {
-    async fn ticker_info(&self, ticker: &str) -> Result<TickerInfo> {
-        let t = bare(ticker);
+    async fn ticker_info(&self, sym: &SymbolRef) -> Result<TickerInfo> {
+        let t = sym.ticker.clone();
         let m = model_for(&t);
         // Prefer the venue-qualified row when the caller passes one
         // ("BSE:RELIANCE"); otherwise the primary (first) listing.
-        let head = upper(ticker);
-        let head = head.split(',').next().unwrap_or("");
-        let parts: Vec<&str> = head.split(':').collect();
-        let venue = if parts.len() > 1 { Some(parts[0]) } else { None };
-        let known = venue
-            .and_then(|ex| UNIVERSE.iter().find(|r| r.ticker == t && r.exchange == ex))
-            .or_else(|| UNIVERSE.iter().find(|r| r.ticker == t));
+        let known = if sym.exchange.is_empty() {
+            UNIVERSE.iter().find(|r| r.ticker == t)
+        } else {
+            UNIVERSE
+                .iter()
+                .find(|r| r.ticker == t && r.exchange == sym.exchange)
+                .or_else(|| UNIVERSE.iter().find(|r| r.ticker == t))
+        };
         let exchange = known.map(|r| r.exchange).unwrap_or("NSE").to_string();
         let h = fnv1a(&format!("ref|{t}"));
         Ok(TickerInfo {
@@ -568,7 +570,7 @@ impl ReferenceProvider for SampleProvider {
     /// Trading sessions of a symbol, mirroring the provider caps (IST,
     /// 09:15-15:30 regular, 09:00-16:00 extended): every sample venue trades
     /// the same session, so one descriptor covers them all.
-    async fn symbol_session(&self, _exchange: &str, _ticker: &str) -> Result<SymbolSession> {
+    async fn symbol_session(&self, _sym: &SymbolRef) -> Result<SymbolSession> {
         Ok(SymbolSession {
             timezone: "Asia/Kolkata".into(),
             session: "0915-1530".into(),
@@ -583,8 +585,8 @@ impl ReferenceProvider for SampleProvider {
         })
     }
 
-    async fn ticker_snapshot(&self, ticker: &str) -> Result<Snapshot> {
-        let t = bare(ticker);
+    async fn ticker_snapshot(&self, sym: &SymbolRef) -> Result<Snapshot> {
+        let t = sym.ticker.clone();
         let to = today_utc();
         let dates = trading_days_back(5, to);
         let daily = gen_daily_unadjusted(&t, &dates);
@@ -660,16 +662,16 @@ impl ReferenceProvider for SampleProvider {
         Ok(out)
     }
 
-    async fn dividends(&self, ticker: &str) -> Vec<DividendEvent> {
-        sample_dividends(&bare(ticker), today_utc())
+    async fn dividends(&self, sym: &SymbolRef) -> Vec<DividendEvent> {
+        sample_dividends(&sym.ticker, today_utc())
     }
 
-    async fn splits(&self, ticker: &str) -> Vec<SplitEvent> {
-        sample_splits(&bare(ticker), today_utc())
+    async fn splits(&self, sym: &SymbolRef) -> Vec<SplitEvent> {
+        sample_splits(&sym.ticker, today_utc())
     }
 
-    async fn latest_news(&self, ticker: &str, limit: u32) -> Vec<NewsItem> {
-        let t = bare(ticker);
+    async fn latest_news(&self, sym: &SymbolRef, limit: u32) -> Vec<NewsItem> {
+        let t = sym.ticker.clone();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let heads = [
             format!("{t} holds gains as sample volume runs above average"),
@@ -784,9 +786,12 @@ fn tick_once(app: &AppHandle, state: &SubscriptionState, live: &mut HashMap<Stri
     let now = chrono::Utc::now().timestamp() as f64;
     for sym in syms {
         *tick_n += 1;
-        let m = model_for(&sym);
+        // The model is keyed by the bare ticker (history uses the same key),
+        // while live state and emitted events keep the full name.
+        let t = bare(&sym);
+        let m = model_for(&t);
         // Deterministic-ish walk keyed by tick counter (no entropy source).
-        let mut rng = Rng::scoped(&format!("tick|{sym}|{}", *tick_n / 7));
+        let mut rng = Rng::scoped(&format!("tick|{t}|{}", *tick_n / 7));
         let st = live_state_for(live, &sym);
         let prev = st.price;
         st.price = round2((st.price * (1.0 + rng.gaussian() * m.vol * 0.06)).max(0.5));
@@ -942,8 +947,8 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let p = SampleProvider;
         let (a, b) = rt.block_on(async {
-            (p.daily_aggs("RELIANCE", from, to, true).await.unwrap(),
-             p.daily_aggs("RELIANCE", from, to, true).await.unwrap())
+            (p.daily_aggs(&SymbolRef::parse("RELIANCE"), from, to, true).await.unwrap(),
+             p.daily_aggs(&SymbolRef::parse("RELIANCE"), from, to, true).await.unwrap())
         });
         assert!(!a.is_empty());
         assert!(same_day(&a, &b));
@@ -958,8 +963,8 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let p = SampleProvider;
         let (raw, adj) = rt.block_on(async {
-            (p.daily_aggs("RELIANCE", from, to, false).await.unwrap(),
-             p.daily_aggs("RELIANCE", from, to, true).await.unwrap())
+            (p.daily_aggs(&SymbolRef::parse("RELIANCE"), from, to, false).await.unwrap(),
+             p.daily_aggs(&SymbolRef::parse("RELIANCE"), from, to, true).await.unwrap())
         });
         assert_eq!(raw.len(), adj.len());
         assert!(!raw.is_empty());

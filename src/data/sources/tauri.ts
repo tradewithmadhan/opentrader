@@ -12,7 +12,6 @@ import { commands, events, type Candle, type ProviderCapabilities } from "../../
 import type { ChartAggregate, SecondAggregate, TradeTick } from "../datafeed-live";
 import type { NewsItem, Snapshot, TickerInfo } from "../datafeed-rest";
 import type { DataSource, HistoryLimits, MarketSessionDef, SourceSeeds } from "./types";
-import { bareSymbol } from "./types";
 
 function unwrap<T>(res: { status: "ok"; data: T } | { status: "error"; error: string }): T {
   if (res.status === "error") throw new Error(res.error);
@@ -31,11 +30,11 @@ const SESSION: MarketSessionDef = {
 };
 
 const US_SEEDS: SourceSeeds = {
-  defaultSymbol: "INTC",
+  defaultSymbol: "NASDAQ:INTC",
   starterTabs: [
-    { symbol: "INTC", interval: "1D" },
-    { symbol: "AAPL", interval: "60" },
-    { symbol: "TSLA", interval: "240" },
+    { symbol: "NASDAQ:INTC", interval: "1D" },
+    { symbol: "NASDAQ:AAPL", interval: "60" },
+    { symbol: "NASDAQ:TSLA", interval: "240" },
   ],
   watchlistGroups: [
     { name: "INDEX", tickers: ["AMEX:SPY", "NASDAQ:QQQ", "AMEX:DIA", "AMEX:IWM"] },
@@ -59,16 +58,16 @@ export const tauriSource: DataSource = {
 
   // ── History ────────────────────────────────────────────────────
   async dailyAggs(symbol: string, days: number, adjusted: boolean): Promise<Candle[]> {
-    return unwrap(await commands.getDailyHistory(bareSymbol(symbol), days, adjusted));
+    return unwrap(await commands.getDailyHistory(symbol, days, adjusted));
   },
   async minuteAggs(symbol: string, days: number, intervalMin: number, adjusted: boolean): Promise<Candle[]> {
-    return unwrap(await commands.getMinuteHistory(bareSymbol(symbol), days, intervalMin, adjusted));
+    return unwrap(await commands.getMinuteHistory(symbol, days, intervalMin, adjusted));
   },
   async secondAggs(symbol: string, mult: number, days: number, adjusted: boolean): Promise<Candle[]> {
-    return invoke<Candle[]>("get_second_history", { symbol: bareSymbol(symbol), mult, days, adjusted });
+    return invoke<Candle[]>("get_second_history", { symbol: symbol, mult, days, adjusted });
   },
   async secondTail(symbol: string, mult: number, sinceSec: number, adjusted: boolean): Promise<Candle[]> {
-    return invoke<Candle[]>("get_second_history_tail", { symbol: bareSymbol(symbol), mult, sinceSec, adjusted });
+    return invoke<Candle[]>("get_second_history_tail", { symbol: symbol, mult, sinceSec, adjusted });
   },
   async aggregatesBefore(
     symbol: string,
@@ -79,7 +78,7 @@ export const tauriSource: DataSource = {
     adjusted: boolean,
   ): Promise<Candle[]> {
     return invoke<Candle[]>("get_aggregates_before", {
-      symbol: bareSymbol(symbol),
+      symbol: symbol,
       timespan,
       mult,
       beforeSec,
@@ -94,7 +93,7 @@ export const tauriSource: DataSource = {
     adjusted: boolean,
   ): Promise<Candle[]> {
     return invoke<Candle[]>("get_daily_history_before", {
-      symbol: bareSymbol(symbol),
+      symbol: symbol,
       beforeSec,
       spanDays,
       adjusted,
@@ -103,33 +102,32 @@ export const tauriSource: DataSource = {
 
   // ── Reference ──────────────────────────────────────────────────
   async tickerInfo(symbol: string): Promise<TickerInfo> {
-    return invoke<TickerInfo>("get_ticker_info", { symbol: bareSymbol(symbol) });
+    return invoke<TickerInfo>("get_ticker_info", { symbol: symbol });
   },
   async tickerSnapshot(symbol: string): Promise<Snapshot> {
-    return invoke<Snapshot>("get_ticker_snapshot", { symbol: bareSymbol(symbol) });
+    return invoke<Snapshot>("get_ticker_snapshot", { symbol: symbol });
   },
   async search(query: string, type: string | null) {
     return unwrap(await commands.searchTickers(query, type));
   },
   async dividends(symbol: string) {
-    return unwrap(await commands.getDividends(bareSymbol(symbol)));
+    return unwrap(await commands.getDividends(symbol));
   },
   async splits(symbol: string) {
-    return unwrap(await commands.getSplits(bareSymbol(symbol)));
+    return unwrap(await commands.getSplits(symbol));
   },
   async latestNews(symbol: string, limit: number): Promise<NewsItem[]> {
-    return invoke<NewsItem[]>("get_latest_news", { symbol: bareSymbol(symbol), limit });
+    return invoke<NewsItem[]>("get_latest_news", { symbol: symbol, limit });
   },
 
   // ── Live ───────────────────────────────────────────────────────
   async setChartSubscription(symbol: string | null, pane = "0"): Promise<void> {
-    await invoke("set_chart_subscription", { pane, symbol: symbol == null ? null : bareSymbol(symbol) });
+    await invoke("set_chart_subscription", { pane, symbol: symbol == null ? null : symbol });
   },
   async setWatchlistSubscription(symbols: string[]): Promise<void> {
-    // Bare tickers only: snapshot endpoints resolve single tickers, and
-    // venue-qualified names are not valid input there. Venue lives on rows
-    // and panes, never on the backend union.
-    await invoke("set_watchlist_subscription", { symbols: symbols.map(bareSymbol) });
+    // Full names: the backend union keeps them and subscribes each listing's
+    // vendor ticker itself.
+    await invoke("set_watchlist_subscription", { symbols });
   },
   onChartAggregate(fn: (ev: ChartAggregate) => void): Promise<UnlistenFn> {
     return listen<ChartAggregate>("chart-aggregate", (e) => fn(e.payload));
@@ -165,3 +163,4 @@ export const tauriSource: DataSource = {
     return null;
   },
 };
+

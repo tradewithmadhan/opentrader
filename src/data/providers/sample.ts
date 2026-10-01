@@ -36,6 +36,14 @@ export function exchangeName(code: string | null | undefined): string {
   return EXCHANGE_NAMES[code.toUpperCase()] ?? code;
 }
 
+/** Exchange prefix of a symbol's full name. Sample codes are already prefixes
+ *  (NSE, NSE_INDEX, …), so this is the uppercase code (the default exchange
+ *  when unknown). */
+export function exchangeCode(code: string | null | undefined): string {
+  if (!code) return defaultExchange;
+  return code.toUpperCase().replace(/\s+/g, "");
+}
+
 // ── Symbol search ────────────────────────────────────────────────────────────
 
 /** "All types" dropdown options — sample `type` codes. null = no filter. */
@@ -89,6 +97,7 @@ export const sample: FrontendProvider = {
   name: "sample",
   defaultExchange,
   exchangeName,
+  exchangeCode,
   searchResultToRow,
   typeFilters,
 };

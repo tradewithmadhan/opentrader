@@ -33,7 +33,7 @@ export type LiveQuote = {
   source: "live" | "prev" | null;
 };
 
-// Keyed by upper-case symbol. A solid-store so consumers get fine-grained
+// Keyed by upper-case full name ("NASDAQ:AAPL", as live events carry it). A solid-store so consumers get fine-grained
 // reactivity per field (a row only re-renders the cell whose value changed).
 const [quotes, setQuotes] = createStore<Record<string, LiveQuote>>({});
 

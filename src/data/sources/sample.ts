@@ -40,11 +40,11 @@ const SESSION: MarketSessionDef = {
 };
 
 const SAMPLE_SEEDS: SourceSeeds = {
-  defaultSymbol: "RELIANCE",
+  defaultSymbol: "NSE:RELIANCE",
   starterTabs: [
-    { symbol: "RELIANCE", interval: "1D" },
-    { symbol: "INFY", interval: "60" },
-    { symbol: "TATAMOTORS", interval: "240" },
+    { symbol: "NSE:RELIANCE", interval: "1D" },
+    { symbol: "NSE:INFY", interval: "60" },
+    { symbol: "NSE:TATAMOTORS", interval: "240" },
   ],
   // One row per venue so every exchange shows live data out of the box.
   // (Sample generates for any ticker; the openalgo source serves the same

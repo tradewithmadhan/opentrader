@@ -165,9 +165,9 @@ function loadNotes(): Record<string, string> {
 
 export function WatchlistDetail(props: Props) {
   const short = () => shortFromSymbol(props.activeSymbol);
-  /** Full venue-qualified symbol for data fetches (info/snapshot/bars split
-   *  the venue back out); display + notes stay on the bare short. */
-  const full = () => (props.activeSymbol ?? "").toUpperCase();
+  /** Full name ("NASDAQ:AAPL"): reference / snapshot / bars lookups and the
+   *  note key (the provider tells listings apart). */
+  const full = () => (props.activeSymbol ?? "").split(",")[0].trim().toUpperCase();
 
   // Header-button state: persisted prefs + per-symbol notes, and which header
   // popover (if any) is open.
@@ -193,12 +193,15 @@ export function WatchlistDetail(props: Props) {
   onCleanup(kv.onExternalChange(PREFS_KEY, () => setPrefs(loadPrefs())));
   onCleanup(kv.onExternalChange(NOTES_KEY, () => setNotes(loadNotes())));
 
-  const note = () => notes()[short()] ?? "";
+  // Notes are keyed by the full name; a note saved under the bare ticker
+  // (before full names) is read until the symbol's note is next written.
+  const note = () => notes()[full()] ?? notes()[short()] ?? "";
   const setNote = (text: string) =>
     setNotes((prev) => {
       const next = { ...prev };
-      if (text.trim()) next[short()] = text;
-      else delete next[short()];
+      delete next[short()];
+      if (text.trim()) next[full()] = text;
+      else delete next[full()];
       return next;
     });
   const togglePanel = (p: "note" | "settings") => {

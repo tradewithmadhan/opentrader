@@ -39,6 +39,14 @@ export function exchangeName(code: string | null | undefined): string {
   return EXCHANGE_NAMES[code.toUpperCase()] ?? code;
 }
 
+/** Exchange prefix of a symbol's full name. Broker codes are already prefixes
+ *  (NSE, BSE, NFO, MCX, …), so this is the uppercase code (the default
+ *  exchange when unknown). */
+export function exchangeCode(code: string | null | undefined): string {
+  if (!code) return defaultExchange;
+  return code.toUpperCase().replace(/\s+/g, "");
+}
+
 // ── Symbol search ────────────────────────────────────────────────────────────
 
 /** "All types" dropdown options — OpenAlgo `instrumenttype` codes. */
@@ -98,6 +106,7 @@ export const openalgo: FrontendProvider = {
   name: "openalgo",
   defaultExchange,
   exchangeName,
+  exchangeCode,
   searchResultToRow,
   typeFilters,
 };

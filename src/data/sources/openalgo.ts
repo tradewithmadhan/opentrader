@@ -485,11 +485,11 @@ const SESSION: MarketSessionDef = {
 };
 
 const OPENALGO_SEEDS = {
-  defaultSymbol: "RELIANCE",
+  defaultSymbol: "NSE:RELIANCE",
   starterTabs: [
-    { symbol: "RELIANCE", interval: "1D" },
-    { symbol: "INFY", interval: "60" },
-    { symbol: "SBIN", interval: "240" },
+    { symbol: "NSE:RELIANCE", interval: "1D" },
+    { symbol: "NSE:INFY", interval: "60" },
+    { symbol: "NSE:SBIN", interval: "240" },
   ],
   watchlistGroups: [
     // Index venues verified live (NSE:NIFTY does NOT exist on the broker).
