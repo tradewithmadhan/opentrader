@@ -7,6 +7,7 @@
  * default (sample feed in a plain browser, Tauri backend in the shell).
  */
 import { sampleSource } from "./sample";
+import { openalgoSource } from "./openalgo";
 import { tauriSource } from "./tauri";
 import { useSampleFeed } from "../sample-feed";
 import type { DataSource } from "./types";
@@ -15,6 +16,7 @@ import type { DataSource } from "./types";
 const REGISTRY: Record<string, DataSource> = {
   tauri: tauriSource,
   sample: sampleSource,
+  openalgo: openalgoSource,
 };
 
 /** Persisted override key (a future settings UI writes it; `?source=` wins). */

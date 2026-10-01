@@ -1,6 +1,6 @@
 @echo off
 REM dev.bat — web dev with hot reload (browser, sample NSE/BSE data, no backend needed).
-REM Usage: double-click dev.bat, then open http://localhost:1420/
+REM Usage: double-click dev.bat, then open http://localhost:5173/
 setlocal
 cd /d "%~dp0"
 
@@ -32,7 +32,7 @@ if not exist "..\lightweight-charts-drawing\src\tv" (
 )
 
 echo.
-echo [dev] Starting... open http://localhost:1420/ in your browser.
+echo [dev] Starting... open http://localhost:5173/?source=openalgo in your browser.
 echo [dev] Sample NSE/BSE data is built in. Press Ctrl+C to stop.
 echo.
 call npm run dev
