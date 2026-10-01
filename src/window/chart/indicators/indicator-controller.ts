@@ -13,6 +13,7 @@
  */
 import type { IChartApi } from 'lightweight-charts';
 import type { Bar } from 'oakscriptjs';
+import type { ChartContext } from 'oakscriptjs/script';
 import type { IndicatorRegistryEntry } from 'lightweight-charts-indicators';
 import { getIndicatorEntry } from './registry';
 import { IndicatorLayer, type IndicatorLegendPlot, type IndicatorStyleOverrides } from './indicator-layer';
@@ -82,9 +83,15 @@ export class IndicatorController {
   /** Chart interval, for the studies' Visibility tab. */
   private interval: string | undefined;
 
-  constructor(chart: IChartApi, getBars: () => Bar[]) {
+  /** Identifies the chart for studies that keep per-chart state (strategies). */
+  private chartId: string;
+  /** Chart context of the OakScript scripts (timeframe, session...). */
+  private scriptChart: ChartContext | undefined;
+
+  constructor(chart: IChartApi, getBars: () => Bar[], chartId = "") {
     this.chart = chart;
     this.getBars = getBars;
+    this.chartId = chartId;
   }
 
   /** Reconcile the live layers with the desired ordered list of registry ids. */
@@ -128,6 +135,14 @@ export class IndicatorController {
     return cloneIndicatorOptions(this.options.get(id) ?? defaultIndicatorOptions());
   }
 
+  /** The chart symbol, interval or session changed: the OakScript chart context of every study.
+   *  The studies recompute with the new bars. */
+  setScriptChart(chart: ChartContext): void {
+    if (JSON.stringify(chart) === JSON.stringify(this.scriptChart)) return;
+    this.scriptChart = chart;
+    for (const inst of this.instances.values()) inst.layer.setScriptChart(chart);
+  }
+
   /** The chart interval changed: studies whose Visibility tab excludes it
    *  stop drawing, the others come back. */
   setChartInterval(interval: string | undefined): void {
@@ -144,6 +159,11 @@ export class IndicatorController {
 
   private onInterval(id: string): boolean {
     return isVisibleOnInterval(this.options.get(id)?.visibility, this.interval);
+  }
+
+  /** Drawn on the chart: not eye-hidden and on its intervals (strategy trade marks follow it). */
+  isDrawn(id: string): boolean {
+    return !this.hidden.has(id) && this.onInterval(id);
   }
 
   /** Draw one study with its options: not drawn when eye-hidden or off its
@@ -286,8 +306,9 @@ export class IndicatorController {
     const entry = getIndicatorEntry(id);
     if (!entry) return;
     const paneIndex = entry.overlay ? 0 : this.claimPane();
-    const layer = new IndicatorLayer(this.chart, paneIndex);
+    const layer = new IndicatorLayer(this.chart, paneIndex, this.chartId);
     layer.setLastValueVisible(this.lastValueVisible);
+    layer.setScriptChart(this.scriptChart);
     const ownScale = !!(entry.metadata as { ownScaleId?: string }).ownScaleId;
     const inst: Instance = { layer, paneIndex, overlay: entry.overlay, ownScale };
     this.instances.set(id, inst);

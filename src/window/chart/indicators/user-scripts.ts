@@ -21,6 +21,7 @@
  * the study instead.
  */
 import type { IndicatorRegistryEntry } from "lightweight-charts-indicators";
+import type { ChartContext } from "oakscriptjs/script";
 import * as scripts from "../../../data/oakscript-store";
 import { getOakEngine, OakEngineError } from "../../oakscript/engine";
 import type { OakBar, OakCompiledMeta } from "../../oakscript/engine-types";
@@ -40,7 +41,7 @@ export function userIndicatorId(scriptId: string): string {
 
 const EMPTY_RESULT = { metadata: { title: "", overlay: true }, plots: {} };
 
-type QueuedRun = { bars: OakBar[]; inputs: Record<string, unknown>; key: string };
+type QueuedRun = { bars: OakBar[]; inputs: Record<string, unknown>; chart: ChartContext | undefined; key: string };
 
 type Runtime = {
   entry: IndicatorRegistryEntry;
@@ -49,8 +50,9 @@ type Runtime = {
   result: unknown | null;
   running: boolean;
   queued: QueuedRun | null;
-  /** Whether the CURRENT worker holds this script compiled. */
-  compiled: boolean;
+  /** Worker generation this script was compiled in (-1 = not compiled); the
+   *  compile cache dies with the worker. */
+  compiledGen: number;
 };
 
 const runtimes = new Map<string, Runtime>();
@@ -89,6 +91,7 @@ function applyMeta(entry: IndicatorRegistryEntry, name: string, meta: OakCompile
   e.fillConfig = meta?.fillConfig;
   e.shapeConfig = meta?.shapeConfig;
   e.barColorConfig = meta?.barColorConfig;
+  e.arrowConfig = meta?.arrowConfig;
   e.defaultInputs = meta?.defaultInputs ?? {};
 }
 
@@ -97,29 +100,26 @@ async function runInWorker(
   scriptId: string,
   bars: OakBar[],
   inputs: Record<string, unknown>,
+  chart: ChartContext | undefined,
   key: string,
 ): Promise<void> {
   const engine = getOakEngine();
   try {
-    if (!rt.compiled) {
+    if (rt.compiledGen !== engine.generation) {
       const script = scripts.loadScript(scriptId);
       if (!script) throw new OakEngineError({ message: "Script no longer exists." });
       const meta = await engine.compile(scriptId, script.source);
-      rt.compiled = true;
+      rt.compiledGen = engine.generation;
       scripts.saveCompiledMeta(scriptId, meta);
       applyMeta(rt.entry, script.name, meta);
     }
-    rt.result = await engine.run(scriptId, bars, inputs);
+    rt.result = await engine.run(scriptId, bars, inputs, chart);
     rt.key = key;
   } catch (err) {
     // Cache the failure under this key too — otherwise every render would
     // re-schedule a doomed run in a hot loop.
     rt.result = null;
     rt.key = key;
-    if (err instanceof OakEngineError && err.fatal) {
-      // Worker was killed — its compile cache died with it.
-      for (const r of runtimes.values()) r.compiled = false;
-    }
     console.warn(`[oakscript] "${scriptId}" run failed:`, err instanceof Error ? err.message : err);
   } finally {
     rt.running = false;
@@ -127,7 +127,7 @@ async function runInWorker(
     rt.queued = null;
     if (next && next.key !== rt.key) {
       rt.running = true;
-      void runInWorker(rt, scriptId, next.bars, next.inputs, next.key);
+      void runInWorker(rt, scriptId, next.bars, next.inputs, next.chart, next.key);
     } else {
       dispatchUpdated(scriptId, false);
     }
@@ -135,20 +135,21 @@ async function runInWorker(
 }
 
 function makeCalculate(scriptId: string): IndicatorRegistryEntry["calculate"] {
-  return (bars: unknown, inputs?: unknown) => {
+  return (bars: unknown, inputs?: unknown, ctx?: unknown) => {
     const rt = runtimes.get(scriptId);
     if (!rt) return EMPTY_RESULT;
     const typedBars = bars as OakBar[];
     const typedInputs = (inputs ?? {}) as Record<string, unknown>;
-    const key = stalenessKey(typedBars, typedInputs);
+    const chart = (ctx as { chart?: ChartContext } | undefined)?.chart;
+    const key = `${stalenessKey(typedBars, typedInputs)}:${JSON.stringify(chart ?? null)}`;
     if (rt.key !== key) {
       // Snapshot the array (ChartView mutates `raw` in place on live ticks).
       const snapshot = typedBars.slice();
       if (rt.running) {
-        rt.queued = { bars: snapshot, inputs: typedInputs, key };
+        rt.queued = { bars: snapshot, inputs: typedInputs, chart, key };
       } else {
         rt.running = true;
-        void runInWorker(rt, scriptId, snapshot, typedInputs, key);
+        void runInWorker(rt, scriptId, snapshot, typedInputs, chart, key);
       }
     }
     return rt.result ?? EMPTY_RESULT;
@@ -172,7 +173,7 @@ export function getUserIndicatorEntry(id: string): IndicatorRegistryEntry | unde
     calculate: makeCalculate(scriptId),
   } as unknown as IndicatorRegistryEntry;
   applyMeta(entry, script.name, script.meta);
-  runtimes.set(scriptId, { entry, key: null, result: null, running: false, queued: null, compiled: false });
+  runtimes.set(scriptId, { entry, key: null, result: null, running: false, queued: null, compiledGen: -1 });
   return entry;
 }
 
@@ -204,7 +205,7 @@ export function notifyScriptCompiled(scriptId: string, meta: OakCompiledMeta): v
   const structural = (rt.entry.overlay ?? true) !== meta.overlay;
   const script = scripts.loadScript(scriptId);
   applyMeta(rt.entry, script?.name ?? meta.title, meta);
-  rt.compiled = true; // same shared worker the panel compiled on
+  rt.compiledGen = getOakEngine().generation; // same shared worker the panel compiled on
   rt.key = null; // force a fresh run on the next render
   rt.result = null; // old plots may not match the new plotConfig
   dispatchUpdated(scriptId, structural);

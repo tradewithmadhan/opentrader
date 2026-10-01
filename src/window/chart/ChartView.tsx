@@ -20,7 +20,10 @@ import {
   PriceScaleMode,
   TickMarkType,
   createChart,
+  createSeriesMarkers,
   createTextWatermark,
+  type ISeriesMarkersPluginApi,
+  type SeriesMarker,
   type IChartApi,
   type ISeriesApi,
   type ITextWatermarkPluginApi,
@@ -105,11 +108,15 @@ import { quoteFor } from "../../data/quotes";
 import { providerMarketSession } from "../../data/market-session";
 import { activeLink, crossWindowCrosshairOn, postLinkRange, postLinkTime } from "../../data/tab-link-bus";
 import { IndicatorLegend } from "./IndicatorLegend";
-import { IndicatorSettingsDialog } from "./IndicatorSettingsDialog";
+import { IndicatorSettingsDialog, type DialogTab, type StrategyDialogConfig } from "./IndicatorSettingsDialog";
+import { DEFAULT_SYMBOL, type StrategyProperties } from "../../backtester/types";
 import { PriceScaleWatch } from "./scale-watch";
 import { IndicatorController, type IndicatorLegendRow } from "./indicators/indicator-controller";
 import { getIndicatorEntry } from "./indicators/registry";
 import { OAKSCRIPT_UPDATED_EVENT, userIndicatorId, type OakScriptUpdatedDetail } from "./indicators/user-scripts";
+import { scriptChartContext } from "./indicators/script-chart";
+import { PROPERTIES_INPUT, STRATEGY_UPDATED_EVENT, isStrategyId, strategyDefaults, strategyKeyOf, strategyStyleOf, type StrategyUpdatedDetail } from "./indicators/strategy-entries";
+import { strategyTester } from "../../data/strategy-tester-store";
 import { registerChartState, unregisterChartState } from "../../data/chart-state-registry";
 import { alertStore } from "../../data/alert-store";
 import { describeCondition, isPercentOperator } from "../../data/alert-condition";
@@ -232,7 +239,7 @@ const MIN_VISIBLE_BARS = 5;
 const SYNC_MIN_BARS = 2;
 /** Depth cap for history loaded on behalf of date-range / time sync (display
  *  bars); the user's own scroll-back pager is not capped. Measured 29/09/2026
- *  (research/goto-sync): a 1m pane at ~94k bars blocks the main thread up to
+ *  (.tmp/goto-sync): a 1m pane at ~94k bars blocks the main thread up to
  *  ~190 ms per load, at 250k bars up to 853 ms. 100k = about one year of 1m
  *  regular-session bars (20k reached only ~50 sessions back). */
 const SYNC_LOAD_MAX_BARS = 100_000;
@@ -601,6 +608,9 @@ export function ChartView(props: Props) {
   let barWrap!: HTMLDivElement;
   let chart: IChartApi | null = null;
   let series: AnySeries | null = null;
+  // Strategy trade marks on `series` (see applyStrategyMarkers).
+  let tradeMarkers: ISeriesMarkersPluginApi<Time> | null = null;
+  let tradeMarkersSeries: ISeriesApi<any> | null = null;
   // Session-breaks separators (Events tab). One instance per chart, re-attached
   // to the price series whenever it's rebuilt (chart-type change).
   const sessionBreaks = new SessionBreaksPrimitive();
@@ -681,6 +691,15 @@ export function ChartView(props: Props) {
     else clearActiveChartProbe(probeOwner);
   });
   onCleanup(() => clearActiveChartProbe(probeOwner));
+  // Strategy Tester: the active pane's id selects which chart's report shows.
+  createEffect(() => {
+    // Every open tab keeps its grid mounted: only the SHOWN tab's active pane counts.
+    if (props.active && props.shown !== false) strategyTester.setActiveChartId(String(paneId));
+  });
+  onCleanup(() => {
+    if (strategyTester.activeChartId() === String(paneId)) strategyTester.setActiveChartId(null);
+    strategyTester.dropChart(String(paneId));
+  });
   const scaleWatch = new PriceScaleWatch(() => {
     setCoordEpoch((n) => n + 1);
     // Pixel-anchored styles follow the price scale (base level, gradient
@@ -726,6 +745,8 @@ export function ChartView(props: Props) {
   const [indLegend, setIndLegend] = createSignal<IndicatorLegendRow[]>([]);
   /** Registry id of the study whose Settings dialog is open (null = closed). */
   const [settingsForId, setSettingsForId] = createSignal<string | null>(null);
+  /** Tab the next Settings dialog opens on (report toolbar gear = Properties). */
+  const [settingsTab, setSettingsTab] = createSignal<DialogTab | undefined>(undefined);
 
   function refreshIndicatorLegend(time?: number) {
     setIndLegend(controller?.getLegend(time) ?? []);
@@ -744,6 +765,7 @@ export function ChartView(props: Props) {
       onToggleHide={(id) => {
         controller?.toggleHidden(id);
         refreshIndicatorLegend(crosshairActive ? lastLegendTime : undefined);
+        if (isStrategyId(id)) applyStrategyMarkers();
       }}
       onSettings={(id) => setSettingsForId(id)}
       onRemove={(id) => props.onRemoveIndicator?.(id)}
@@ -1187,6 +1209,7 @@ export function ChartView(props: Props) {
         onSelect: () => {
           controller?.toggleHidden(id);
           refreshIndicatorLegend(crosshairActive ? lastLegendTime : undefined);
+          if (isStrategyId(id)) applyStrategyMarkers();
         } },
       { kind: "item", id: "remove", label: "Remove", shortcut: "Del", icon: CtxIcons.remove,
         onSelect: () => props.onRemoveIndicator?.(id) },
@@ -1637,6 +1660,10 @@ export function ChartView(props: Props) {
     // their boundaries against the current bars.
     series.attachPrimitive(sessionBreaks);
     series.attachPrimitive(sessionBackgrounds);
+    // Strategy trade marks belong to the series: re-attach to the new one.
+    tradeMarkersSeries = null;
+    tradeMarkers = null;
+    applyStrategyMarkers();
     // The old series took its price lines with it — force a rebuild.
     highLine = null;
     lowLine = null;
@@ -2416,8 +2443,8 @@ export function ChartView(props: Props) {
     ts.setVisibleLogicalRange({ from: i - 0.5, to: l + 0.5 });
   }
 
-  /** Bar index for a "Go to" date (TV `_gotoTimeImpl`): intraday, the bar
-   *  holding the time (TV aligns the target to its bar start), else the first
+  /** Bar index for a "Go to" date (the reference app `_gotoTimeImpl`): intraday, the bar
+   *  holding the time (the reference app aligns the target to its bar start), else the first
    *  bar after it; the first bar at/after the date on DWM. */
   function gotoDateIndex(sec: number): number {
     const iv = props.interval ?? "1D";
@@ -2429,7 +2456,7 @@ export function ChartView(props: Props) {
   }
 
   type GotoOpts = {
-    /** Centre the target even when it is already in view (TV Go to). */
+    /** Centre the target even when it is already in view (the reference app Go to). */
     alignIfVisible?: boolean;
     /** The user's own move (Go to): the new view is persisted and sent to
      *  synced panes / linked tabs like a scroll. Sync followers leave it off. */
@@ -2447,7 +2474,7 @@ export function ChartView(props: Props) {
    *  history back to it if needed (one request, capped) and centres it at the
    *  current bar spacing. It only scrolls: the crosshair is the crosshair
    *  sync's business. The Go to dialog uses it with `alignIfVisible` and
-   *  `driver` (TV `gotoTime`). */
+   *  `driver` (the reference app `gotoTime`). */
   async function goToTime(targetSec: number, opts: GotoOpts = {}) {
     if (!chart || !series || raw.length === 0) return;
     const ts = chart.timeScale();
@@ -2482,7 +2509,7 @@ export function ChartView(props: Props) {
     }
   }
 
-  /** Go to "Custom range" (TV `setTimeFrame` with a time range): load history
+  /** Go to "Custom range" (the reference app `setTimeFrame` with a time range): load history
    *  back to `fromSec` if needed, then frame [fromSec, toSec] like a date-range
    *  sync target. The user's own move: persisted and sent to synced panes. */
   async function goToRange(fromSec: number, toSec: number) {
@@ -2496,7 +2523,7 @@ export function ChartView(props: Props) {
     try {
       if (!(await loadHistoryTo(() => fromSec, () => myGoto === gotoGen))) return;
       if (myGoto !== gotoGen || !chart) return;
-      // TV `gotoTimeRange`: both ends go to the first bar at/after their time.
+      // The reference app `gotoTimeRange`: both ends go to the first bar at/after their time.
       applySyncRange(fromSec, toSec, true, indexAtOrAfter);
     } finally {
       clearTimeout(dimTimer);
@@ -2531,7 +2558,7 @@ export function ChartView(props: Props) {
 
     // The controller reads bars from `raw` on demand, so it always recomputes
     // against the freshest dataset without threading bars in.
-    controller = new IndicatorController(chart, () => raw as unknown as Bar[]);
+    controller = new IndicatorController(chart, () => raw as unknown as Bar[], String(paneId));
     setChartReady((n) => n + 1);
 
     hostW = host.clientWidth;
@@ -3094,14 +3121,14 @@ export function ChartView(props: Props) {
     });
 
     // "Go to" dialog (bottom-bar GoToDateDialog). The dialog sends wall-clock
-    // dates; each pane reads them in its own time zone (TV converts in the
+    // dates; each pane reads them in its own time zone (the reference app converts in the
     // chart time zone). DWM targets are calendar dates.
     const isDwm = () => {
       const iv = props.interval ?? "1D";
       return !isIntradayResolution(iv) && !isSecondResolution(iv);
     };
     const wallSec = (w: WallDate, h = 0, mi = 0) => wallTimeToUtc(props.timeZone ?? "UTC", w.y, w.m, w.d, h, mi);
-    // Date tab (TV `gotoTime`): the active chart only; history loads back to
+    // Date tab (the reference app `gotoTime`): the active chart only; history loads back to
     // the date, and the target is centred even when already in view.
     const onGoToDate = (e: Event) => {
       const d = (e as CustomEvent<{ date?: WallDate; minutes?: number }>).detail;
@@ -3115,7 +3142,7 @@ export function ChartView(props: Props) {
     window.addEventListener("chart-goto-date", whenShown(onGoToDate));
     onCleanup(() => window.removeEventListener("chart-goto-date", whenShown(onGoToDate)));
 
-    // Custom range tab (TV `setTimeFrame`): the active chart, or every chart
+    // Custom range tab (the reference app `setTimeFrame`): the active chart, or every chart
     // when Interval sync is on. Frames [From, To] (date + time; DWM: dates).
     const onGoToRange = (e: Event) => {
       const d = (e as CustomEvent<{ from?: WallTime; to?: WallTime }>).detail;
@@ -3126,7 +3153,7 @@ export function ChartView(props: Props) {
       void goToRange(at(d.from), at(d.to));
     };
     // The dialog asks the active chart, when it opens, for its first and last
-    // fully visible bars (TV `visibleBarsStrictRange`: the Custom range
+    // fully visible bars (the reference app `visibleBarsStrictRange`: the Custom range
     // start values) and whether it is DWM (date only, time fields disabled).
     const onGoToQuery = (e: Event) => {
       const q = (e as CustomEvent<GotoQuery>).detail;
@@ -3353,6 +3380,95 @@ export function ChartView(props: Props) {
     };
     window.addEventListener(OAKSCRIPT_UPDATED_EVENT, onOakScriptUpdated);
     onCleanup(() => window.removeEventListener(OAKSCRIPT_UPDATED_EVENT, onOakScriptUpdated));
+  });
+  // Strategy Tester requests for the active chart: open a study's Settings
+  // dialog, or merge input values into a study (strategy properties).
+  onMount(() => {
+    const onOpenSettings = (e: Event) => {
+      const d = (e as CustomEvent<{ id: string; tab?: DialogTab }>).detail;
+      const id = d?.id;
+      if (!props.active || props.shown === false || !id || !(props.indicators ?? []).includes(id)) return;
+      setSettingsTab(d.tab);
+      setSettingsForId(id);
+    };
+    const onPatchInputs = (e: Event) => {
+      const d = (e as CustomEvent<{ id: string; patch: Record<string, unknown> }>).detail;
+      if (!props.active || props.shown === false || !d || !controller || !(props.indicators ?? []).includes(d.id)) return;
+      const inputs = { ...(controller.getInputs(d.id) ?? {}), ...d.patch };
+      const styles = controller.getStyles(d.id) ?? {};
+      const options = controller.getOptions(d.id);
+      controller.applySettings(d.id, inputs, styles, options);
+      props.onIndicatorSettings?.(d.id, { inputs, styles, options });
+    };
+    window.addEventListener("chart-open-study-settings", onOpenSettings);
+    window.addEventListener("chart-patch-study-inputs", onPatchInputs);
+    onCleanup(() => {
+      window.removeEventListener("chart-open-study-settings", onOpenSettings);
+      window.removeEventListener("chart-patch-study-inputs", onPatchInputs);
+    });
+  });
+  // Strategies: filled orders as trade marks on the price series (the reference app:
+  // buy = #2962ff arrow up below the bar, sell = #ff1744 arrow down above it,
+  // with the order signal and the signed quantity).
+  /** Settings dialog config of a strategy study: effective and script
+   *  strategy() properties, trade-mark style, chart currency / interval /
+   *  exchange time zone (the backtest's symbol defaults). */
+  function strategyDialogConfig(id: string, inputs: Record<string, unknown>): StrategyDialogConfig | undefined {
+    if (!isStrategyId(id)) return undefined;
+    const defaults = strategyDefaults(id);
+    if (!defaults) return undefined;
+    const overrides = (inputs[PROPERTIES_INPUT] ?? {}) as Partial<StrategyProperties>;
+    return {
+      properties: { ...defaults, ...overrides },
+      defaults,
+      style: strategyStyleOf(inputs),
+      chartCurrency: defaults.currency,
+      interval: props.interval ?? "1D",
+      timeZone: DEFAULT_SYMBOL.timezone,
+    };
+  }
+  function applyStrategyMarkers() {
+    if (!series) return;
+    const marks: SeriesMarker<Time>[] = [];
+    for (const id of (props.indicators ?? []).filter(isStrategyId)) {
+      // Settings > Style: Trades on chart / Signal labels / Quantity; nothing
+      // while the study is eye-hidden or off its Visibility intervals.
+      const style = strategyStyleOf(controller?.getInputs(id));
+      if (!style.tradesOnChart || (controller && !controller.isDrawn(id))) continue;
+      const report = strategyTester.run(String(paneId), strategyKeyOf(id))?.report;
+      for (const o of report?.filledOrders ?? []) {
+        const qty = style.quantity ? `${o.buy ? "+" : "−"}${o.qty}` : "";
+        const signal = style.signalLabels ? o.comment : "";
+        const text = (o.buy ? [signal, qty] : [qty, signal]).filter(Boolean).join(" ");
+        marks.push(
+          o.buy
+            ? { time: (o.time / 1000) as Time, position: "belowBar", shape: "arrowUp", color: "#2962ff", text }
+            : { time: (o.time / 1000) as Time, position: "aboveBar", shape: "arrowDown", color: "#ff1744", text },
+        );
+      }
+    }
+    marks.sort((a, b) => (a.time as number) - (b.time as number));
+    if (tradeMarkersSeries !== series) {
+      tradeMarkers?.detach();
+      tradeMarkers = marks.length ? createSeriesMarkers(series, marks) : null;
+      tradeMarkersSeries = tradeMarkers ? series : null;
+    } else tradeMarkers?.setMarkers(marks);
+  }
+  createEffect(() => {
+    props.indicators;
+    applyStrategyMarkers();
+  });
+  // Strategies: a backtest of this chart finished — redraw its trade marks.
+  onMount(() => {
+    const onStrategyUpdated = (e: Event) => {
+      const detail = (e as CustomEvent<StrategyUpdatedDetail>).detail;
+      if (!detail || detail.chartId !== String(paneId)) return;
+      controller?.renderAll();
+      refreshIndicatorLegend();
+      applyStrategyMarkers();
+    };
+    window.addEventListener(STRATEGY_UPDATED_EVENT, onStrategyUpdated);
+    onCleanup(() => window.removeEventListener(STRATEGY_UPDATED_EVENT, onStrategyUpdated));
   });
   const [history] = createResource<BarsResult | null, string>(
     () =>
@@ -3737,12 +3853,19 @@ export function ChartView(props: Props) {
     refreshIndicatorLegend(crosshairActive ? lastLegendTime : undefined);
   });
 
+  // OakScript chart context (timeframe, session, tickerid) of the studies.
+  createEffect(() => {
+    chartReady();
+    controller?.setScriptChart(scriptChartContext(props.symbol, props.interval, props.session));
+  });
+
   // Indicator Visibility tab: studies off the chart interval stop drawing.
   createEffect(() => {
     chartReady();
     const iv = props.interval ?? "1D";
     controller?.setChartInterval(iv);
     refreshIndicatorLegend(crosshairActive ? lastLegendTime : undefined);
+    applyStrategyMarkers();
   });
 
   // Scales → "Indicators and financials": last-value axis labels on the study
@@ -4585,10 +4708,15 @@ export function ChartView(props: Props) {
           const entry = getIndicatorEntry(id());
           const values = controller?.getInputs(id());
           const styles = controller?.getStyles(id());
+          // Read once: the dialog's controls may call back while it closes.
+          const strategy = values ? strategyDialogConfig(id(), values) : undefined;
+          const tab = settingsTab();
           return (
             <Show when={entry && values && styles}>
               <IndicatorSettingsDialog
-                title={entry!.name}
+                title={isStrategyId(id()) ? (entry!.shortName ?? entry!.name) : entry!.name}
+                strategy={strategy}
+                initialTab={tab}
                 inputConfig={entry!.inputConfig}
                 plotConfig={entry!.plotConfig}
                 inputs={values!}
@@ -4598,9 +4726,13 @@ export function ChartView(props: Props) {
                   controller?.applySettings(id(), inputs, s, options);
                   props.onIndicatorSettings?.(id(), { inputs, styles: s, options });
                   refreshIndicatorLegend(crosshairActive ? lastLegendTime : undefined);
+                  if (isStrategyId(id())) applyStrategyMarkers();
                 }}
                 onSaveAsDefault={(next) => saveIndicatorDefault(id(), next)}
-                onClose={() => setSettingsForId(null)}
+                onClose={() => {
+                  setSettingsForId(null);
+                  setSettingsTab(undefined);
+                }}
               />
             </Show>
           );

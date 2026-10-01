@@ -1,9 +1,9 @@
 /*
- * Bundled brand fonts:
+ * Bundled fonts (SIL Open Font License 1.1, license text next to the files):
  *
- *   Euclid Circular B Medium  (weight 600)
- *   Euclid Circular B Regular (weight 400)
- *   Monaco                    (weight 400)
+ *   Inter Medium          (weight 600)  src/assets/fonts/Inter-OFL.txt
+ *   Inter Regular         (weight 400)
+ *   JetBrains Mono        (weight 400)  src/assets/fonts/JetBrainsMono-OFL.txt
  *
  * Without this file `--font-family-base` was undefined and the app fell back to
  * the UA default typeface. The vars are defined here, alongside the
@@ -14,24 +14,24 @@
  */
 
 @font-face {
-  font-family: 'Monaco';
-  src: url('../assets/fonts/Monaco.ttf') format('truetype');
+  font-family: 'JetBrains Mono';
+  src: url('../assets/fonts/JetBrainsMono-Regular.woff2') format('woff2');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
 }
 
 @font-face {
-  font-family: 'Euclid Circular B';
-  src: url('../assets/fonts/EuclidCircularB-Regular.ttf') format('truetype');
+  font-family: 'Inter';
+  src: url('../assets/fonts/Inter-Regular.woff2') format('woff2');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
 }
 
 @font-face {
-  font-family: 'Euclid Circular B';
-  src: url('../assets/fonts/EuclidCircularB-Medium.ttf') format('truetype');
+  font-family: 'Inter';
+  src: url('../assets/fonts/Inter-Medium.woff2') format('woff2');
   font-weight: 600;
   font-style: normal;
   font-display: swap;
@@ -40,8 +40,8 @@
 :root {
   --font-family-base: -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto,
     SegoeUI, Ubuntu, sans-serif;
-  /* Brand font — used by accent classes (big numbers / marketing). */
-  --font-family-accent: 'Euclid Circular B', -apple-system, BlinkMacSystemFont,
+  /* Accent font — used by accent classes (big numbers / marketing). */
+  --font-family-accent: 'Inter', -apple-system, BlinkMacSystemFont,
     'Trebuchet MS', Roboto, SegoeUI, Ubuntu, sans-serif;
-  --font-family-mono: 'Monaco', Menlo, Consolas, 'Liberation Mono', monospace;
+  --font-family-mono: 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 }
