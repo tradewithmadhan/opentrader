@@ -19,7 +19,6 @@ import { createStore } from "solid-js/store";
 import { onTradeTick, type TradeTick } from "./datafeed";
 import { setSubscription } from "./subscriptions";
 import { watchlistStore } from "./watchlist-store";
-import { bareSymbol } from "./sources/types";
 
 /** Live per-symbol quote. Fields stay null until a tick carries them, so the
  *  static seed value shows until then. `last`/`change`/`changePercent`/`volume`
@@ -37,15 +36,13 @@ export type LiveQuote = {
 // reactivity per field (a row only re-renders the cell whose value changed).
 const [quotes, setQuotes] = createStore<Record<string, LiveQuote>>({});
 
-/** Reactive read of one symbol's quote (undefined until a tick arrives).
- *  Venue-insensitive: qualified ("BSE:RELIANCE") and bare ("RELIANCE") names
- *  resolve to the same bare-keyed entry. */
+/** Reactive read of one symbol's quote (undefined until a tick arrives). */
 export function quoteFor(symbol: string): LiveQuote | undefined {
-  return quotes[bareSymbol(symbol).toUpperCase()];
+  return quotes[symbol.toUpperCase()];
 }
 
 function applyTick(t: TradeTick): void {
-  const key = bareSymbol(t.symbol).toUpperCase();
+  const key = t.symbol.toUpperCase();
   const cur = quotes[key];
   // Null fields (the WS push path carries none) must not clobber a value the
   // poller already supplied — keep the prior value for those.
@@ -68,9 +65,7 @@ createRoot(() => {
   createEffect(() => {
     const a = watchlistStore.active();
     const rows = a ? [...a.groups.flatMap((g) => g.rows), ...a.extras] : [];
-    // Full tickers: venue flows to sources that need it (openalgo splits it);
-    // bare-keyed matching happens in applyTick/quoteFor.
-    const symbols = [...new Set(rows.map((r) => r.ticker.toUpperCase()))];
+    const symbols = [...new Set(rows.map((r) => r.short.toUpperCase()))];
     setSubscription("watchlist", symbols);
   });
 

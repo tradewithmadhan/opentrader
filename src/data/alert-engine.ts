@@ -27,7 +27,6 @@ import { chartLastBarTime, indicatorPlotValue } from "./chart-state-registry";
 import { getIndicatorEntry } from "../window/chart/indicators/registry";
 import { commands } from "../bindings";
 import * as kv from "./kv";
-import { bareSymbol } from "./sources/types";
 
 /** True inside the Tauri shell — gates the native webhook route. */
 const HAS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -251,11 +250,9 @@ function fire(rule: AlertRule, ctx: EvalContext, barRefMs: number): void {
   }
 }
 
-/** Evaluate every enabled rule for the symbol that just ticked. Tick symbols
- *  normalize to bare tickers: transports may echo the subscribed (possibly
- *  venue-qualified) name while rules and the chart registry are bare-keyed. */
+/** Evaluate every enabled rule for the symbol that just ticked. */
 function onTick(t: TradeTick): void {
-  const symbol = bareSymbol(t.symbol).toUpperCase();
+  const symbol = t.symbol.toUpperCase();
   const rules = alertStore.enabledRules().filter((r) => r.symbol === symbol);
   if (rules.length === 0) return;
 
