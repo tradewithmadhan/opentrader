@@ -37,15 +37,16 @@ export type LiveQuote = {
 // reactivity per field (a row only re-renders the cell whose value changed).
 const [quotes, setQuotes] = createStore<Record<string, LiveQuote>>({});
 
-/** Reactive read of one symbol's quote (undefined until a tick arrives).
- *  Venue-insensitive: qualified ("BSE:RELIANCE") and bare ("RELIANCE") names
- *  resolve to the same bare-keyed entry. */
+/** Reactive read of one symbol's quote (undefined until a tick arrives). Full
+ *  names hit their own listing's entry ("BSE:RELIANCE" ≠ "NSE:RELIANCE"); a
+ *  bare ticker falls back to its own bare-keyed entry (older transports). */
 export function quoteFor(symbol: string): LiveQuote | undefined {
-  return quotes[bareSymbol(symbol).toUpperCase()];
+  const full = symbol.toUpperCase();
+  return quotes[full] ?? quotes[bareSymbol(symbol).toUpperCase()];
 }
 
 function applyTick(t: TradeTick): void {
-  const key = bareSymbol(t.symbol).toUpperCase();
+  const key = t.symbol.toUpperCase();
   const cur = quotes[key];
   // Null fields (the WS push path carries none) must not clobber a value the
   // poller already supplied — keep the prior value for those.
@@ -68,8 +69,8 @@ createRoot(() => {
   createEffect(() => {
     const a = watchlistStore.active();
     const rows = a ? [...a.groups.flatMap((g) => g.rows), ...a.extras] : [];
-    // Full tickers: venue flows to sources that need it (openalgo splits it);
-    // bare-keyed matching happens in applyTick/quoteFor.
+    // Full names: each listing subscribes (and ticks) under its own name;
+    // matching stays exact in applyTick/quoteFor.
     const symbols = [...new Set(rows.map((r) => r.ticker.toUpperCase()))];
     setSubscription("watchlist", symbols);
   });

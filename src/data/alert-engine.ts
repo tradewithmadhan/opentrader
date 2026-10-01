@@ -251,24 +251,32 @@ function fire(rule: AlertRule, ctx: EvalContext, barRefMs: number): void {
   }
 }
 
-/** Evaluate every enabled rule for the symbol that just ticked. Tick symbols
- *  normalize to bare tickers: transports may echo the subscribed (possibly
- *  venue-qualified) name while rules and the chart registry are bare-keyed. */
+/** Evaluate every enabled rule for the symbol that just ticked. Ticks carry
+ *  the full name; rules are stored venue-qualified (and migrated there on
+ *  load), so matching is exact per listing. The bare fallback covers rules
+ *  saved before the migration ran and transports that echo a bare ticker —
+ *  but only when at least one side has no venue, so one listing's ticks can
+ *  never fire another listing's rules. */
 function onTick(t: TradeTick): void {
-  const symbol = bareSymbol(t.symbol).toUpperCase();
-  const rules = alertStore.enabledRules().filter((r) => r.symbol === symbol);
+  const full = t.symbol.toUpperCase();
+  const bare = bareSymbol(t.symbol).toUpperCase();
+  const rules = alertStore.enabledRules().filter((r) => {
+    if (r.symbol === full) return true;
+    if (bareSymbol(r.symbol).toUpperCase() !== bare) return false;
+    return !r.symbol.includes(":") || !full.includes(":");
+  });
   if (rules.length === 0) return;
 
   const now = Date.now();
   // Prefer the charted bar's open time for once-per-bar throttling + the fire's
   // bar_time; falls back to wall-clock for symbols that aren't charted.
-  const barRefMs = chartLastBarTime(symbol) ?? now;
+  const barRefMs = chartLastBarTime(full) ?? now;
   const ctx: EvalContext = {
     price: t.price,
     changePercent: t.changePercent ?? null,
     timeSec: Math.floor(now / 1000),
     indicatorFallback: (indicatorId, plot) =>
-      indicatorPollCache.get(pollKey(symbol, indicatorId, plot)) ?? null,
+      indicatorPollCache.get(pollKey(full, indicatorId, plot)) ?? null,
   };
 
   for (const rule of rules) {

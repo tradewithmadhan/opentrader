@@ -18,7 +18,6 @@ import { createStore, produce } from "solid-js/store";
 import { isFullSymbol, toFullSymbol } from "./datafeed";
 import { migrateDrawingKey } from "../window/drawings/persistence";
 import * as kv from "./kv";
-import { bareSymbol } from "./sources/types";
 
 /** A side of the condition. Price = the symbol's last/close; value = a fixed
  *  number; drawing = a chart drawing's price level (horizontal line/ray, trend
@@ -201,13 +200,14 @@ export const alertStore = {
   },
   enabledRules: (): AlertRule[] => state.rules.filter((r) => r.enabled),
 
-  /** Create a rule and return its id. Symbols normalize to bare tickers:
-   *  ticks arrive bare from every transport, so matching stays exact. */
+  /** Create a rule and return its id. Symbols stay venue-qualified
+   *  ("BSE:RELIANCE" ≠ "NSE:RELIANCE"); ticks match the same way, so a rule
+   *  never fires on another listing's ticks. */
   add(rule: NewAlertRule): string {
     const id = uid("al");
     const full: AlertRule = {
       ...rule,
-      symbol: bareSymbol(rule.symbol).toUpperCase(),
+      symbol: rule.symbol.toUpperCase(),
       enabled: rule.enabled ?? true,
       id,
       createdAt: Date.now(),
@@ -216,11 +216,11 @@ export const alertStore = {
     return id;
   },
 
-  /** Patch an existing rule in place (symbol patches normalize like `add`). */
+  /** Patch an existing rule in place (symbol patches keep their venue like `add`). */
   update(id: string, patch: Partial<Omit<AlertRule, "id">>): void {
     const i = state.rules.findIndex((r) => r.id === id);
     if (i < 0) return;
-    if (patch.symbol !== undefined) patch = { ...patch, symbol: bareSymbol(patch.symbol).toUpperCase() };
+    if (patch.symbol !== undefined) patch = { ...patch, symbol: patch.symbol.toUpperCase() };
     setState("rules", i, produce((r: AlertRule) => Object.assign(r, patch)));
   },
 
