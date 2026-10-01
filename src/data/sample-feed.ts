@@ -695,17 +695,17 @@ const UNIVERSE: UniverseRow[] = [
   { ticker: "ULTRACEMCO", name: "UltraTech Cement Ltd.", exchange: "NSE", type: "EQ", sector: "Cement" },
   { ticker: "WIPRO", name: "Wipro Ltd.", exchange: "NSE", type: "EQ", sector: "Technology" },
   { ticker: "TATASTEEL", name: "Tata Steel Ltd.", exchange: "BSE", type: "EQ", sector: "Metals" },
-  { ticker: "SENSEX", name: "BSE SENSEX Index", exchange: "BSE", type: "IX", sector: "Index" },
-  // NSE indices.
-  { ticker: "NIFTY", name: "Nifty 50 Index", exchange: "NSE", type: "IX", sector: "Index" },
-  { ticker: "BANKNIFTY", name: "Nifty Bank Index", exchange: "NSE", type: "IX", sector: "Index" },
-  { ticker: "FINNIFTY", name: "Nifty Financial Services Index", exchange: "NSE", type: "IX", sector: "Index" },
-  { ticker: "INDIAVIX", name: "India VIX Volatility Index", exchange: "NSE", type: "IX", sector: "Index" },
+  { ticker: "SENSEX", name: "BSE SENSEX Index", exchange: "BSE_INDEX", type: "IX", sector: "Index" },
+  // NSE indices (true index venues, matching the broker).
+  { ticker: "NIFTY", name: "Nifty 50 Index", exchange: "NSE_INDEX", type: "IX", sector: "Index" },
+  { ticker: "BANKNIFTY", name: "Nifty Bank Index", exchange: "NSE_INDEX", type: "IX", sector: "Index" },
+  { ticker: "FINNIFTY", name: "Nifty Financial Services Index", exchange: "NSE_INDEX", type: "IX", sector: "Index" },
+  { ticker: "INDIAVIX", name: "India VIX Volatility Index", exchange: "NSE_INDEX", type: "IX", sector: "Index" },
   // BSE venue-qualified equities (same issuer, BSE venue) + BSE index.
   { ticker: "RELIANCE", name: "Reliance Industries Ltd.", exchange: "BSE", type: "EQ", sector: "Energy" },
   { ticker: "INFY", name: "Infosys Ltd.", exchange: "BSE", type: "EQ", sector: "Banking" },
   { ticker: "TCS", name: "Tata Consultancy Services", exchange: "BSE", type: "EQ", sector: "Technology" },
-  { ticker: "BANKEX", name: "BSE Bankex Index", exchange: "BSE", type: "IX", sector: "Index" },
+  { ticker: "BANKEX", name: "BSE Bankex Index", exchange: "BSE_INDEX", type: "IX", sector: "Index" },
   // NFO derivatives (short readable tickers; full contract detail in description).
   { ticker: "NIFTYFUT", name: "Nifty Futures, Monthly Expiry", exchange: "NFO", type: "FUT", sector: "Derivatives" },
   { ticker: "BANKNIFTYFUT", name: "Bank Nifty Futures, Monthly Expiry", exchange: "NFO", type: "FUT", sector: "Derivatives" },

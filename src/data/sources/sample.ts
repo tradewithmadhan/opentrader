@@ -46,19 +46,26 @@ const SAMPLE_SEEDS: SourceSeeds = {
     { symbol: "INFY", interval: "60" },
     { symbol: "TATAMOTORS", interval: "240" },
   ],
+  // One row per venue so every exchange shows live data out of the box.
+  // (Sample generates for any ticker; the openalgo source serves the same
+  // rows from the broker where each was verified.)
   watchlistGroups: [
-    { name: "INDEX", tickers: ["NSE:NIFTY", "NSE:BANKNIFTY", "BSE:SENSEX"] },
+    { name: "INDEX", tickers: ["NSE_INDEX:NIFTY", "NSE_INDEX:BANKNIFTY", "BSE_INDEX:SENSEX"] },
     {
-      name: "LARGE CAPS",
-      tickers: [
-        "NSE:RELIANCE",
-        "NSE:TCS",
-        "NSE:INFY",
-        "NSE:HDFCBANK",
-        "NSE:ICICIBANK",
-        "NSE:SBIN",
-        "NSE:TATAMOTORS",
-      ],
+      name: "NSE",
+      tickers: ["NSE:RELIANCE", "NSE:TCS", "NSE:INFY", "NSE:HDFCBANK", "NSE:SBIN"],
+    },
+    {
+      name: "BSE",
+      tickers: ["BSE:RELIANCE", "BSE:INFY", "BSE:TCS", "BSE:TATASTEEL"],
+    },
+    {
+      name: "NFO",
+      tickers: ["NFO:NIFTY27OCT26FUT", "NFO:BANKNIFTY27OCT26FUT"],
+    },
+    {
+      name: "MCX",
+      tickers: ["MCX:GOLD04DEC26FUT"],
     },
   ],
 };

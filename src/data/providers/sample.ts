@@ -17,13 +17,16 @@ import type { SymbolRow, SymbolCategoryId, TypeFilter } from "../symbol-search";
 /** Bare tickers with no "EXCHANGE:" prefix default to this exchange. */
 export const defaultExchange = "NSE";
 
-/** Alias → display exchange label. Unmapped codes fall through unchanged. */
+/** Alias → display exchange label. Index venues pass through under their true
+ *  codes (matching the broker); unmapped codes fall through unchanged. */
 const EXCHANGE_NAMES: Record<string, string> = {
   NSE: "NSE",
   BSE: "BSE",
   NFO: "NFO",
   BFO: "BFO",
   MCX: "MCX",
+  NSE_INDEX: "NSE_INDEX",
+  BSE_INDEX: "BSE_INDEX",
 };
 
 /** Map a vendor exchange code to its display name, falling back to the raw

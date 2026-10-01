@@ -406,17 +406,17 @@ const UNIVERSE: &[UniverseRow] = &[
     UniverseRow { ticker: "ULTRACEMCO", name: "UltraTech Cement Ltd.", exchange: "NSE", kind: "EQ", sector: "Cement" },
     UniverseRow { ticker: "WIPRO", name: "Wipro Ltd.", exchange: "NSE", kind: "EQ", sector: "Technology" },
     UniverseRow { ticker: "TATASTEEL", name: "Tata Steel Ltd.", exchange: "BSE", kind: "EQ", sector: "Metals" },
-    UniverseRow { ticker: "SENSEX", name: "BSE SENSEX Index", exchange: "BSE", kind: "IX", sector: "Index" },
-    // NSE indices.
-    UniverseRow { ticker: "NIFTY", name: "Nifty 50 Index", exchange: "NSE", kind: "IX", sector: "Index" },
-    UniverseRow { ticker: "BANKNIFTY", name: "Nifty Bank Index", exchange: "NSE", kind: "IX", sector: "Index" },
-    UniverseRow { ticker: "FINNIFTY", name: "Nifty Financial Services Index", exchange: "NSE", kind: "IX", sector: "Index" },
-    UniverseRow { ticker: "INDIAVIX", name: "India VIX Volatility Index", exchange: "NSE", kind: "IX", sector: "Index" },
+    UniverseRow { ticker: "SENSEX", name: "BSE SENSEX Index", exchange: "BSE_INDEX", kind: "IX", sector: "Index" },
+    // NSE index venues (true codes, matching the broker).
+    UniverseRow { ticker: "NIFTY", name: "Nifty 50 Index", exchange: "NSE_INDEX", kind: "IX", sector: "Index" },
+    UniverseRow { ticker: "BANKNIFTY", name: "Nifty Bank Index", exchange: "NSE_INDEX", kind: "IX", sector: "Index" },
+    UniverseRow { ticker: "FINNIFTY", name: "Nifty Financial Services Index", exchange: "NSE_INDEX", kind: "IX", sector: "Index" },
+    UniverseRow { ticker: "INDIAVIX", name: "India VIX Volatility Index", exchange: "NSE_INDEX", kind: "IX", sector: "Index" },
     // BSE venue-qualified equities (same issuer, BSE venue) + BSE index.
     UniverseRow { ticker: "RELIANCE", name: "Reliance Industries Ltd.", exchange: "BSE", kind: "EQ", sector: "Energy" },
     UniverseRow { ticker: "INFY", name: "Infosys Ltd.", exchange: "BSE", kind: "EQ", sector: "Banking" },
     UniverseRow { ticker: "TCS", name: "Tata Consultancy Services", exchange: "BSE", kind: "EQ", sector: "Technology" },
-    UniverseRow { ticker: "BANKEX", name: "BSE Bankex Index", exchange: "BSE", kind: "IX", sector: "Index" },
+    UniverseRow { ticker: "BANKEX", name: "BSE Bankex Index", exchange: "BSE_INDEX", kind: "IX", sector: "Index" },
     // NFO derivatives (short readable tickers; full contract detail in description).
     UniverseRow { ticker: "NIFTYFUT", name: "Nifty Futures, Monthly Expiry", exchange: "NFO", kind: "FUT", sector: "Derivatives" },
     UniverseRow { ticker: "BANKNIFTYFUT", name: "Bank Nifty Futures, Monthly Expiry", exchange: "NFO", kind: "FUT", sector: "Derivatives" },
