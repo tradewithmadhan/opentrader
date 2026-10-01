@@ -126,10 +126,7 @@ export const tauriSource: DataSource = {
     await invoke("set_chart_subscription", { pane, symbol: symbol == null ? null : bareSymbol(symbol) });
   },
   async setWatchlistSubscription(symbols: string[]): Promise<void> {
-    // Bare tickers only: the snapshot endpoints resolve single tickers, and
-    // venue-qualified names are not valid input there. Venue lives on rows
-    // and panes, never on the backend union.
-    await invoke("set_watchlist_subscription", { symbols: symbols.map(bareSymbol) });
+    await invoke("set_watchlist_subscription", { symbols });
   },
   onChartAggregate(fn: (ev: ChartAggregate) => void): Promise<UnlistenFn> {
     return listen<ChartAggregate>("chart-aggregate", (e) => fn(e.payload));
