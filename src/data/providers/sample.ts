@@ -85,6 +85,8 @@ export function searchResultToRow(r: SymbolSearchResult): SymbolRow {
     exchangeTooltip: ex || undefined,
     primaryExchange: !!ex,
     category: (r.type && TYPE_CATEGORY[r.type]) || "stocks",
+    // All sample venues are Indian listings.
+    country: "IN",
   };
 }
 
