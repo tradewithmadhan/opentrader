@@ -514,13 +514,27 @@ export async function fetchTimings(date: string): Promise<OaTiming[]> {
 const sessionCache = new Map<string, { at: number; session: SymbolSession }>();
 
 /** Per-exchange session descriptor, built from the broker calendar (current
- *  year + next, so December keeps January's specials). Throws when the
- *  calendar is unreachable — callers fall back to the static session. */
+ *  year + next, so December keeps January's specials). When the calendar is
+ *  unreachable, serves the last-known calendar rather than the static session
+ *  whenever one was ever fetched; throws only when nothing was ever fetched
+ *  (callers fall back to the static session). */
 export async function openAlgoSymbolSession(symbol: string): Promise<SymbolSession> {
   const { exchange } = splitOpenAlgo(symbol);
   const prefix = exchange.toUpperCase();
   const hit = sessionCache.get(prefix);
   if (hit && Date.now() - hit.at < HOLIDAY_TTL_MS) return hit.session;
+  try {
+    const session = await buildFreshSession(prefix);
+    sessionCache.set(prefix, { at: Date.now(), session });
+    return session;
+  } catch {
+    if (hit) return hit.session;
+    throw new Error("OpenAlgo calendar unreachable");
+  }
+}
+
+/** Fetch years + special-day timings and build one prefix's descriptor. */
+async function buildFreshSession(prefix: string): Promise<SymbolSession> {
   const thisYear = new Date().getUTCFullYear();
   const settled = await Promise.allSettled([fetchHolidays(thisYear), fetchHolidays(thisYear + 1)]);
   const ok = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
@@ -554,7 +568,6 @@ export async function openAlgoSymbolSession(symbol: string): Promise<SymbolSessi
     }
   }
   const session = buildExchangeSession({ prefix, timezone, holidays: rows, specialTimings });
-  sessionCache.set(prefix, { at: Date.now(), session });
   return session;
 }
 
