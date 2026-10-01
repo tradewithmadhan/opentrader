@@ -248,16 +248,20 @@ export type ChartEvent = { time: number; kind: "dividend" | "split"; label: stri
 /** Dividend + split markers for `symbol`, time-ascending. Best-effort: a failing
  *  endpoint contributes nothing rather than throwing (events are decorative). */
 export async function getEvents(symbol: string): Promise<ChartEvent[]> {
-  const [divs, splits] = await Promise.all([
+  const [divs, splits, sessions] = await Promise.all([
     source().dividends(symbol).catch((): DividendEvent[] => []),
     source().splits(symbol).catch((): SplitEvent[] => []),
+    sessionsFor(symbol),
   ]);
+  // Event dates arrive as 00:00 UTC of the calendar date; place them on that
+  // date's daily-bar stamp (local midnight in the exchange zone).
+  const onDay = (utcMidnight: number) => localToUtc(sessions.timeZone, Math.floor(utcMidnight / 86400), 0);
   const out: ChartEvent[] = [];
   for (const d of divs) {
-    if (d.date != null) out.push({ time: d.date, kind: "dividend", label: (d.amount ?? 0).toFixed(2) });
+    if (d.date != null) out.push({ time: onDay(d.date), kind: "dividend", label: (d.amount ?? 0).toFixed(2) });
   }
   for (const s of splits) {
-    if (s.date != null) out.push({ time: s.date, kind: "split", label: `${s.to ?? 1}:${s.from ?? 1}` });
+    if (s.date != null) out.push({ time: onDay(s.date), kind: "split", label: `${s.to ?? 1}:${s.from ?? 1}` });
   }
   out.sort((a, b) => a.time - b.time);
   return out;
@@ -447,11 +451,11 @@ export async function getBars(
   // The session is not needed to fetch daily bars, but resolving it with them
   // (in parallel) means every loaded chart knows its symbol's session (status,
   // countdown, profile periods).
-  const [daily] = await Promise.all([
+  const [daily, sessions] = await Promise.all([
     source().dailyAggs(symbol, clampLookback("day", cfg.days), adjusted),
     sessionsFor(symbol),
   ]);
-  const bars = cfg.aggregate ? aggregateCandles(daily, cfg.aggregate) : daily;
+  const bars = cfg.aggregate ? aggregateCandles(daily, cfg.aggregate, sessions.timeZone) : daily;
   return { bars, daily, aggregate: cfg.aggregate ?? null };
 }
 
@@ -578,7 +582,7 @@ export function bucketLiveTick(
     // to the day bar's own update stamp for the trading-day derivation.
     const dayTime = dailyBarStamp(sessions.extended, tick.time > 0 ? tick.time : src.time);
     return {
-      time: dailyCfg.aggregate ? bucketStart(dayTime, dailyCfg.aggregate) : dayTime,
+      time: dailyCfg.aggregate ? bucketStart(dayTime, dailyCfg.aggregate, sessions.timeZone) : dayTime,
       open: src.open,
       high: src.high,
       low: src.low,
