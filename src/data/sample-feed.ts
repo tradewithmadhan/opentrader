@@ -78,7 +78,7 @@ export type SampleBarFamily = keyof typeof SAMPLE_FLOOR_DAYS;
 
 /** Oldest servable ET date (YYYY-MM-DD) for a bar family. */
 export function sampleFloorDate(family: SampleBarFamily): string {
-  return addDays(etDateStr(Date.now()), -SAMPLE_FLOOR_DAYS[family]);
+  return addDays(utcDateStr(Date.now()), -SAMPLE_FLOOR_DAYS[family]);
 }
 
 /** Drop dates older than the family's floor (string compare is chronological
@@ -166,33 +166,48 @@ export function sampleCapabilities(): {
   };
 }
 
-// ── Seeded RNG ───────────────────────────────────────────────────────────────
+// ── Seeded RNG ─────────────────────────────────────────────────────────────
+// Bit-identical mirrors of the Rust backend's generator (see
+// `src-tauri/src/data/provider/sample_provider.rs`): FNV-1a 64-bit scoped
+// hashes feed xorshift64* streams, so both feeds emit the same numbers for
+// the same (purpose, ticker, date) scope. BigInt keeps the full 64 bits
+// (a JS number cannot); the float pipeline below consumes only exact
+// operations, so history matches the backend bit-for-bit up to the libm
+// transcendental calls (log/cos/sqrt/exp), which round2() erases.
 
-function hashStr(s: string): number {
-  let h = 0x811c9dc5;
+const FNV_OFFSET = 0xcbf29ce484222325n;
+const FNV_PRIME = 0x100000001b3n;
+const U64_MASK = 0xffffffffffffffffn;
+const XS_MULT = 0x2545f4914f6cdd1dn;
+
+export function fnv1a(s: string): bigint {
+  let h = FNV_OFFSET;
   for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
+    h ^= BigInt(s.charCodeAt(i));
+    h = (h * FNV_PRIME) & U64_MASK;
   }
-  return h >>> 0;
+  return h;
 }
 
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
+/** xorshift64* stream as [0, 1) doubles — exact: the output word's top 53
+ *  bits over 2^53 (both exactly representable, power-of-two division). */
+export function xorshift64(seed: bigint): () => number {
+  let x = seed === 0n ? 0x9e3779b97f4a7c15n : seed;
   return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    x ^= x >> 12n;
+    x = (x ^ (x << 25n)) & U64_MASK;
+    x ^= x >> 27n;
+    x &= U64_MASK;
+    const out = (x * XS_MULT) & U64_MASK;
+    return Number(out >> 11n) / 2 ** 53;
   };
 }
 
+/** Standard-normal sample (Box–Muller, mirrors the backend). */
 function gaussian(rng: () => number): number {
   let u = 0;
-  let v = 0;
   while (u === 0) u = rng();
-  while (v === 0) v = rng();
+  const v = rng();
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
 
@@ -202,13 +217,10 @@ const bare = (s: string): string => {
   return h.includes(":") ? (h.split(":").pop() as string) : h;
 };
 
-// ── ET time helpers (session math mirrors datafeed.ts conventions) ──────────
-
-const RTH_TZ = "America/New_York";
-
-// ── IST time helpers + NSE calendar ──────────────────────────────────────────
-// Sample mode models the NSE equity session (09:15–15:30 IST); trading-day
-// enumeration, holiday skips and intraday buckets all run on IST wall time.
+// ── IST time helpers + sample calendar ─────────────────────────────────────
+// Sample mode models the NSE equity session (09:15–15:30 IST); intraday
+// buckets run on IST wall time while day enumeration follows UTC calendar
+// dates like the backend (weekends skipped, no holiday list).
 
 const IST_TZ = "Asia/Kolkata";
 /** NSE regular session: 09:15–15:30 IST, in minutes since IST midnight. */
@@ -241,10 +253,11 @@ function istParts(utcMs: number): { y: number; m: number; d: number; hh: number;
   };
 }
 
-/** IST calendar date string for a UTC instant. */
-function istDateStr(utcMs: number): string {
-  const p = istParts(utcMs);
-  return `${p.y}-${String(p.m).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`;
+/** UTC calendar date string for a UTC instant — the backend's `today_utc`
+ *  basis for split anchors, floors and "today"-derived keys. */
+function utcDateStr(utcMs: number): string {
+  const t = new Date(utcMs);
+  return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, "0")}-${String(t.getUTCDate()).padStart(2, "0")}`;
 }
 
 /** UTC millis of an IST wall-clock time. Single probe: UTC = wall-as-UTC minus
@@ -259,69 +272,10 @@ function istWallToUtc(y: number, m: number, d: number, hh: number, mm: number): 
   return wallAsUtc - (asUtc - wallAsUtc);
 }
 
-/**
- * NSE trading holidays (full-day closures), YYYY-MM-DD.
- *
- * TEMPLATE NOTE (real providers: replace with the exchange calendar fetch):
- * compiled from NSE circulars for 2024–2026 — VERIFY YEARLY against
- * nseindia.com (special closures like elections are announced ad-hoc).
- * Weekends need no entry (skipped separately).
- */
-const NSE_HOLIDAYS_2024_2026: string[] = [
-  // 2024
-  "2024-01-22", "2024-03-08", "2024-03-25", "2024-03-29",
-  "2024-04-11", "2024-04-17", "2024-05-01", "2024-05-20",
-  "2024-06-17", "2024-07-17", "2024-08-15", "2024-10-02",
-  "2024-10-31", "2024-11-01", "2024-11-15", "2024-12-25",
-  // 2025
-  "2025-02-26", "2025-03-14", "2025-03-31", "2025-04-10",
-  "2025-04-14", "2025-04-18", "2025-05-01", "2025-08-15",
-  "2025-08-27", "2025-10-02", "2025-10-21", "2025-10-22",
-  "2025-11-05", "2025-12-25",
-  // 2026
-  "2026-03-04", "2026-03-20", "2026-03-31", "2026-04-03",
-  "2026-04-14", "2026-05-01", "2026-05-27", "2026-06-26",
-  "2026-09-14", "2026-10-02", "2026-10-20", "2026-11-24",
-  "2026-12-25",
-];
-
-const NSE_HOLIDAYS = new Set(NSE_HOLIDAYS_2024_2026);
-
-/** True for an NSE trading day: weekday and not a listed holiday. */
+/** True for a sample trading day: weekdays only, mirroring the backend
+ *  (no holiday list on either side — weekends skipped separately). */
 export function isSampleTradingDay(dateStr: string): boolean {
-  return !isWeekend(dateStr) && !NSE_HOLIDAYS.has(dateStr);
-}
-
-const etPartsFmt = new Intl.DateTimeFormat("en-US", {
-  timeZone: RTH_TZ,
-  hour12: false,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  weekday: "short",
-});
-
-function etParts(utcMs: number): { y: number; m: number; d: number; hh: number; mm: number; wd: string } {
-  const p: Record<string, string> = {};
-  for (const x of etPartsFmt.formatToParts(new Date(utcMs))) {
-    if (x.type !== "literal") p[x.type] = x.value;
-  }
-  return {
-    y: +p.year,
-    m: +p.month,
-    d: +p.day,
-    hh: +p.hour === 24 ? 0 : +p.hour,
-    mm: +p.minute,
-    wd: p.weekday,
-  };
-}
-
-/** ET calendar date string for a UTC instant (used for floor/snapshot keys). */
-function etDateStr(utcMs: number): string {
-  const p = etParts(utcMs);
-  return `${p.y}-${String(p.m).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`;
+  return !isWeekend(dateStr);
 }
 
 function parseDate(s: string): [number, number, number] {
@@ -343,11 +297,11 @@ function isWeekend(dateStr: string): boolean {
   return wd === 0 || wd === 6;
 }
 
-/** Last `n` NSE trading days (weekends + NSE holidays skipped) ending at `end`
- *  (default today), as IST calendar dates. */
+/** Last `n` sample trading days (weekends skipped) ending at `end`
+ *  (default today), as UTC calendar dates like the backend. */
 function tradingDaysBack(n: number, end?: string): string[] {
   const out: string[] = [];
-  let cur = end ?? istDateStr(Date.now());
+  let cur = end ?? utcDateStr(Date.now());
   while (out.length < Math.max(1, n)) {
     if (isSampleTradingDay(cur)) out.unshift(cur);
     cur = addDays(cur, -1);
@@ -355,7 +309,7 @@ function tradingDaysBack(n: number, end?: string): string[] {
   return out;
 }
 
-/** NSE trading days in [from, to] (inclusive IST dates). */
+/** Sample trading days in [from, to] (inclusive UTC dates). */
 function tradingDaysInRange(from: string, to: string): string[] {
   const out: string[] = [];
   let cur = from;
@@ -375,13 +329,11 @@ type TickerModel = {
 };
 
 function modelFor(ticker: string): TickerModel {
-  const h = hashStr(`model|${ticker}`);
-  const rng = mulberry32(h);
-  void rng;
+  const h = fnv1a(`model|${ticker}`);
   return {
-    base: 25 + (h % 297500) / 100,
-    vol: 0.008 + ((h >>> 8) % 200) / 10000,
-    dayVol: 500000 + ((h >>> 16) % 40000000),
+    base: 25 + Number(h % 297500n) / 100,
+    vol: 0.008 + Number((h >> 8n) % 200n) / 10000,
+    dayVol: 500000 + Number((h >> 16n) % 40000000n),
   };
 }
 
@@ -390,14 +342,14 @@ function modelFor(ticker: string): TickerModel {
 export function sampleSplits(symbol: string): SplitEvent[] {
   if (ERROR_TICKER_RE.test(bare(symbol))) return [];
   const t = bare(symbol);
-  const h = hashStr(`splits|${t}`);
+  const h = fnv1a(`splits|${t}`);
   const out: SplitEvent[] = [];
-  const today = istDateStr(Date.now());
+  const today = utcDateStr(Date.now());
   const stamp = (dateStr: string): number => {
     const [y, m, d] = parseDate(dateStr);
     return Date.UTC(y, m - 1, d, 12) / 1000;
   };
-  const kind = h % 7;
+  const kind = Number(h % 7n);
   if (kind === 0) {
     // 2:1 split ~1.5y ago.
     out.push({ date: stamp(addDays(today, -380)), from: 1, to: 2 });
@@ -437,7 +389,7 @@ function applySplits(bars: Candle[], splits: SplitEvent[], adjusted: boolean): C
 export function sampleDividends(symbol: string): DividendEvent[] {
   if (ERROR_TICKER_RE.test(bare(symbol))) return [];
   const t = bare(symbol);
-  const h = hashStr(`div|${t}`);
+  const h = fnv1a(`div|${t}`);
   const out: DividendEvent[] = [];
   const now = new Date();
   let y = now.getUTCFullYear();
@@ -449,8 +401,9 @@ export function sampleDividends(symbol: string): DividendEvent[] {
       y -= 1;
     }
     const m = q * 3 + 1;
-    const amt = 0.2 + ((h >>> (i % 24)) % 230) / 100;
-    out.push({ date: Date.UTC(y, m, 15, 12) / 1000, amount: Math.round(amt * 100) / 100 });
+    // 1-indexed month like the backend's from_ymd_opt (m ∈ {1,4,7,10}).
+    const amt = 0.2 + Number((h >> BigInt(i % 24)) % 230n) / 100;
+    out.push({ date: Date.UTC(y, m - 1, 15, 12) / 1000, amount: Math.round(amt * 100) / 100 });
   }
   return out.sort((a, b) => b.date - a.date);
 }
@@ -462,7 +415,7 @@ const round2 = (n: number): number => Math.round(n * 100) / 100;
 function genDailyUnadjusted(ticker: string, dates: string[]): Candle[] {
   const t = bare(ticker);
   const m = modelFor(t);
-  const rng = mulberry32(hashStr(`daily|${t}|${dates[0] ?? "x"}|${dates.length}`));
+  const rng = xorshift64(fnv1a(`daily|${t}|${dates[0] ?? "x"}|${dates.length}`));
   const closes: number[] = [];
   let px = m.base * 0.55;
   for (let i = 0; i < dates.length; i++) {
@@ -503,7 +456,7 @@ export function sampleDailyHistoryBefore(
   adjusted: boolean,
 ): Candle[] {
   assertSampleSymbol(symbol);
-  const end = istDateStr((beforeSec - 1) * 1000);
+  const end = utcDateStr((beforeSec - 1) * 1000);
   const dates = clampDates(tradingDaysBack(spanDays, end), "day");
   if (dates.length === 0) return [];
   const bars = applySplits(genDailyUnadjusted(symbol, dates), sampleSplits(symbol), adjusted);
@@ -526,7 +479,7 @@ function genMinutesUnadjusted(ticker: string, dates: string[], multMin: number):
   dates.forEach((ds) => {
     const [y, mo, d] = parseDate(ds);
     const anchor = closeByDate.get(addDays(ds, -1)) ?? closeByDate.get(ds) ?? m.base;
-    const rng = mulberry32(hashStr(`min|${t}|${ds}|${multMin}`));
+    const rng = xorshift64(fnv1a(`min|${t}|${ds}|${multMin}`));
     let px = anchor * (1 + gaussian(rng) * m.vol * 0.15);
     const vBase = m.dayVol / 375;
     for (let i = 0; i < perDay; i++) {
@@ -584,7 +537,7 @@ export function sampleAggregatesBefore(
   adjusted: boolean,
 ): Candle[] {
   assertSampleSymbol(symbol);
-  const end = istDateStr((beforeSec - 1) * 1000);
+  const end = utcDateStr((beforeSec - 1) * 1000);
   const dates = clampDates(tradingDaysBack(spanDays, end), timespan === "second" ? "second" : "minute");
   if (dates.length === 0) return [];
   const bars =
@@ -611,7 +564,7 @@ function genSecondsUnadjusted(ticker: string, dates: string[], multSec: number):
   for (const ds of dates) {
     const [y, mo, d] = parseDate(ds);
     const ref = byDate.get(ds) ?? { o: m.base, c: m.base };
-    const rng = mulberry32(hashStr(`sec|${t}|${ds}|${multSec}`));
+    const rng = xorshift64(fnv1a(`sec|${t}|${ds}|${multSec}`));
     // Walk open→close so the day shape stays plausible.
     const drift = (ref.c - ref.o) / perDay;
     let px = ref.o;
@@ -659,7 +612,7 @@ export function sampleSecondHistoryTail(
   adjusted: boolean,
 ): Candle[] {
   assertSampleSymbol(symbol);
-  const today = istDateStr(Date.now());
+  const today = utcDateStr(Date.now());
   const dates = tradingDaysInRange(addDays(today, -1), today);
   const bars = applySplits(genSecondsUnadjusted(symbol, dates, mult), sampleSplits(symbol), adjusted);
   return bars.filter((b) => b.time > sinceSec);
@@ -773,8 +726,8 @@ export function sampleTickerInfo(symbol: string): TickerInfo {
     currency: ["NSE", "BSE", "NFO", "MCX"].includes(exchange) ? "INR" : "USD",
     description: `${known?.name ?? t} — deterministic sample instrument for browser development.`,
     homepageUrl: null,
-    totalEmployees: 10000 + (hashStr(`emp|${t}`) % 150000),
-    marketCap: Math.round(m.base * (100000000 + (hashStr(`mc|${t}`) % 900000000))),
+    totalEmployees: 10000 + Number(fnv1a(`ref|${t}`) % 150000n),
+    marketCap: Math.round(m.base * (100000000 + Number(fnv1a(`mc|${t}`) % 900000000n))),
     figi: null,
     iconUrl: null,
   };
@@ -786,26 +739,10 @@ export function sampleSnapshot(symbol: string): Snapshot {
   const daily = sampleDailyHistory(t, 5, true);
   const lastBar = daily[daily.length - 1];
   const prev = daily[daily.length - 2] ?? lastBar;
-  if (isSampleMarketClosed()) {
-    // Prior completed session as the quote (regular-session close, not a tick).
-    const change = round2(lastBar.close - prev.close);
-    return {
-      ticker: t,
-      last: lastBar.close,
-      change,
-      changePercent: prev.close > 0 ? round2((change / prev.close) * 100) : 0,
-      dayHigh: lastBar.high,
-      dayLow: lastBar.low,
-      dayVolume: lastBar.volume,
-      extChangePercent: null,
-      source: "prev",
-      updatedNs: lastBar.time * 1e9,
-    };
-  }
-  // Intraday drift keyed by hour so refetches move the quote (sample market is
-  // always "open").
+  // Intraday drift keyed by hour so refetches move the quote (the sample
+  // market is always "open", mirroring the backend).
   const h = new Date().getUTCHours();
-  const drift = ((hashStr(`snap|${t}|${etDateStr(Date.now())}|${h}`) % 200) - 100) / 10000;
+  const drift = (Number(fnv1a(`snap|${t}|${h}`) % 200n) - 100) / 10000;
   const last = round2(lastBar.close * (1 + drift));
   const change = round2(last - prev.close);
   return {
@@ -815,7 +752,7 @@ export function sampleSnapshot(symbol: string): Snapshot {
     changePercent: prev.close > 0 ? round2((change / prev.close) * 100) : 0,
     dayHigh: Math.max(lastBar.high, last),
     dayLow: Math.min(lastBar.low, last),
-    dayVolume: Math.round(lastBar.volume * (0.35 + ((h % 12) / 12) * 0.65)),
+    dayVolume: Math.round(lastBar.volume * 0.65),
     extChangePercent: null,
     source: "live",
     updatedNs: Date.now() * 1e6,
@@ -838,7 +775,7 @@ export function sampleLatestNews(symbol: string, limit: number): NewsItem[] {
     publisher: "Sample Wire",
     published: now - i * 6 * 3600000,
     url: null,
-    description: `${title}. Synthetic headline for frontend development.`,
+    description: `${title}. Synthetic headline for backend development.`,
   }));
 }
 
@@ -866,6 +803,9 @@ const secondListeners = new Set<(t: SecondAggregate) => void>();
 const tickListeners = new Set<(t: TradeTick) => void>();
 const liveStates = new Map<string, LiveState>();
 let liveTimer: ReturnType<typeof setInterval> | null = null;
+// Seeded (not entropy): ticks differ per run but stay reproducible per
+// symbol path, mirroring the backend. One counter across symbols.
+let tickN = 0;
 
 function liveStateFor(symbol: string): LiveState {
   const t = norm(symbol);
@@ -902,11 +842,16 @@ function ensureLiveTimer(): void {
     if (syms.size === 0) return;
     const now = Math.floor(Date.now() / 1000);
     for (const sym of syms) {
+      tickN += 1;
       const st = liveStateFor(sym);
-      const m = modelFor(sym);
+      // Model + stream keyed by the bare ticker (history uses the same key);
+      // reseeded counter stream mirrors the backend (deterministic per run).
+      const t = bare(sym);
+      const m = modelFor(t);
+      const rng = xorshift64(fnv1a(`tick|${t}|${Math.floor(tickN / 7)}`));
       const prev = st.price;
-      st.price = Math.max(0.5, round2(st.price * (1 + gaussian(Math.random) * m.vol * 0.06)));
-      const tickV = Math.round((m.dayVol / 22500) * (0.3 + Math.random() * 1.4));
+      st.price = Math.max(0.5, round2(st.price * (1 + gaussian(rng) * m.vol * 0.06)));
+      const tickV = Math.round((m.dayVol / 22500) * (0.3 + rng() * 1.4));
       st.dayH = Math.max(st.dayH, st.price);
       st.dayL = Math.min(st.dayL, st.price);
       st.dayV += tickV;
@@ -998,3 +943,4 @@ export function sampleOnTradeTick(fn: (t: TradeTick) => void): () => void {
     tickListeners.delete(fn);
   };
 }
+
