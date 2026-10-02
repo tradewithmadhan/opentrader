@@ -36,8 +36,7 @@ export type LiveQuote = {
 // reactivity per field (a row only re-renders the cell whose value changed).
 const [quotes, setQuotes] = createStore<Record<string, LiveQuote>>({});
 
-/** Reactive read of one symbol's quote (undefined until a tick arrives).
- *  Keyed by full name: each listing reads its own entry. */
+/** Reactive read of one symbol's quote (undefined until a tick arrives). */
 export function quoteFor(symbol: string): LiveQuote | undefined {
   return quotes[symbol.toUpperCase()];
 }
@@ -66,7 +65,6 @@ createRoot(() => {
   createEffect(() => {
     const a = watchlistStore.active();
     const rows = a ? [...a.groups.flatMap((g) => g.rows), ...a.extras] : [];
-    // Full names: each listing subscribes (and ticks) under its own name.
     const symbols = [...new Set(rows.map((r) => r.ticker.toUpperCase()))];
     setSubscription("watchlist", symbols);
   });
