@@ -22,7 +22,7 @@ import type {
   TradeTick,
 } from "../datafeed-live";
 import type { ProviderCapabilities } from "../../bindings";
-import type { DataSource, MarketSessionDef, SourceSeeds } from "./types";
+import type { DataSource, MarketSessionDef, SourceSeeds } from "../sources/types";
 import type { SymbolRow, SymbolCategoryId, TypeFilter } from "../symbol-search";
 
 /** Session served by the sample feed (NSE equities). */
@@ -1343,7 +1343,7 @@ export function searchResultToRow(r: SymbolSearchResult): SymbolRow {
 // ── Adapter object ───────────────────────────────────────────────────────────
 // `name` must match the provider id the backend (or sample feed) reports so
 // the frontend can select it via `syncProvider()` in ./index.
-import type { FrontendProvider } from "../providers";
+import type { FrontendProvider } from "./index";
 
 export const sample: FrontendProvider = {
   name: "sample",

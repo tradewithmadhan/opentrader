@@ -19,7 +19,7 @@
  */
 import type { Candle, SymbolSearchResult, SymbolSession } from "../../bindings";
 import type { Snapshot, TickerInfo } from "../datafeed-rest";import type { ChartAggregate, SecondAggregate, TradeTick } from "../datafeed-live";
-import type { DataSource, MarketSessionDef } from "./types";
+import type { DataSource, MarketSessionDef } from "../sources/types";
 import type { SymbolRow, SymbolCategoryId, TypeFilter } from "../symbol-search";
 // ── Config ───────────────────────────────────────────────────────────────────
 // LOCAL-ONLY credentials, hardcoded here (never committed without review).
@@ -40,7 +40,7 @@ export function openAlgoConfig(): OpenAlgoConfig {
 
 function requireKey(cfg: OpenAlgoConfig): string {
   if (!cfg.key) {
-    throw new Error("OpenAlgo API key missing — set OPENALGO_KEY in sources/openalgo.ts.");
+    throw new Error("OpenAlgo API key missing — set OPENALGO_KEY in providers/openalgo.ts.");
   }
   return cfg.key;
 }
@@ -1172,7 +1172,7 @@ export function searchResultToRow(r: SymbolSearchResult): SymbolRow {
 
 // ── Adapter object ───────────────────────────────────────────────────────────
 // `name` must match the source id so the frontend can select it.
-import type { FrontendProvider } from "../providers";
+import type { FrontendProvider } from "./index";
 
 export const openalgo: FrontendProvider = {
   name: "openalgo",

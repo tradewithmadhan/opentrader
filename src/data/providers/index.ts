@@ -17,8 +17,8 @@ import { commands } from "../../bindings";
 import type { SymbolSearchResult } from "../../bindings";
 import type { SymbolRow, TypeFilter } from "../symbol-search";
 import { massive } from "./massive";
-import { sample } from "../sources/sample";
-import { openalgo } from "../sources/openalgo";
+import { sample } from "./sample";
+import { openalgo } from "./openalgo";
 import { source } from "../sources";
 
 /** The vendor-specific presentation an adapter must provide. */

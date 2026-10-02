@@ -8,8 +8,8 @@
  * Each provider is one file (engine + `DataSource` + presentation adapter);
  * a future `real.ts` adds one line here and one in `../providers`.
  */
-import { sampleSource, useSampleFeed } from "./sample";
-import { openalgoSource } from "./openalgo";
+import { sampleSource, useSampleFeed } from "../providers/sample";
+import { openalgoSource } from "../providers/openalgo";
 import { tauriSource } from "./tauri";
 import type { DataSource } from "./types";
 

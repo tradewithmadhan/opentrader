@@ -145,11 +145,11 @@
       fingerprint) applies automatically; stale = earlier UTC day → re-probe.
       History commands wait at most `FLOOR_WAIT` (5s) only when no cache exists.
 
-## 6. Frontend — one file: `src/data/sources/<name>.ts`
+## 6. Frontend — one file: `src/data/providers/<name>.ts`
 
 A provider is a single module holding its engine, its `DataSource` socket
 object, and its `FrontendProvider` presentation adapter (see
-`sources/sample.ts`). Register both objects: one line in
+`providers/sample.ts`). Register both objects: one line in
 `sources/index.ts::REGISTRY`, one line in `providers/index.ts::REGISTRY`.
 Nothing else in the app changes.
 
