@@ -41,6 +41,21 @@ const SESSION: MarketSessionDef = {
   mintick: 0.05,
 };
 
+/** Static funding mirror (gateway blocks browser CORS): the app-level
+ *  funding status, shared as the fallback for any source without its own.
+ *  Shape matches the backend's FundingStatus. */
+export const SAMPLE_FUNDING = {
+  month: "2026-10",
+  currency: "USD",
+  total: 440,
+  raised: 0,
+  remaining: 440,
+  links: {
+    github: "https://github.com/sponsors/deepentropy",
+    bmc: "https://buymeacoffee.com/opentrader",
+  },
+};
+
 const SAMPLE_SEEDS: SourceSeeds = {
   defaultSymbol: "NSE:RELIANCE",
   starterTabs: [
@@ -122,15 +137,5 @@ export const sampleSource: DataSource = {
   // rejects browser origins (CORS), so the sample serves a static mirror
   // of the response instead of fetching it. `null` shape matches a gateway
   // with no cost set (404) — here costs are always set.
-  fundingStatus: async () => ({
-    month: "2026-10",
-    currency: "USD",
-    total: 440,
-    raised: 0,
-    remaining: 440,
-    links: {
-      github: "https://github.com/sponsors/deepentropy",
-      bmc: "https://buymeacoffee.com/opentrader",
-    },
-  }),
+  fundingStatus: async () => SAMPLE_FUNDING,
 };
