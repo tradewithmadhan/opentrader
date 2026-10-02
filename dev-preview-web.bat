@@ -21,7 +21,7 @@ if not exist "node_modules" (
   )
 )
 
-if not exist "..\lightweight-charts-drawing\src\tv" (
+if not exist "..\lightweight-charts-drawing" (
   echo [dev] First run: cloning drawing core next to this folder...
   git clone https://github.com/deepentropy/lightweight-charts-drawing.git ..\lightweight-charts-drawing
   if errorlevel 1 (
