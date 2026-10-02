@@ -22,15 +22,15 @@ import type { Snapshot, TickerInfo } from "../datafeed-rest";import type { Chart
 import type { DataSource, MarketSessionDef } from "../sources/types";
 import type { SymbolRow, SymbolCategoryId, TypeFilter } from "../symbol-search";
 // ── Config ───────────────────────────────────────────────────────────────────
-// LOCAL-ONLY credentials, hardcoded here (never committed without review).
-// Rationale: the browser cannot read process env, so neither the bat nor
-// vite config can supply these at runtime — they live in this file instead.
-// Traffic goes direct to the host below, which must allow the page origin
-// (CORS); without that the browser blocks every request regardless of code.
+// Browser web access: credentials come from the local `.env` (see
+// `.env.example`; Vite inlines `VITE_*` at startup — restart dev after
+// editing). Empty values fail fast in `requireKey` below, never silently.
+// Traffic goes direct to the host, which must allow the page origin (CORS);
+// without that the browser blocks every request regardless of code.
 
-const OPENALGO_BASE = "https://flattrade.captainvizhuthugal.dpdns.org";
-const OPENALGO_WS = "wss://flattrade.captainvizhuthugal.dpdns.org/ws";
-const OPENALGO_KEY = "fe377b1281f4bd931a949a7f04964bf4f34ff08ab0433652c856ac813591254b";
+const OPENALGO_BASE = import.meta.env?.VITE_OPENALGO_BASE ?? "";
+const OPENALGO_WS = import.meta.env?.VITE_OPENALGO_WS ?? "";
+const OPENALGO_KEY = import.meta.env?.VITE_OPENALGO_KEY ?? "";
 
 export type OpenAlgoConfig = { base: string; ws: string; key: string };
 
@@ -40,7 +40,7 @@ export function openAlgoConfig(): OpenAlgoConfig {
 
 function requireKey(cfg: OpenAlgoConfig): string {
   if (!cfg.key) {
-    throw new Error("OpenAlgo API key missing — set OPENALGO_KEY in providers/openalgo.ts.");
+    throw new Error("OpenAlgo API key missing — set VITE_OPENALGO_KEY in .env (see .env.example).");
   }
   return cfg.key;
 }
