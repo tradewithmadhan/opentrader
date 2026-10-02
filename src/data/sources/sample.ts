@@ -8,6 +8,7 @@
  * else in the app changes.
  */
 import type { ProviderCapabilities } from "../../bindings";
+import type { Funding } from "../funding";
 import {
   sampleAggregatesBefore,
   sampleCapabilities,
@@ -40,6 +41,9 @@ const SESSION: MarketSessionDef = {
   postMin: 30,
   mintick: 0.05,
 };
+
+/** Public gateway base (same URL the backend uses) for the funding status. */
+const FUNDING_URL = "https://opentrader-gateway.cloudflare-breeder165.workers.dev";
 
 const SAMPLE_SEEDS: SourceSeeds = {
   defaultSymbol: "NSE:RELIANCE",
@@ -118,4 +122,31 @@ export const sampleSource: DataSource = {
   session: () => SESSION,
   seeds: () => SAMPLE_SEEDS,
   historyLimits: () => null,
+  // Funding status direct from the public gateway endpoint (same URL the
+  // backend uses) so Settings > About works with no backend. `null` when
+  // the gateway has no cost set (404); anything else rejects and the block
+  // stays hidden, like a failed backend command.
+  fundingStatus: async () => {
+    let res: Response;
+    try {
+      res = await fetch(`${FUNDING_URL}/funding/v1`);
+    } catch (e) {
+      throw new Error(`funding request: ${e instanceof Error ? e.message : e}`);
+    }
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`funding ${res.status}`);
+    const d = (await res.json()) as Partial<Funding> & { links?: Partial<Funding["links"]> };
+    if (typeof d.month !== "string") throw new Error("funding body: bad month");
+    return {
+      month: d.month,
+      currency: typeof d.currency === "string" ? d.currency : "",
+      total: Number(d.total) || 0,
+      raised: Number(d.raised) || 0,
+      remaining: Number(d.remaining) || 0,
+      links: {
+        github: d.links?.github ?? "",
+        bmc: d.links?.bmc ?? "",
+      },
+    };
+  },
 };

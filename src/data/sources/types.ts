@@ -25,6 +25,7 @@ import type {
 } from "../../bindings";
 import type { ChartAggregate, SecondAggregate, TradeTick } from "../datafeed-live";
 import type { NewsItem, Snapshot, TickerInfo } from "../datafeed-rest";
+import type { Funding } from "../funding";
 
 /** Exchange session for regular-hours filtering (mirrors the trait's
  *  market-session contract; see `activeSession()` in `../datafeed`). */
@@ -95,6 +96,10 @@ export interface DataSource {
    *  APIs), preferred over the backend command when present. Rejects when the
    *  source cannot describe the symbol — the feed falls back. */
   symbolSessions?(symbol: string): Promise<SymbolSession>;
+  /** Funding status for Settings > About, fetched direct from the source
+   *  (e.g. the public gateway endpoint) where there is no backend command.
+   *  `null` when unknown; rejects when unreachable — the block stays hidden. */
+  fundingStatus?(): Promise<Funding | null>;
 
   // ── Live ───────────────────────────────────────────────────────────
   setChartSubscription(symbol: string | null, pane?: string): Promise<void>;
