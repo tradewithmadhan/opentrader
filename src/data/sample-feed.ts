@@ -24,6 +24,7 @@ import type {
   DividendEvent,
   SplitEvent,
   SymbolSearchResult,
+  SymbolSession,
 } from "../bindings";
 import type { NewsItem, Snapshot, TickerInfo } from "./datafeed-rest";
 import type {
@@ -54,17 +55,45 @@ export function isSampleMarketClosed(): boolean {
   }
 }
 
-/**
- * Error-path testing hook: any `BAD_*` symbol throws from the bar/snapshot/
- * info entry points (decorative paths return `[]` per contract), exercising
- * chart error states and search fallback. Real providers: replace with the
- * unknown-symbol error from the vendor API.
- */
-const ERROR_TICKER_RE = /^BAD_/;
+/** Listed tickers only: like a real vendor, unknown symbols error instead
+ *  of generating (history/info/snapshot throw; decorative paths return []). */
+function isKnownSymbol(t: string): boolean {
+  return UNIVERSE.some((r) => r.ticker === t);
+}
+
+/** Venue of a listed ticker: the qualified row when the exchange matches,
+ *  else the primary (first) listing. */
+function venueFor(ticker: string, exchange: string): string {
+  const hit =
+    UNIVERSE.find((r) => r.ticker === ticker && (!exchange || r.exchange === exchange)) ??
+    UNIVERSE.find((r) => r.ticker === ticker);
+  return hit?.exchange ?? "NSE";
+}
+
+/** Venue of a possibly qualified symbol. */
+function venueOf(symbol: string): string {
+  const t = bare(symbol);
+  const parts = norm(symbol).split(",")[0].trim().split(":");
+  return venueFor(t, parts.length > 1 ? parts[0] : "");
+}
+
+/** Regular session (open/close minutes) + pre/post bands per venue. Index
+ *  venues follow NSE hours. */
+function venueSession(exchange: string): { open: number; close: number; pre: number; post: number } {
+  if (exchange === "MCX") return { open: 540, close: 1410, pre: 0, post: 0 };
+  return { open: 555, close: 930, pre: 15, post: 30 };
+}
+
+/** Slow volatility regime for a ticker-month ("YYYY-MM"): 0.7–1.3× base vol.
+ *  Integer math, so every feed agrees exactly. */
+function regimeFor(ticker: string, yearMonth: string): number {
+  return 0.7 + (0.6 * Number(fnv1a(`reg|${ticker}|${yearMonth}`) % 1000n)) / 1000;
+}
 
 function assertSampleSymbol(symbol: string): void {
-  if (ERROR_TICKER_RE.test(bare(symbol))) {
-    throw new Error(`no sample data for ${bare(symbol)}`);
+  const t = bare(symbol);
+  if (!isKnownSymbol(t)) {
+    throw new Error(`no sample data for ${t}`);
   }
 }
 
@@ -272,10 +301,71 @@ function istWallToUtc(y: number, m: number, d: number, hh: number, mm: number): 
   return wallAsUtc - (asUtc - wallAsUtc);
 }
 
+/**
+ * NSE trading holidays (full-day closures), YYYY-MM-DD — mirrors the
+ * backend's list; verified yearly against NSE circulars for 2024–2026.
+ */
+const SAMPLE_HOLIDAYS: string[] = [
+  // 2024
+  "2024-01-22", "2024-03-08", "2024-03-25", "2024-03-29",
+  "2024-04-11", "2024-04-17", "2024-05-01", "2024-05-20",
+  "2024-06-17", "2024-07-17", "2024-08-15", "2024-10-02",
+  "2024-10-31", "2024-11-01", "2024-11-15", "2024-12-25",
+  // 2025
+  "2025-02-26", "2025-03-14", "2025-03-31", "2025-04-10",
+  "2025-04-14", "2025-04-18", "2025-05-01", "2025-08-15",
+  "2025-08-27", "2025-10-02", "2025-10-21", "2025-10-22",
+  "2025-11-05", "2025-12-25",
+  // 2026
+  "2026-03-04", "2026-03-20", "2026-03-31", "2026-04-03",
+  "2026-04-14", "2026-05-01", "2026-05-27", "2026-06-26",
+  "2026-09-14", "2026-10-02", "2026-10-20", "2026-11-24",
+  "2026-12-25",
+];
+
+const SAMPLE_HOLIDAY_SET = new Set(SAMPLE_HOLIDAYS);
+
 /** True for a sample trading day: weekdays only, mirroring the backend
  *  (no holiday list on either side — weekends skipped separately). */
 export function isSampleTradingDay(dateStr: string): boolean {
-  return !isWeekend(dateStr);
+  return !isWeekend(dateStr) && !SAMPLE_HOLIDAY_SET.has(dateStr);
+}
+
+/** Holidays as "YYYYMMDD,..." for session descriptors. */
+function holidaySpec(): string {
+  return SAMPLE_HOLIDAYS.map((d) => d.replace(/-/g, "")).join(",");
+}
+
+/** Per-venue session descriptor for a listed symbol (mirrors the backend's
+ *  symbol_session): venue hours, NSE holidays, NSE 0.05 tick. */
+export function sampleSymbolSession(symbol: string): SymbolSession {
+  const t = bare(symbol);
+  if (!isKnownSymbol(t)) throw new Error(`no sample data for ${t}`);
+  const venue = venueOf(symbol);
+  const sess = venueSession(venue);
+  const fmt = (m: number): string =>
+    `${String(Math.floor(m / 60)).padStart(2, "0")}${String(((m % 60) + 60) % 60).padStart(2, "0")}`;
+  const rth = `${fmt(sess.open)}-${fmt(sess.close)}`;
+  const subsessions: SymbolSession["subsessions"] = [
+    { id: "regular", description: "Regular Trading Hours", session: rth, corrections: "" },
+  ];
+  if (sess.pre + sess.post > 0) {
+    subsessions.push(
+      { id: "extended", description: "Extended Trading Hours", session: `${fmt(sess.open - sess.pre)}-${fmt(sess.close + sess.post)}`, corrections: "" },
+      { id: "premarket", description: "Premarket", session: `${fmt(sess.open - sess.pre)}-${fmt(sess.open)}`, corrections: "" },
+      { id: "postmarket", description: "Postmarket", session: `${fmt(sess.close)}-${fmt(sess.close + sess.post)}`, corrections: "" },
+    );
+  }
+  return {
+    timezone: "Asia/Kolkata",
+    session: rth,
+    subsessions,
+    holidays: holidaySpec(),
+    corrections: "",
+    pricescale: 100,
+    minmov: 5,
+    variableTickSize: "",
+  };
 }
 
 function parseDate(s: string): [number, number, number] {
@@ -340,7 +430,7 @@ function modelFor(ticker: string): TickerModel {
 // ── Corporate actions (splits AND bonus issues share the SplitEvent shape) ──
 
 export function sampleSplits(symbol: string): SplitEvent[] {
-  if (ERROR_TICKER_RE.test(bare(symbol))) return [];
+  if (!isKnownSymbol(bare(symbol))) return [];
   const t = bare(symbol);
   const h = fnv1a(`splits|${t}`);
   const out: SplitEvent[] = [];
@@ -387,7 +477,7 @@ function applySplits(bars: Candle[], splits: SplitEvent[], adjusted: boolean): C
 }
 
 export function sampleDividends(symbol: string): DividendEvent[] {
-  if (ERROR_TICKER_RE.test(bare(symbol))) return [];
+  if (!isKnownSymbol(bare(symbol))) return [];
   const t = bare(symbol);
   const h = fnv1a(`div|${t}`);
   const out: DividendEvent[] = [];
@@ -425,10 +515,14 @@ function genDailyUnadjusted(ticker: string, dates: string[]): Candle[] {
   const scale = m.base / closes[closes.length - 1];
   return dates.map((ds, i) => {
     const [y, mo, d] = parseDate(ds);
-    const prev = i === 0 ? closes[0] / (1 + gaussian(rng) * m.vol * 0.3) : closes[i - 1];
-    const open = prev * scale;
+    const vol = m.vol * regimeFor(t, ds.slice(0, 7));
+    // Overnight gap on its own stream so the walk is untouched.
+    const gapRng = xorshift64(fnv1a(`gap|${t}|${ds}`));
+    const gap = gaussian(gapRng) * vol * 0.4;
+    const prev = i === 0 ? closes[0] / (1 + gaussian(rng) * vol * 0.3) : closes[i - 1];
+    const open = prev * scale * (1 + gap);
     const close = closes[i] * scale;
-    const spread = Math.abs(gaussian(rng)) * m.vol * 0.6 * close;
+    const spread = Math.abs(gaussian(rng)) * vol * 0.6 * close;
     const high = Math.max(open, close) + spread * rng();
     const low = Math.min(open, close) - spread * rng();
     return {
@@ -465,25 +559,29 @@ export function sampleDailyHistoryBefore(
 
 // ── Intraday (minute) series ─────────────────────────────────────────────────
 
-function genMinutesUnadjusted(ticker: string, dates: string[], multMin: number): Candle[] {
+function genMinutesUnadjusted(ticker: string, venue: string, dates: string[], multMin: number): Candle[] {
   const t = bare(ticker);
   const m = modelFor(t);
-  // One extra leading day anchors the first session open.
-  const ext = tradingDaysBack(1, addDays(dates[0], -1));
+  const sess = venueSession(venue);
+  const lenMin = sess.close - sess.open;
+  // One extra leading calendar day anchors the first session open
+  // (mirrors the backend — even a weekend, its close is anchor-only).
+  const ext = [addDays(dates[0], -1)];
   const daily = genDailyUnadjusted(t, [...ext, ...dates]);
   const closeByDate = new Map<string, number>();
   [...ext, ...dates].forEach((ds, i) => closeByDate.set(ds, daily[i].close));
   const out: Candle[] = [];
-  // NSE regular session 09:15–15:30 IST (375 minutes).
-  const perDay = Math.floor(375 / multMin);
+  // Venue session in minutes (NSE 375, MCX 870).
+  const perDay = Math.floor(lenMin / multMin);
   dates.forEach((ds) => {
     const [y, mo, d] = parseDate(ds);
     const anchor = closeByDate.get(addDays(ds, -1)) ?? closeByDate.get(ds) ?? m.base;
     const rng = xorshift64(fnv1a(`min|${t}|${ds}|${multMin}`));
-    let px = anchor * (1 + gaussian(rng) * m.vol * 0.15);
-    const vBase = m.dayVol / 375;
+    const vol = m.vol * regimeFor(t, ds.slice(0, 7));
+    let px = anchor * (1 + gaussian(rng) * vol * 0.15);
+    const vBase = m.dayVol / lenMin;
     for (let i = 0; i < perDay; i++) {
-      const startMin = IST_OPEN_MIN + i * multMin;
+      const startMin = sess.open + i * multMin;
       const hh = Math.floor(startMin / 60);
       const mm = startMin % 60;
       const time = istWallToUtc(y, mo, d, hh, mm) / 1000;
@@ -492,13 +590,13 @@ function genMinutesUnadjusted(ticker: string, dates: string[], multMin: number):
       let high = open;
       let low = open;
       for (let s = 0; s < steps; s++) {
-        px = Math.max(0.5, px * (1 + gaussian(rng) * m.vol * 0.09));
+        px = Math.max(0.5, px * (1 + gaussian(rng) * vol * 0.09));
         high = Math.max(high, px);
         low = Math.min(low, px);
       }
-      // U-shaped volume: heavier near 09:15 open and 15:30 close IST.
+      // U-shaped volume: heavier near the session open and close.
       const tod = hh * 60 + mm;
-      const shape = 1 + 1.6 * Math.exp(-Math.pow(tod - IST_OPEN_MIN, 2) / 4000) + 1.2 * Math.exp(-Math.pow(tod - IST_CLOSE_MIN, 2) / 6000);
+      const shape = 1 + 1.6 * Math.exp(-Math.pow(tod - sess.open, 2) / 4000) + 1.2 * Math.exp(-Math.pow(tod - sess.close, 2) / 6000);
       out.push({
         time,
         open: round2(open),
@@ -522,7 +620,7 @@ export function sampleMinuteHistory(
   const dates = clampDates(tradingDaysBack(days), "minute");
   if (dates.length === 0) return [];
   return applySplits(
-    genMinutesUnadjusted(symbol, dates, Math.max(1, intervalMin)),
+    genMinutesUnadjusted(symbol, venueOf(symbol), dates, Math.max(1, intervalMin)),
     sampleSplits(symbol),
     adjusted,
   );
@@ -542,33 +640,39 @@ export function sampleAggregatesBefore(
   if (dates.length === 0) return [];
   const bars =
     timespan === "second"
-      ? genSecondsUnadjusted(symbol, dates, mult)
-      : genMinutesUnadjusted(symbol, dates, mult);
+      ? genSecondsUnadjusted(symbol, venueOf(symbol), dates, mult)
+      : genMinutesUnadjusted(symbol, venueOf(symbol), dates, mult);
   return applySplits(bars, sampleSplits(symbol), adjusted).filter((b) => b.time < beforeSec);
 }
 
-// ── Second series (RTH 09:30–16:00 ET) ───────────────────────────────────────
+// ── Second series (venue session grid) ──────────────────────────────────────
 
-function genSecondsUnadjusted(ticker: string, dates: string[], multSec: number): Candle[] {
+function genSecondsUnadjusted(ticker: string, venue: string, dates: string[], multSec: number): Candle[] {
   const t = bare(ticker);
   const m = modelFor(t);
-  const ext = tradingDaysBack(1, addDays(dates[0], -1));
+  const sess = venueSession(venue);
+  const lenSec = (sess.close - sess.open) * 60;
+  // One extra leading calendar day anchors the first session open
+  // (mirrors the backend — even a weekend, its close is anchor-only).
+  const ext = [addDays(dates[0], -1)];
   const daily = genDailyUnadjusted(t, [...ext, ...dates]);
   const byDate = new Map<string, { o: number; c: number }>();
   [...ext, ...dates].forEach((ds, i) =>
-    byDate.set(ds, { o: i === 0 ? daily[0].open : daily[i - 1].close, c: daily[i].close }),
+    // i ≥ 1 for every requested date (ext prepends one); the ext row's own
+    // open is anchor-only, matching the backend's ext-day close.
+    byDate.set(ds, { o: i === 0 ? daily[0].close : daily[i - 1].close, c: daily[i].close }),
   );
   const out: Candle[] = [];
-  // NSE regular session 09:15–15:30 IST (22,500 seconds).
-  const perDay = Math.floor(22500 / multSec);
+  const perDay = Math.floor(lenSec / multSec);
   for (const ds of dates) {
     const [y, mo, d] = parseDate(ds);
     const ref = byDate.get(ds) ?? { o: m.base, c: m.base };
     const rng = xorshift64(fnv1a(`sec|${t}|${ds}|${multSec}`));
+    const vol = m.vol * regimeFor(t, ds.slice(0, 7));
     // Walk open→close so the day shape stays plausible.
     const drift = (ref.c - ref.o) / perDay;
     let px = ref.o;
-    const sessionOpen = istWallToUtc(y, mo, d, 9, 15) / 1000;
+    const sessionOpen = istWallToUtc(y, mo, d, Math.floor(sess.open / 60), sess.open % 60) / 1000;
     for (let i = 0; i < perDay; i++) {
       const time = sessionOpen + i * multSec;
       const open = px;
@@ -576,7 +680,7 @@ function genSecondsUnadjusted(ticker: string, dates: string[], multSec: number):
       let low = open;
       const steps = Math.min(multSec, 5);
       for (let s = 0; s < steps; s++) {
-        px = Math.max(0.5, px + drift / steps + gaussian(rng) * m.vol * 0.02 * px);
+        px = Math.max(0.5, px + drift / steps + gaussian(rng) * vol * 0.02 * px);
         high = Math.max(high, px);
         low = Math.min(low, px);
       }
@@ -586,7 +690,7 @@ function genSecondsUnadjusted(ticker: string, dates: string[], multSec: number):
         high: round2(high),
         low: round2(low),
         close: round2(px),
-        volume: Math.round((m.dayVol / 22500) * multSec * (0.4 + rng() * 1.2)),
+        volume: Math.round((m.dayVol / lenSec) * multSec * (0.4 + rng() * 1.2)),
       });
     }
   }
@@ -602,7 +706,7 @@ export function sampleSecondHistory(
   assertSampleSymbol(symbol);
   const dates = clampDates(tradingDaysBack(days), "second");
   if (dates.length === 0) return [];
-  return applySplits(genSecondsUnadjusted(symbol, dates, mult), sampleSplits(symbol), adjusted);
+  return applySplits(genSecondsUnadjusted(symbol, venueOf(symbol), dates, mult), sampleSplits(symbol), adjusted);
 }
 
 export function sampleSecondHistoryTail(
@@ -614,7 +718,7 @@ export function sampleSecondHistoryTail(
   assertSampleSymbol(symbol);
   const today = utcDateStr(Date.now());
   const dates = tradingDaysInRange(addDays(today, -1), today);
-  const bars = applySplits(genSecondsUnadjusted(symbol, dates, mult), sampleSplits(symbol), adjusted);
+  const bars = applySplits(genSecondsUnadjusted(symbol, venueOf(symbol), dates, mult), sampleSplits(symbol), adjusted);
   return bars.filter((b) => b.time > sinceSec);
 }
 
@@ -670,6 +774,10 @@ const UNIVERSE: UniverseRow[] = [
   { ticker: "SILVER", name: "Silver Futures", exchange: "MCX", type: "FUT", sector: "Commodities" },
   { ticker: "CRUDEOIL", name: "Crude Oil Futures", exchange: "MCX", type: "FUT", sector: "Commodities" },
   { ticker: "NATURALGAS", name: "Natural Gas Futures", exchange: "MCX", type: "FUT", sector: "Commodities" },
+  // Dated near-month contracts served by the broker-backed seeds.
+  { ticker: "NIFTY27OCT26FUT", name: "Nifty Futures, 27 Oct 2026 Expiry", exchange: "NFO", type: "FUT", sector: "Derivatives" },
+  { ticker: "BANKNIFTY27OCT26FUT", name: "Bank Nifty Futures, 27 Oct 2026 Expiry", exchange: "NFO", type: "FUT", sector: "Derivatives" },
+  { ticker: "GOLD04DEC26FUT", name: "Gold Futures, 04 Dec 2026 Expiry", exchange: "MCX", type: "FUT", sector: "Commodities" },
 ];
 
 export function sampleSearch(query: string, typeFilter: string | null): SymbolSearchResult[] {
@@ -760,7 +868,7 @@ export function sampleSnapshot(symbol: string): Snapshot {
 }
 
 export function sampleLatestNews(symbol: string, limit: number): NewsItem[] {
-  if (ERROR_TICKER_RE.test(bare(symbol))) return [];
+  if (!isKnownSymbol(bare(symbol))) return [];
   const t = bare(symbol);
   const now = Date.now();
   const heads = [
@@ -842,6 +950,9 @@ function ensureLiveTimer(): void {
     if (syms.size === 0) return;
     const now = Math.floor(Date.now() / 1000);
     for (const sym of syms) {
+      // Unknown symbols error at lookup time; the live loop only follows
+      // listed ones (mirrors the backend — counter untouched).
+      if (!isKnownSymbol(bare(sym))) continue;
       tickN += 1;
       const st = liveStateFor(sym);
       // Model + stream keyed by the bare ticker (history uses the same key);
@@ -849,8 +960,9 @@ function ensureLiveTimer(): void {
       const t = bare(sym);
       const m = modelFor(t);
       const rng = xorshift64(fnv1a(`tick|${t}|${Math.floor(tickN / 7)}`));
+      const vol = m.vol * regimeFor(t, utcDateStr(Date.now()).slice(0, 7));
       const prev = st.price;
-      st.price = Math.max(0.5, round2(st.price * (1 + gaussian(rng) * m.vol * 0.06)));
+      st.price = Math.max(0.5, round2(st.price * (1 + gaussian(rng) * vol * 0.06)));
       const tickV = Math.round((m.dayVol / 22500) * (0.3 + rng() * 1.4));
       st.dayH = Math.max(st.dayH, st.price);
       st.dayL = Math.min(st.dayL, st.price);
@@ -943,4 +1055,5 @@ export function sampleOnTradeTick(fn: (t: TradeTick) => void): () => void {
     tickListeners.delete(fn);
   };
 }
+
 

@@ -26,6 +26,7 @@ import {
   sampleSetWatchlistSubscription,
   sampleSnapshot,
   sampleSplits,
+  sampleSymbolSession,
   sampleTickerInfo,
 } from "../sample-feed";
 import type { DataSource, MarketSessionDef, SourceSeeds } from "./types";
@@ -90,6 +91,9 @@ export const sampleSource: DataSource = {
   // ── Reference ──────────────────────────────────────────────────
   tickerInfo: (symbol) => Promise.resolve(sampleTickerInfo(symbol)),
   tickerSnapshot: (symbol) => Promise.resolve(sampleSnapshot(symbol)),
+  // Per-venue sessions from the feed's static calendar (mirrors the backend's
+  // symbol_session) — preferred over the backend command by the feed.
+  symbolSessions: (symbol) => Promise.resolve(sampleSymbolSession(symbol)),
   search: (query, type) => Promise.resolve(sampleSearch(query, type)),
   dividends: (symbol) => Promise.resolve(sampleDividends(symbol)),
   splits: (symbol) => Promise.resolve(sampleSplits(symbol)),

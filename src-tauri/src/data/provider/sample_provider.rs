@@ -104,6 +104,43 @@ fn bare(symbol: &str) -> String {
     h.split(':').last().unwrap_or("").to_string()
 }
 
+/// True for a listed ticker: like a real vendor, unknown symbols error
+/// instead of generating.
+fn is_known(ticker: &str) -> bool {
+    UNIVERSE.iter().any(|r| r.ticker == ticker)
+}
+
+/// Venue of a listed ticker: the qualified row when the exchange matches,
+/// else the primary (first) listing.
+fn venue_for(ticker: &str, exchange: &str) -> &'static str {
+    UNIVERSE
+        .iter()
+        .find(|r| r.ticker == ticker && (exchange.is_empty() || r.exchange == exchange))
+        .or_else(|| UNIVERSE.iter().find(|r| r.ticker == ticker))
+        .map(|r| r.exchange)
+        .unwrap_or("NSE")
+}
+
+/// Regular session (open/close minutes) + pre/post bands per venue. Index
+/// venues follow NSE hours.
+fn venue_session(exchange: &str) -> (u32, u32, u32, u32) {
+    match exchange {
+        "MCX" => (9 * 60, 23 * 60 + 30, 0, 0),
+        _ => (9 * 60 + 15, 15 * 60 + 30, 15, 30),
+    }
+}
+
+/// Minutes since midnight → "HHMM".
+fn hhmm(m: u32) -> String {
+    format!("{:02}{:02}", m / 60, m % 60)
+}
+
+/// Slow volatility regime for a ticker-month ("YYYY-MM"): 0.7–1.3× base vol.
+/// Integer math, so every feed agrees exactly.
+fn regime_for(ticker: &str, year_month: &str) -> f64 {
+    0.7 + 0.6 * ((fnv1a(&format!("reg|{ticker}|{year_month}")) % 1000) as f64) / 1000.0
+}
+
 // ── Ticker model ─────────────────────────────────────────────────────────────
 
 struct Model {
@@ -121,11 +158,35 @@ fn model_for(ticker: &str) -> Model {
     }
 }
 
-// ── Trading days (weekends skipped; NSE holidays unmodeled — extra weekday
-// bars are harmless for sample data) ─────────────────────────────────────────
+// ── Trading days (weekends + NSE holidays skipped, mirroring the browser
+// feed's list — verified yearly against NSE circulars for 2024–2026) ──────────
+
+/// NSE trading holidays (full-day closures), YYYY-MM-DD.
+const SAMPLE_HOLIDAYS: &[&str] = &[
+    "2024-01-22", "2024-03-08", "2024-03-25", "2024-03-29",
+    "2024-04-11", "2024-04-17", "2024-05-01", "2024-05-20",
+    "2024-06-17", "2024-07-17", "2024-08-15", "2024-10-02",
+    "2024-10-31", "2024-11-01", "2024-11-15", "2024-12-25",
+    "2025-02-26", "2025-03-14", "2025-03-31", "2025-04-10",
+    "2025-04-14", "2025-04-18", "2025-05-01", "2025-08-15",
+    "2025-08-27", "2025-10-02", "2025-10-21", "2025-10-22",
+    "2025-11-05", "2025-12-25",
+    "2026-03-04", "2026-03-20", "2026-03-31", "2026-04-03",
+    "2026-04-14", "2026-05-01", "2026-05-27", "2026-06-26",
+    "2026-09-14", "2026-10-02", "2026-10-20", "2026-11-24",
+    "2026-12-25",
+];
 
 fn is_weekend(d: NaiveDate) -> bool {
     matches!(d.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun)
+}
+
+fn is_sample_trading_day(d: NaiveDate) -> bool {
+    if is_weekend(d) {
+        return false;
+    }
+    let s = d.format("%Y-%m-%d").to_string();
+    !SAMPLE_HOLIDAYS.contains(&s.as_str())
 }
 
 /// Last `n` trading days ending at `end` (inclusive), oldest-first.
@@ -135,7 +196,7 @@ fn trading_days_back(n: usize, end: NaiveDate) -> Vec<NaiveDate> {
     let mut guard = 0usize;
     while out.len() < n.max(1) && guard < n.max(1) * 10 + 30 {
         guard += 1;
-        if !is_weekend(cur) {
+        if is_sample_trading_day(cur) {
             out.push(cur);
         }
         cur = cur.pred_opt().unwrap_or(cur);
@@ -247,14 +308,18 @@ fn gen_daily_unadjusted(ticker: &str, dates: &[NaiveDate]) -> Vec<Candle> {
         .iter()
         .enumerate()
         .map(|(i, ds)| {
+            let vol = m.vol * regime_for(&t, &ds.format("%Y-%m").to_string());
+            // Overnight gap on its own stream so the walk is untouched.
+            let mut gap_rng = Rng::scoped(&format!("gap|{t}|{ds}"));
+            let gap = gap_rng.gaussian() * vol * 0.4;
             let prev = if i == 0 {
-                closes[0] / (1.0 + rng.gaussian() * m.vol * 0.3)
+                closes[0] / (1.0 + rng.gaussian() * vol * 0.3)
             } else {
                 closes[i - 1]
             };
-            let open = prev * scale;
+            let open = prev * scale * (1.0 + gap);
             let close = closes[i] * scale;
-            let spread = rng.gaussian().abs() * m.vol * 0.6 * close;
+            let spread = rng.gaussian().abs() * vol * 0.6 * close;
             let high = open.max(close) + spread * rng.next_f64();
             let low = (open.min(close) - spread * rng.next_f64()).max(0.01);
             Candle {
@@ -278,10 +343,12 @@ fn ist_wall_to_utc(d: NaiveDate, hh: u32, mm: u32) -> f64 {
     (wall_as_utc - 330 * 60) as f64
 }
 
-fn gen_minutes_unadjusted(ticker: &str, dates: &[NaiveDate], mult_min: u32) -> Vec<Candle> {
+fn gen_minutes_unadjusted(ticker: &str, venue: &str, dates: &[NaiveDate], mult_min: u32) -> Vec<Candle> {
     let mult = mult_min.max(1) as usize;
-    // 375-minute session.
-    let per_day = 375 / mult;
+    let (open_min, close_min, _, _) = venue_session(venue);
+    let len_min = close_min - open_min;
+    // Session-length trading day (NSE 375 minutes, MCX 870).
+    let per_day = len_min as usize / mult;
     if dates.is_empty() || per_day == 0 {
         return Vec::new();
     }
@@ -302,23 +369,24 @@ fn gen_minutes_unadjusted(ticker: &str, dates: &[NaiveDate], mult_min: u32) -> V
             .copied()
             .unwrap_or(m.base);
         let mut rng = Rng::scoped(&format!("min|{t}|{ds}|{mult}"));
-        let mut px = anchor * (1.0 + rng.gaussian() * m.vol * 0.15);
-        let v_base = m.day_vol / 375.0;
+        let vol = m.vol * regime_for(&t, &ds.format("%Y-%m").to_string());
+        let mut px = anchor * (1.0 + rng.gaussian() * vol * 0.15);
+        let v_base = m.day_vol / len_min as f64;
         for i in 0..per_day {
-            let start_min = 555 + i * mult; // 09:15 IST
+            let start_min = open_min as usize + i * mult;
             let open = px;
             let mut high = open;
             let mut low = open;
             for _ in 0..mult {
-                px = (px * (1.0 + rng.gaussian() * m.vol * 0.09)).max(0.5);
+                px = (px * (1.0 + rng.gaussian() * vol * 0.09)).max(0.5);
                 high = high.max(px);
                 low = low.min(px);
             }
             let tod = start_min as f64;
-            // U-shaped volume around the 09:15 open and 15:30 close.
+            // U-shaped volume around the session open and close.
             let shape = 1.0
-                + 1.6 * (-((tod - 555.0).powi(2)) / 4000.0).exp()
-                + 1.2 * (-((tod - 930.0).powi(2)) / 6000.0).exp();
+                + 1.6 * (-((tod - open_min as f64).powi(2)) / 4000.0).exp()
+                + 1.2 * (-((tod - close_min as f64).powi(2)) / 6000.0).exp();
             out.push(Candle {
                 time: ist_wall_to_utc(*ds, (start_min / 60) as u32, (start_min % 60) as u32),
                 open: round2(open),
@@ -332,10 +400,10 @@ fn gen_minutes_unadjusted(ticker: &str, dates: &[NaiveDate], mult_min: u32) -> V
     out
 }
 
-fn gen_seconds_unadjusted(ticker: &str, dates: &[NaiveDate], mult_sec: u32) -> Vec<Candle> {
+fn gen_seconds_unadjusted(ticker: &str, venue: &str, dates: &[NaiveDate], mult_sec: u32) -> Vec<Candle> {
     let mult = mult_sec.max(1) as usize;
-    // 09:15–15:30 IST = 22,500 seconds.
-    let per_day = 22500 / mult;
+    let (open_min, close_min, _, _) = venue_session(venue);
+    let per_day = (close_min - open_min) as usize * 60 / mult;
     if dates.is_empty() || per_day == 0 {
         return Vec::new();
     }
@@ -351,16 +419,17 @@ fn gen_seconds_unadjusted(ticker: &str, dates: &[NaiveDate], mult_sec: u32) -> V
         let open = daily[di].close;
         let close = daily[di + 1].close;
         let mut rng = Rng::scoped(&format!("sec|{t}|{ds}|{mult}"));
+        let vol = m.vol * regime_for(&t, &ds.format("%Y-%m").to_string());
         let drift = (close - open) / per_day as f64;
         let mut px = open;
-        let session_open = ist_wall_to_utc(*ds, 9, 15);
+        let session_open = ist_wall_to_utc(*ds, open_min / 60, open_min % 60);
         let steps = mult.min(5);
         for i in 0..per_day {
             let bar_open = px;
             let mut high = bar_open;
             let mut low = bar_open;
             for _ in 0..steps {
-                px = (px + drift / steps as f64 + rng.gaussian() * m.vol * 0.02 * px).max(0.5);
+                px = (px + drift / steps as f64 + rng.gaussian() * vol * 0.02 * px).max(0.5);
                 high = high.max(px);
                 low = low.min(px);
             }
@@ -430,6 +499,10 @@ const UNIVERSE: &[UniverseRow] = &[
     UniverseRow { ticker: "SILVER", name: "Silver Futures", exchange: "MCX", kind: "FUT", sector: "Commodities" },
     UniverseRow { ticker: "CRUDEOIL", name: "Crude Oil Futures", exchange: "MCX", kind: "FUT", sector: "Commodities" },
     UniverseRow { ticker: "NATURALGAS", name: "Natural Gas Futures", exchange: "MCX", kind: "FUT", sector: "Commodities" },
+    // Dated near-month contracts served by the broker-backed seeds.
+    UniverseRow { ticker: "NIFTY27OCT26FUT", name: "Nifty Futures, 27 Oct 2026 Expiry", exchange: "NFO", kind: "FUT", sector: "Derivatives" },
+    UniverseRow { ticker: "BANKNIFTY27OCT26FUT", name: "Bank Nifty Futures, 27 Oct 2026 Expiry", exchange: "NFO", kind: "FUT", sector: "Derivatives" },
+    UniverseRow { ticker: "GOLD04DEC26FUT", name: "Gold Futures, 04 Dec 2026 Expiry", exchange: "MCX", kind: "FUT", sector: "Commodities" },
 ];
 
 fn today_utc() -> NaiveDate {
@@ -448,10 +521,13 @@ impl HistoryProvider for SampleProvider {
         adjusted: bool,
     ) -> Result<Vec<Candle>> {
         let t = sym.ticker.clone();
+        if !is_known(&t) {
+            anyhow::bail!("unknown sample symbol: {t}");
+        }
         let mut dates: Vec<NaiveDate> = Vec::new();
         let mut cur = from;
         while cur <= to {
-            if !is_weekend(cur) {
+            if is_sample_trading_day(cur) {
                 dates.push(cur);
             }
             match cur.succ_opt() {
@@ -471,10 +547,14 @@ impl HistoryProvider for SampleProvider {
         adjusted: bool,
     ) -> Result<Vec<Candle>> {
         let t = sym.ticker.clone();
+        if !is_known(&t) {
+            anyhow::bail!("unknown sample symbol: {t}");
+        }
+        let venue = venue_for(&t, &sym.exchange);
         let mut dates: Vec<NaiveDate> = Vec::new();
         let mut cur = from;
         while cur <= to {
-            if !is_weekend(cur) {
+            if is_sample_trading_day(cur) {
                 dates.push(cur);
             }
             match cur.succ_opt() {
@@ -482,7 +562,7 @@ impl HistoryProvider for SampleProvider {
                 None => break,
             }
         }
-        Ok(apply_splits(gen_minutes_unadjusted(&t, &dates, mult), &sample_splits(&t, today_utc()), adjusted))
+        Ok(apply_splits(gen_minutes_unadjusted(&t, venue, &dates, mult), &sample_splits(&t, today_utc()), adjusted))
     }
 
     async fn second_aggs(
@@ -494,10 +574,14 @@ impl HistoryProvider for SampleProvider {
         adjusted: bool,
     ) -> Result<Vec<Candle>> {
         let t = sym.ticker.clone();
+        if !is_known(&t) {
+            anyhow::bail!("unknown sample symbol: {t}");
+        }
+        let venue = venue_for(&t, &sym.exchange);
         let mut dates: Vec<NaiveDate> = Vec::new();
         let mut cur = from;
         while cur <= to {
-            if !is_weekend(cur) {
+            if is_sample_trading_day(cur) {
                 dates.push(cur);
             }
             match cur.succ_opt() {
@@ -505,7 +589,7 @@ impl HistoryProvider for SampleProvider {
                 None => break,
             }
         }
-        Ok(apply_splits(gen_seconds_unadjusted(&t, &dates, mult), &sample_splits(&t, today_utc()), adjusted))
+        Ok(apply_splits(gen_seconds_unadjusted(&t, venue, &dates, mult), &sample_splits(&t, today_utc()), adjusted))
     }
 
     async fn second_tail(
@@ -516,9 +600,13 @@ impl HistoryProvider for SampleProvider {
         adjusted: bool,
     ) -> Result<Vec<Candle>> {
         let t = sym.ticker.clone();
+        if !is_known(&t) {
+            anyhow::bail!("unknown sample symbol: {t}");
+        }
+        let venue = venue_for(&t, &sym.exchange);
         let today = today_utc();
         let dates = trading_days_back(2, today);
-        Ok(apply_splits(gen_seconds_unadjusted(&t, &dates, mult), &sample_splits(&t, today), adjusted)
+        Ok(apply_splits(gen_seconds_unadjusted(&t, venue, &dates, mult), &sample_splits(&t, today), adjusted)
             .into_iter()
             .filter(|b| b.time > since_sec)
             .collect())
@@ -529,6 +617,9 @@ impl HistoryProvider for SampleProvider {
 impl ReferenceProvider for SampleProvider {
     async fn ticker_info(&self, sym: &SymbolRef) -> Result<TickerInfo> {
         let t = sym.ticker.clone();
+        if !is_known(&t) {
+            anyhow::bail!("unknown sample symbol: {t}");
+        }
         let m = model_for(&t);
         // Prefer the venue-qualified row when the caller passes one
         // ("BSE:RELIANCE"); otherwise the primary (first) listing.
@@ -567,20 +658,41 @@ impl ReferenceProvider for SampleProvider {
         })
     }
 
-    /// Trading sessions of a symbol, mirroring the provider caps (IST,
-    /// 09:15-15:30 regular, 09:00-16:00 extended): every sample venue trades
-    /// the same session, so one descriptor covers them all.
-    async fn symbol_session(&self, _sym: &SymbolRef) -> Result<SymbolSession> {
+    /// Trading sessions of a symbol, mirroring the venue's real hours (NSE
+    /// family 09:15–15:30 IST with a 09:00–16:00 extended day; MCX 09:00–23:30
+    /// with no extended parts) and the NSE holiday list.
+    async fn symbol_session(&self, sym: &SymbolRef) -> Result<SymbolSession> {
+        if !is_known(&sym.ticker) {
+            anyhow::bail!("unknown sample symbol: {}", sym.ticker);
+        }
+        let venue = venue_for(&sym.ticker, &sym.exchange);
+        let (open_min, close_min, pre_min, post_min) = venue_session(venue);
+        let rth = format!("{}-{}", hhmm(open_min), hhmm(close_min));
+        let mut subsessions = vec![Subsession::new("regular", "Regular Trading Hours", &rth)];
+        if pre_min + post_min > 0 {
+            let eth = format!("{}-{}", hhmm(open_min - pre_min), hhmm(close_min + post_min));
+            subsessions.push(Subsession::new("extended", "Extended Trading Hours", &eth));
+            subsessions.push(Subsession::new(
+                "premarket",
+                "Premarket",
+                &format!("{}-{}", hhmm(open_min - pre_min), hhmm(open_min)),
+            ));
+            subsessions.push(Subsession::new(
+                "postmarket",
+                "Postmarket",
+                &format!("{}-{}", hhmm(close_min), hhmm(close_min + post_min)),
+            ));
+        }
+        let holidays = SAMPLE_HOLIDAYS
+            .iter()
+            .map(|d| d.replace('-', ""))
+            .collect::<Vec<_>>()
+            .join(",");
         Ok(SymbolSession {
             timezone: "Asia/Kolkata".into(),
-            session: "0915-1530".into(),
-            subsessions: vec![
-                Subsession::new("regular", "Regular Trading Hours", "0915-1530"),
-                Subsession::new("extended", "Extended Trading Hours", "0900-1600"),
-                Subsession::new("premarket", "Premarket", "0900-0915"),
-                Subsession::new("postmarket", "Postmarket", "1530-1600"),
-            ],
-            holidays: String::new(),
+            session: rth,
+            subsessions,
+            holidays,
             corrections: String::new(),
             // NSE tick: 0.05 INR (5 / 100), uniform at every price.
             pricescale: 100,
@@ -591,6 +703,9 @@ impl ReferenceProvider for SampleProvider {
 
     async fn ticker_snapshot(&self, sym: &SymbolRef) -> Result<Snapshot> {
         let t = sym.ticker.clone();
+        if !is_known(&t) {
+            anyhow::bail!("unknown sample symbol: {t}");
+        }
         let to = today_utc();
         let dates = trading_days_back(5, to);
         let daily = gen_daily_unadjusted(&t, &dates);
@@ -667,15 +782,24 @@ impl ReferenceProvider for SampleProvider {
     }
 
     async fn dividends(&self, sym: &SymbolRef) -> Vec<DividendEvent> {
+        if !is_known(&sym.ticker) {
+            return Vec::new();
+        }
         sample_dividends(&sym.ticker, today_utc())
     }
 
     async fn splits(&self, sym: &SymbolRef) -> Vec<SplitEvent> {
+        if !is_known(&sym.ticker) {
+            return Vec::new();
+        }
         sample_splits(&sym.ticker, today_utc())
     }
 
     async fn latest_news(&self, sym: &SymbolRef, limit: u32) -> Vec<NewsItem> {
         let t = sym.ticker.clone();
+        if !is_known(&t) {
+            anyhow::bail!("unknown sample symbol: {t}");
+        }
         let now_ms = chrono::Utc::now().timestamp_millis();
         let heads = [
             format!("{t} holds gains as sample volume runs above average"),
@@ -789,6 +913,11 @@ fn tick_once(app: &AppHandle, state: &SubscriptionState, live: &mut HashMap<Stri
     }
     let now = chrono::Utc::now().timestamp() as f64;
     for sym in syms {
+        // Unknown symbols error at lookup time; the live loop only follows
+        // listed ones.
+        if !is_known(&bare(&sym)) {
+            continue;
+        }
         *tick_n += 1;
         // The model is keyed by the bare ticker (history uses the same key),
         // while live state and emitted events keep the full name.
@@ -796,9 +925,12 @@ fn tick_once(app: &AppHandle, state: &SubscriptionState, live: &mut HashMap<Stri
         let m = model_for(&t);
         // Deterministic-ish walk keyed by tick counter (no entropy source).
         let mut rng = Rng::scoped(&format!("tick|{t}|{}", *tick_n / 7));
+        // Current volatility regime, like the history walks.
+        let today = chrono::Utc::now().date_naive();
+        let vol = m.vol * regime_for(&t, &today.format("%Y-%m").to_string());
         let st = live_state_for(live, &sym);
         let prev = st.price;
-        st.price = round2((st.price * (1.0 + rng.gaussian() * m.vol * 0.06)).max(0.5));
+        st.price = round2((st.price * (1.0 + rng.gaussian() * vol * 0.06)).max(0.5));
         let tick_v = (m.day_vol / 22500.0 * (0.3 + rng.next_f64() * 1.4)).round();
         st.day_h = st.day_h.max(st.price);
         st.day_l = st.day_l.min(st.price);
