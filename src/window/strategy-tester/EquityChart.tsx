@@ -35,6 +35,8 @@ import { Tooltip } from "../../components/Tooltip";
 import { Popover, PopItem, PopSectionTitle, PopDivider } from "../screener/Popover";
 import { strategyTester } from "../../data/strategy-tester-store";
 import { commands } from "../../bindings";
+import { isTauri } from "../shell/window-bridge";
+import { openSnapshotInBrowser } from "../../data/drawing-images-web";
 import { EXCURSION_COLORS, ExcursionSeries, type ExcursionData } from "./excursion-series";
 import { EquityStrip, type StripHover } from "./equity-strip";
 import { equityPoints, reportPeriods, whitespaceTimes, type EquityPoint } from "./equity-data";
@@ -363,7 +365,10 @@ export function EquityChart(props: Props) {
     const canvas = chart.takeScreenshot();
     if (action === "open") {
       const b64 = canvas.toDataURL("image/png").split(",")[1] ?? "";
-      void commands.openSnapshot(b64);
+      void commands.openSnapshot(b64).catch(() => {
+        // No backend in browser shells: open the PNG in a new tab instead.
+        if (!isTauri()) openSnapshotInBrowser(b64);
+      });
       return;
     }
     canvas.toBlob((blob) => {

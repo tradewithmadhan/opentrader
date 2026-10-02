@@ -6,6 +6,8 @@
  */
 import { createSignal } from "solid-js";
 import { commands } from "../../bindings";
+import { readWebImage, saveWebImage } from "../../data/drawing-images-web";
+import { isTauri } from "../shell/window-bridge";
 import { cacheImage, decodeImage, IMAGE_MAX_BYTES, IMAGE_TYPES, imageMimeOf, onImagesChanged, setImageReader } from "lightweight-charts-drawing/core/kinds/images";
 
 const [version, setVersion] = createSignal(0);
@@ -13,6 +15,8 @@ export const imagesVersion = version;
 onImagesChanged(() => setVersion((n) => n + 1));
 
 setImageReader(async (name) => {
+  // Browser shells have no backend image folder: serve the local store.
+  if (!isTauri()) return readWebImage(name);
   const r = await commands.readDrawingImage(name);
   if (r.status !== "ok") throw new Error(r.error);
   // Blob URL: the <image> href stays short (no base64 in the DOM).
@@ -25,6 +29,8 @@ setImageReader(async (name) => {
 /** Store a chosen file (checks: type and 2 MB) and return its name and
  *  natural size. Throws with a user message on a bad file. */
 export async function saveDrawingImage(file: File): Promise<{ name: string; width: number; height: number }> {
+  // Browser shells have no backend image folder: persist locally.
+  if (!isTauri()) return saveWebImage(file);
   const ext = IMAGE_TYPES[file.type];
   if (!ext) throw new Error("Use a JPG, PNG or WEBP image");
   if (file.size > IMAGE_MAX_BYTES) throw new Error("The image is larger than 2MB");

@@ -79,6 +79,8 @@ import { priceOf } from "./series-transforms";
 import { registerChartExport, type ExportColumn } from "./chart-export";
 import { clearActiveChartProbe, setActiveChartProbe } from "./active-chart";
 import type { CompareEntry, PaneIndicatorSettings } from "../shell/tabs";
+import { isTauri } from "../shell/window-bridge";
+import { openSnapshotInBrowser } from "../../data/drawing-images-web";
 import { CompareLayer } from "./compare/compare-layer";
 import { compareColor, compareSource, type CompareStyleState } from "./compare/compare-style";
 import { CompareSettingsDialog } from "./compare/CompareSettingsDialog";
@@ -3439,6 +3441,9 @@ export function ChartView(props: Props) {
         const b64 = canvas.toDataURL("image/png").split(",")[1] ?? "";
         void commands.openSnapshot(b64).then((r: { status: string; error?: string }) => {
           if (r.status === "error") console.warn("[snapshot] open failed:", r.error);
+        }).catch(() => {
+          // No backend in browser shells: open the PNG in a new tab instead.
+          if (!isTauri()) openSnapshotInBrowser(b64);
         });
         return;
       }
