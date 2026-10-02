@@ -29,11 +29,34 @@ const EXCHANGE_NAMES: Record<string, string> = {
   BSE_INDEX: "BSE_INDEX",
 };
 
+/** Listing country (ISO 3166 alpha-2) by venue — every sample market. */
+const EXCHANGE_COUNTRIES: Record<string, string> = {
+  NSE: "IN",
+  BSE: "IN",
+  NSE_INDEX: "IN",
+  BSE_INDEX: "IN",
+  NFO: "IN",
+  MCX: "IN",
+  NASDAQ: "US",
+  NYSE: "US",
+  LSE: "GB",
+  XETRA: "DE",
+  TSE: "JP",
+  HKEX: "HK",
+  ASX: "AU",
+};
+
 /** Map a vendor exchange code to its display name, falling back to the raw
  *  value when there's no mapping (or it's already a friendly name). */
 export function exchangeName(code: string | null | undefined): string {
   if (!code) return "";
   return EXCHANGE_NAMES[code.toUpperCase()] ?? code;
+}
+
+/** Country of a listing by its venue code (undefined when not known). */
+export function countryOfVenue(code: string | null | undefined): string | undefined {
+  if (!code) return undefined;
+  return EXCHANGE_COUNTRIES[code.toUpperCase()];
 }
 
 /** Exchange prefix of a symbol's full name. Sample codes are already prefixes
@@ -85,8 +108,7 @@ export function searchResultToRow(r: SymbolSearchResult): SymbolRow {
     exchangeTooltip: ex || undefined,
     primaryExchange: !!ex,
     category: (r.type && TYPE_CATEGORY[r.type]) || "stocks",
-    // All sample venues are Indian listings.
-    country: "IN",
+    country: countryOfVenue(ex),
   };
 }
 

@@ -84,6 +84,18 @@ const SAMPLE_SEEDS: SourceSeeds = {
       name: "MCX",
       tickers: ["MCX:GOLD04DEC26FUT"],
     },
+    {
+      name: "US",
+      tickers: ["NASDAQ:AAPL", "NASDAQ:MSFT", "NASDAQ:NVDA", "NYSE:JPM", "NYSE:SPX"],
+    },
+    {
+      name: "EU",
+      tickers: ["LSE:SHEL", "XETRA:SAP", "LSE:FTSE"],
+    },
+    {
+      name: "APAC",
+      tickers: ["TSE:7203", "HKEX:0700", "ASX:CBA", "TSE:NIKKEI"],
+    },
   ],
 };
 

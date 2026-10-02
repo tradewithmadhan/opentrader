@@ -28,9 +28,10 @@ use super::{DataProvider, HistoryProvider, RealtimeProvider, ReferenceProvider};
 use crate::data::massive_ws::{ChartAggregate, SecondAggregate, SubscribeMsg, SubscriptionState, TradeTick, WsHandle};
 use crate::data::session::{Subsession, SymbolSession};
 use crate::data::symbol::SymbolRef;
+use chrono_tz::Tz;
 use crate::data::types::{Candle, DividendEvent, NewsItem, Snapshot, SplitEvent, SymbolSearchResult, TickerInfo};
 use anyhow::Result;
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, NaiveDate, TimeZone};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tauri::AppHandle;
@@ -121,13 +122,43 @@ fn venue_for(ticker: &str, exchange: &str) -> &'static str {
         .unwrap_or("NSE")
 }
 
-/// Regular session (open/close minutes) + pre/post bands per venue. Index
-/// venues follow NSE hours.
-fn venue_session(exchange: &str) -> (u32, u32, u32, u32) {
-    match exchange {
-        "MCX" => (9 * 60, 23 * 60 + 30, 0, 0),
-        _ => (9 * 60 + 15, 15 * 60 + 30, 15, 30),
-    }
+/// Session + presentation contract per sample venue. Index venues follow
+/// their cash market (hours, holidays, currency). Lunch-break venues carry
+/// two intervals; the spec grammar and the generators both handle them.
+struct VenueInfo {
+    exchange: &'static str,
+    timezone: &'static str,
+    /// Trading intervals as (open_min, len_min) in exchange-local time.
+    intervals: &'static [(u32, u32)],
+    pre_min: u32,
+    post_min: u32,
+    currency: &'static str,
+    pricescale: u32,
+    minmov: u32,
+    /// True when the NSE holiday list applies (Indian venues).
+    nse_holidays: bool,
+}
+
+const VENUES: &[VenueInfo] = &[
+    VenueInfo { exchange: "NSE", timezone: "Asia/Kolkata", intervals: &[(555, 375)], pre_min: 15, post_min: 30, currency: "INR", pricescale: 100, minmov: 5, nse_holidays: true },
+    VenueInfo { exchange: "BSE", timezone: "Asia/Kolkata", intervals: &[(555, 375)], pre_min: 15, post_min: 30, currency: "INR", pricescale: 100, minmov: 5, nse_holidays: true },
+    VenueInfo { exchange: "NSE_INDEX", timezone: "Asia/Kolkata", intervals: &[(555, 375)], pre_min: 15, post_min: 30, currency: "INR", pricescale: 100, minmov: 5, nse_holidays: true },
+    VenueInfo { exchange: "BSE_INDEX", timezone: "Asia/Kolkata", intervals: &[(555, 375)], pre_min: 15, post_min: 30, currency: "INR", pricescale: 100, minmov: 5, nse_holidays: true },
+    VenueInfo { exchange: "NFO", timezone: "Asia/Kolkata", intervals: &[(555, 375)], pre_min: 15, post_min: 30, currency: "INR", pricescale: 100, minmov: 5, nse_holidays: true },
+    VenueInfo { exchange: "MCX", timezone: "Asia/Kolkata", intervals: &[(540, 870)], pre_min: 0, post_min: 0, currency: "INR", pricescale: 100, minmov: 5, nse_holidays: true },
+    VenueInfo { exchange: "NASDAQ", timezone: "America/New_York", intervals: &[(570, 390)], pre_min: 330, post_min: 240, currency: "USD", pricescale: 100, minmov: 1, nse_holidays: false },
+    VenueInfo { exchange: "NYSE", timezone: "America/New_York", intervals: &[(570, 390)], pre_min: 330, post_min: 240, currency: "USD", pricescale: 100, minmov: 1, nse_holidays: false },
+    VenueInfo { exchange: "LSE", timezone: "Europe/London", intervals: &[(480, 510)], pre_min: 0, post_min: 0, currency: "GBP", pricescale: 100, minmov: 1, nse_holidays: false },
+    VenueInfo { exchange: "XETRA", timezone: "Europe/Berlin", intervals: &[(540, 510)], pre_min: 0, post_min: 0, currency: "EUR", pricescale: 100, minmov: 1, nse_holidays: false },
+    VenueInfo { exchange: "TSE", timezone: "Asia/Tokyo", intervals: &[(540, 150), (750, 150)], pre_min: 0, post_min: 0, currency: "JPY", pricescale: 1, minmov: 1, nse_holidays: false },
+    VenueInfo { exchange: "HKEX", timezone: "Asia/Hong_Kong", intervals: &[(570, 150), (780, 180)], pre_min: 0, post_min: 0, currency: "HKD", pricescale: 100, minmov: 1, nse_holidays: false },
+    VenueInfo { exchange: "ASX", timezone: "Australia/Sydney", intervals: &[(600, 360)], pre_min: 0, post_min: 0, currency: "AUD", pricescale: 100, minmov: 1, nse_holidays: false },
+];
+
+/// Venue contract for an exchange code (NSE default for unknown codes;
+/// unknown tickers error before this is reached).
+fn venue_info(exchange: &str) -> &'static VenueInfo {
+    VENUES.iter().find(|v| v.exchange == exchange).unwrap_or(&VENUES[0])
 }
 
 /// Minutes since midnight → "HHMM".
@@ -337,19 +368,27 @@ fn gen_daily_unadjusted(ticker: &str, dates: &[NaiveDate]) -> Vec<Candle> {
 // ── Intraday series (NSE regular session 09:15–15:30 IST = 03:45–10:00 UTC;
 // IST has no DST, so the offset is a constant 330 minutes) ───────────────────
 
-/// UTC seconds of an IST wall-clock time on the given date.
-fn ist_wall_to_utc(d: NaiveDate, hh: u32, mm: u32) -> f64 {
-    let wall_as_utc = d.and_hms_opt(hh, mm, 0).map(|t| t.and_utc().timestamp()).unwrap_or(0);
-    (wall_as_utc - 330 * 60) as f64
+/// UTC seconds of an exchange-local wall-clock time on the given date.
+/// DST-aware via the tz database (US/UK/EU/AU sessions shift); session
+/// opens never land in a transition hour, so `single()` suffices with an
+/// earliest() fallback.
+fn wall_to_utc(tz: Tz, d: NaiveDate, open_min: u32) -> f64 {
+    let (hh, mm) = (open_min / 60, open_min % 60);
+    tz.with_ymd_and_hms(d.year(), d.month(), d.day(), hh, mm, 0)
+        .single()
+        .or_else(|| {
+            tz.with_ymd_and_hms(d.year(), d.month(), d.day(), hh, mm, 0).earliest()
+        })
+        .map(|dt| dt.timestamp() as f64)
+        .unwrap_or(0.0)
 }
 
 fn gen_minutes_unadjusted(ticker: &str, venue: &str, dates: &[NaiveDate], mult_min: u32) -> Vec<Candle> {
     let mult = mult_min.max(1) as usize;
-    let (open_min, close_min, _, _) = venue_session(venue);
-    let len_min = close_min - open_min;
-    // Session-length trading day (NSE 375 minutes, MCX 870).
-    let per_day = len_min as usize / mult;
-    if dates.is_empty() || per_day == 0 {
+    let info = venue_info(venue);
+    let tz: Tz = info.timezone.parse().unwrap_or(chrono_tz::UTC);
+    let total_len: u32 = info.intervals.iter().map(|(_, len)| len).sum();
+    if dates.is_empty() || total_len as usize / mult == 0 {
         return Vec::new();
     }
     let t = bare(ticker);
@@ -361,6 +400,9 @@ fn gen_minutes_unadjusted(ticker: &str, venue: &str, dates: &[NaiveDate], mult_m
     let daily = gen_daily_unadjusted(&t, &ext);
     let closes: HashMap<NaiveDate, f64> =
         ext.iter().zip(daily.iter()).map(|(d, b)| (*d, b.close)).collect();
+    // Volume shape anchors: first interval open → last interval close.
+    let day_open = info.intervals[0].0 as f64;
+    let day_close = info.intervals.iter().map(|(o, l)| *o as f64 + *l as f64).fold(0.0f64, f64::max);
     let mut out = Vec::new();
     for ds in dates {
         let anchor = closes
@@ -371,30 +413,33 @@ fn gen_minutes_unadjusted(ticker: &str, venue: &str, dates: &[NaiveDate], mult_m
         let mut rng = Rng::scoped(&format!("min|{t}|{ds}|{mult}"));
         let vol = m.vol * regime_for(&t, &ds.format("%Y-%m").to_string());
         let mut px = anchor * (1.0 + rng.gaussian() * vol * 0.15);
-        let v_base = m.day_vol / len_min as f64;
-        for i in 0..per_day {
-            let start_min = open_min as usize + i * mult;
-            let open = px;
-            let mut high = open;
-            let mut low = open;
-            for _ in 0..mult {
-                px = (px * (1.0 + rng.gaussian() * vol * 0.09)).max(0.5);
-                high = high.max(px);
-                low = low.min(px);
+        let v_base = m.day_vol / total_len as f64;
+        for (open_min, len_min) in info.intervals {
+            let per_day = *len_min as usize / mult;
+            for i in 0..per_day {
+                let start_min = *open_min as usize + i * mult;
+                let open = px;
+                let mut high = open;
+                let mut low = open;
+                for _ in 0..mult {
+                    px = (px * (1.0 + rng.gaussian() * vol * 0.09)).max(0.5);
+                    high = high.max(px);
+                    low = low.min(px);
+                }
+                let tod = start_min as f64;
+                // U-shaped volume around the session open and close.
+                let shape = 1.0
+                    + 1.6 * (-((tod - day_open).powi(2)) / 4000.0).exp()
+                    + 1.2 * (-((tod - day_close).powi(2)) / 6000.0).exp();
+                out.push(Candle {
+                    time: wall_to_utc(tz, *ds, start_min as u32),
+                    open: round2(open),
+                    high: round2(high),
+                    low: round2(low),
+                    close: round2(px),
+                    volume: (v_base * mult as f64 * shape * (0.5 + rng.next_f64())).round(),
+                });
             }
-            let tod = start_min as f64;
-            // U-shaped volume around the session open and close.
-            let shape = 1.0
-                + 1.6 * (-((tod - open_min as f64).powi(2)) / 4000.0).exp()
-                + 1.2 * (-((tod - close_min as f64).powi(2)) / 6000.0).exp();
-            out.push(Candle {
-                time: ist_wall_to_utc(*ds, (start_min / 60) as u32, (start_min % 60) as u32),
-                open: round2(open),
-                high: round2(high),
-                low: round2(low),
-                close: round2(px),
-                volume: (v_base * mult as f64 * shape * (0.5 + rng.next_f64())).round(),
-            });
         }
     }
     out
@@ -402,9 +447,10 @@ fn gen_minutes_unadjusted(ticker: &str, venue: &str, dates: &[NaiveDate], mult_m
 
 fn gen_seconds_unadjusted(ticker: &str, venue: &str, dates: &[NaiveDate], mult_sec: u32) -> Vec<Candle> {
     let mult = mult_sec.max(1) as usize;
-    let (open_min, close_min, _, _) = venue_session(venue);
-    let per_day = (close_min - open_min) as usize * 60 / mult;
-    if dates.is_empty() || per_day == 0 {
+    let info = venue_info(venue);
+    let tz: Tz = info.timezone.parse().unwrap_or(chrono_tz::UTC);
+    let total_bars: usize = info.intervals.iter().map(|(_, len)| *len as usize * 60 / mult).sum();
+    if dates.is_empty() || total_bars == 0 {
         return Vec::new();
     }
     let t = bare(ticker);
@@ -420,27 +466,30 @@ fn gen_seconds_unadjusted(ticker: &str, venue: &str, dates: &[NaiveDate], mult_s
         let close = daily[di + 1].close;
         let mut rng = Rng::scoped(&format!("sec|{t}|{ds}|{mult}"));
         let vol = m.vol * regime_for(&t, &ds.format("%Y-%m").to_string());
-        let drift = (close - open) / per_day as f64;
+        let drift = (close - open) / total_bars as f64;
         let mut px = open;
-        let session_open = ist_wall_to_utc(*ds, open_min / 60, open_min % 60);
         let steps = mult.min(5);
-        for i in 0..per_day {
-            let bar_open = px;
-            let mut high = bar_open;
-            let mut low = bar_open;
-            for _ in 0..steps {
-                px = (px + drift / steps as f64 + rng.gaussian() * vol * 0.02 * px).max(0.5);
-                high = high.max(px);
-                low = low.min(px);
+        for (open_min, len_min) in info.intervals {
+            let session_open = wall_to_utc(tz, *ds, *open_min);
+            let per_day = *len_min as usize * 60 / mult;
+            for i in 0..per_day {
+                let bar_open = px;
+                let mut high = bar_open;
+                let mut low = bar_open;
+                for _ in 0..steps {
+                    px = (px + drift / steps as f64 + rng.gaussian() * vol * 0.02 * px).max(0.5);
+                    high = high.max(px);
+                    low = low.min(px);
+                }
+                out.push(Candle {
+                    time: session_open + (i * mult) as f64,
+                    open: round2(bar_open),
+                    high: round2(high),
+                    low: round2(low),
+                    close: round2(px),
+                    volume: ((m.day_vol / (total_bars * mult) as f64) * mult as f64 * (0.4 + rng.next_f64() * 1.2)).round(),
+                });
             }
-            out.push(Candle {
-                time: session_open + (i * mult) as f64,
-                open: round2(bar_open),
-                high: round2(high),
-                low: round2(low),
-                close: round2(px),
-                volume: ((m.day_vol / 22500.0) * mult as f64 * (0.4 + rng.next_f64() * 1.2)).round(),
-            });
         }
     }
     out
@@ -503,6 +552,38 @@ const UNIVERSE: &[UniverseRow] = &[
     UniverseRow { ticker: "NIFTY27OCT26FUT", name: "Nifty Futures, 27 Oct 2026 Expiry", exchange: "NFO", kind: "FUT", sector: "Derivatives" },
     UniverseRow { ticker: "BANKNIFTY27OCT26FUT", name: "Bank Nifty Futures, 27 Oct 2026 Expiry", exchange: "NFO", kind: "FUT", sector: "Derivatives" },
     UniverseRow { ticker: "GOLD04DEC26FUT", name: "Gold Futures, 04 Dec 2026 Expiry", exchange: "MCX", kind: "FUT", sector: "Commodities" },
+    // US equities (America/New_York).
+    UniverseRow { ticker: "AAPL", name: "Apple Inc.", exchange: "NASDAQ", kind: "EQ", sector: "Technology" },
+    UniverseRow { ticker: "MSFT", name: "Microsoft Corp.", exchange: "NASDAQ", kind: "EQ", sector: "Technology" },
+    UniverseRow { ticker: "NVDA", name: "NVIDIA Corp.", exchange: "NASDAQ", kind: "EQ", sector: "Technology" },
+    UniverseRow { ticker: "TSLA", name: "Tesla Inc.", exchange: "NASDAQ", kind: "EQ", sector: "Auto" },
+    UniverseRow { ticker: "JPM", name: "JPMorgan Chase & Co.", exchange: "NYSE", kind: "EQ", sector: "Banking" },
+    UniverseRow { ticker: "XOM", name: "Exxon Mobil Corp.", exchange: "NYSE", kind: "EQ", sector: "Energy" },
+    UniverseRow { ticker: "NDX", name: "Nasdaq 100 Index", exchange: "NASDAQ", kind: "IX", sector: "Index" },
+    UniverseRow { ticker: "SPX", name: "S&P 500 Index", exchange: "NYSE", kind: "IX", sector: "Index" },
+    // UK equities (Europe/London).
+    UniverseRow { ticker: "SHEL", name: "Shell plc", exchange: "LSE", kind: "EQ", sector: "Energy" },
+    UniverseRow { ticker: "HSBA", name: "HSBC Holdings plc", exchange: "LSE", kind: "EQ", sector: "Banking" },
+    UniverseRow { ticker: "AZN", name: "AstraZeneca plc", exchange: "LSE", kind: "EQ", sector: "Pharma" },
+    UniverseRow { ticker: "FTSE", name: "FTSE 100 Index", exchange: "LSE", kind: "IX", sector: "Index" },
+    // EU equities (Xetra, Europe/Berlin).
+    UniverseRow { ticker: "SAP", name: "SAP SE", exchange: "XETRA", kind: "EQ", sector: "Technology" },
+    UniverseRow { ticker: "SIE", name: "Siemens AG", exchange: "XETRA", kind: "EQ", sector: "Infra" },
+    UniverseRow { ticker: "DAX", name: "DAX Index", exchange: "XETRA", kind: "IX", sector: "Index" },
+    // Japanese equities (Asia/Tokyo, lunch break).
+    UniverseRow { ticker: "7203", name: "Toyota Motor Corp.", exchange: "TSE", kind: "EQ", sector: "Auto" },
+    UniverseRow { ticker: "6758", name: "Sony Group Corp.", exchange: "TSE", kind: "EQ", sector: "Technology" },
+    UniverseRow { ticker: "9984", name: "SoftBank Group Corp.", exchange: "TSE", kind: "EQ", sector: "Finance" },
+    UniverseRow { ticker: "NIKKEI", name: "Nikkei 225 Index", exchange: "TSE", kind: "IX", sector: "Index" },
+    // Hong Kong equities (Asia/Hong_Kong, lunch break).
+    UniverseRow { ticker: "0700", name: "Tencent Holdings Ltd.", exchange: "HKEX", kind: "EQ", sector: "Technology" },
+    UniverseRow { ticker: "0939", name: "China Construction Bank Corp.", exchange: "HKEX", kind: "EQ", sector: "Banking" },
+    UniverseRow { ticker: "0388", name: "Hong Kong Exchanges & Clearing Ltd.", exchange: "HKEX", kind: "EQ", sector: "Finance" },
+    UniverseRow { ticker: "HSI", name: "Hang Seng Index", exchange: "HKEX", kind: "IX", sector: "Index" },
+    // Australian equities (Australia/Sydney).
+    UniverseRow { ticker: "CBA", name: "Commonwealth Bank of Australia", exchange: "ASX", kind: "EQ", sector: "Banking" },
+    UniverseRow { ticker: "BHP", name: "BHP Group Ltd.", exchange: "ASX", kind: "EQ", sector: "Metals" },
+    UniverseRow { ticker: "ASX200", name: "S&P/ASX 200 Index", exchange: "ASX", kind: "IX", sector: "Index" },
 ];
 
 fn today_utc() -> NaiveDate {
@@ -633,6 +714,7 @@ impl ReferenceProvider for SampleProvider {
         };
         let exchange = known.map(|r| r.exchange).unwrap_or("NSE").to_string();
         let h = fnv1a(&format!("ref|{t}"));
+        let currency = venue_info(known.map(|r| r.exchange).unwrap_or("NSE")).currency;
         Ok(TickerInfo {
             ticker: t.clone(),
             name: Some(match known {
@@ -642,13 +724,7 @@ impl ReferenceProvider for SampleProvider {
             exchange: Some(exchange.clone()),
             industry: Some(known.map(|r| r.sector).unwrap_or("Sample").to_string()),
             sector: Some(known.map(|r| r.sector).unwrap_or("Sample").to_string()),
-            currency: Some(
-                if ["NSE", "BSE", "NFO", "MCX"].contains(&exchange.as_str()) {
-                    "INR".to_string()
-                } else {
-                    "USD".to_string()
-                },
-            ),
+            currency: Some(currency.to_string()),
             description: Some(format!("{t} — deterministic sample instrument for backend development.")),
             homepage_url: None,
             total_employees: Some(10000.0 + ((h % 150000) as f64)),
@@ -658,45 +734,55 @@ impl ReferenceProvider for SampleProvider {
         })
     }
 
-    /// Trading sessions of a symbol, mirroring the venue's real hours (NSE
-    /// family 09:15–15:30 IST with a 09:00–16:00 extended day; MCX 09:00–23:30
-    /// with no extended parts) and the NSE holiday list.
+    /// Trading sessions of a symbol from its venue's real hours (exchange
+    /// time zone, lunch breaks included) and the NSE holiday list where it
+    /// applies.
     async fn symbol_session(&self, sym: &SymbolRef) -> Result<SymbolSession> {
         if !is_known(&sym.ticker) {
             anyhow::bail!("unknown sample symbol: {}", sym.ticker);
         }
         let venue = venue_for(&sym.ticker, &sym.exchange);
-        let (open_min, close_min, pre_min, post_min) = venue_session(venue);
-        let rth = format!("{}-{}", hhmm(open_min), hhmm(close_min));
+        let info = venue_info(venue);
+        let rth = info
+            .intervals
+            .iter()
+            .map(|(o, l)| format!("{}-{}", hhmm(*o), hhmm(*o + l)))
+            .collect::<Vec<_>>()
+            .join(",");
         let mut subsessions = vec![Subsession::new("regular", "Regular Trading Hours", &rth)];
-        if pre_min + post_min > 0 {
-            let eth = format!("{}-{}", hhmm(open_min - pre_min), hhmm(close_min + post_min));
+        if info.pre_min + info.post_min > 0 {
+            let first_open = info.intervals[0].0;
+            let last_close = info.intervals.iter().map(|(o, l)| o + l).fold(0u32, u32::max);
+            let eth = format!("{}-{}", hhmm(first_open - info.pre_min), hhmm(last_close + info.post_min));
             subsessions.push(Subsession::new("extended", "Extended Trading Hours", &eth));
             subsessions.push(Subsession::new(
                 "premarket",
                 "Premarket",
-                &format!("{}-{}", hhmm(open_min - pre_min), hhmm(open_min)),
+                &format!("{}-{}", hhmm(first_open - info.pre_min), hhmm(first_open)),
             ));
             subsessions.push(Subsession::new(
                 "postmarket",
                 "Postmarket",
-                &format!("{}-{}", hhmm(close_min), hhmm(close_min + post_min)),
+                &format!("{}-{}", hhmm(last_close), hhmm(last_close + info.post_min)),
             ));
         }
-        let holidays = SAMPLE_HOLIDAYS
-            .iter()
-            .map(|d| d.replace('-', ""))
-            .collect::<Vec<_>>()
-            .join(",");
+        let holidays = if info.nse_holidays {
+            SAMPLE_HOLIDAYS
+                .iter()
+                .map(|d| d.replace('-', ""))
+                .collect::<Vec<_>>()
+                .join(",")
+        } else {
+            String::new()
+        };
         Ok(SymbolSession {
-            timezone: "Asia/Kolkata".into(),
+            timezone: info.timezone.to_string(),
             session: rth,
             subsessions,
             holidays,
             corrections: String::new(),
-            // NSE tick: 0.05 INR (5 / 100), uniform at every price.
-            pricescale: 100,
-            minmov: 5,
+            pricescale: info.pricescale,
+            minmov: info.minmov,
             variable_tick_size: String::new(),
         })
     }

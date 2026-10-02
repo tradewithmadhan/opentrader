@@ -77,13 +77,6 @@ function venueOf(symbol: string): string {
   return venueFor(t, parts.length > 1 ? parts[0] : "");
 }
 
-/** Regular session (open/close minutes) + pre/post bands per venue. Index
- *  venues follow NSE hours. */
-function venueSession(exchange: string): { open: number; close: number; pre: number; post: number } {
-  if (exchange === "MCX") return { open: 540, close: 1410, pre: 0, post: 0 };
-  return { open: 555, close: 930, pre: 15, post: 30 };
-}
-
 /** Slow volatility regime for a ticker-month ("YYYY-MM"): 0.7–1.3× base vol.
  *  Integer math, so every feed agrees exactly. */
 function regimeFor(ticker: string, yearMonth: string): number {
@@ -247,39 +240,54 @@ const bare = (s: string): string => {
 };
 
 // ── IST time helpers + sample calendar ─────────────────────────────────────
-// Sample mode models the NSE equity session (09:15–15:30 IST); intraday
-// buckets run on IST wall time while day enumeration follows UTC calendar
-// dates like the backend (weekends skipped, no holiday list).
+// Sample mode models the NSE equity session (09:15–15:30 IST) by default;
+// each venue below carries its own hours, time zone and presentation while
+// intraday buckets run on exchange-local wall time and day enumeration
+// follows UTC calendar dates like the backend (weekends + NSE holidays
+// skipped where they apply).
 
-const IST_TZ = "Asia/Kolkata";
 /** NSE regular session: 09:15–15:30 IST, in minutes since IST midnight. */
 export const IST_OPEN_MIN = 9 * 60 + 15; // 555
+/** NSE regular session close, in minutes since IST midnight. */
 export const IST_CLOSE_MIN = 15 * 60 + 30; // 930
 
-const istPartsFmt = new Intl.DateTimeFormat("en-US", {
-  timeZone: IST_TZ,
-  hour12: false,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  weekday: "short",
-});
+/** Session + presentation contract per sample venue (mirrors the backend's
+ *  table). Index venues follow their cash market. Lunch-break venues carry
+ *  two intervals; generation and specs handle both. */
+export type VenueInfo = {
+  exchange: string;
+  timezone: string;
+  intervals: [number, number][];
+  pre: number;
+  post: number;
+  currency: string;
+  pricescale: number;
+  minmov: number;
+  nseHolidays: boolean;
+};
 
-function istParts(utcMs: number): { y: number; m: number; d: number; hh: number; mm: number; wd: string } {
-  const p: Record<string, string> = {};
-  for (const x of istPartsFmt.formatToParts(new Date(utcMs))) {
-    if (x.type !== "literal") p[x.type] = x.value;
-  }
-  return {
-    y: +p.year,
-    m: +p.month,
-    d: +p.day,
-    hh: +p.hour === 24 ? 0 : +p.hour,
-    mm: +p.minute,
-    wd: p.weekday,
-  };
+const VENUES: VenueInfo[] = [
+  { exchange: "NSE", timezone: "Asia/Kolkata", intervals: [[555, 375]], pre: 15, post: 30, currency: "INR", pricescale: 100, minmov: 5, nseHolidays: true },
+  { exchange: "BSE", timezone: "Asia/Kolkata", intervals: [[555, 375]], pre: 15, post: 30, currency: "INR", pricescale: 100, minmov: 5, nseHolidays: true },
+  { exchange: "NSE_INDEX", timezone: "Asia/Kolkata", intervals: [[555, 375]], pre: 15, post: 30, currency: "INR", pricescale: 100, minmov: 5, nseHolidays: true },
+  { exchange: "BSE_INDEX", timezone: "Asia/Kolkata", intervals: [[555, 375]], pre: 15, post: 30, currency: "INR", pricescale: 100, minmov: 5, nseHolidays: true },
+  { exchange: "NFO", timezone: "Asia/Kolkata", intervals: [[555, 375]], pre: 15, post: 30, currency: "INR", pricescale: 100, minmov: 5, nseHolidays: true },
+  { exchange: "MCX", timezone: "Asia/Kolkata", intervals: [[540, 870]], pre: 0, post: 0, currency: "INR", pricescale: 100, minmov: 5, nseHolidays: true },
+  { exchange: "NASDAQ", timezone: "America/New_York", intervals: [[570, 390]], pre: 330, post: 240, currency: "USD", pricescale: 100, minmov: 1, nseHolidays: false },
+  { exchange: "NYSE", timezone: "America/New_York", intervals: [[570, 390]], pre: 330, post: 240, currency: "USD", pricescale: 100, minmov: 1, nseHolidays: false },
+  { exchange: "LSE", timezone: "Europe/London", intervals: [[480, 510]], pre: 0, post: 0, currency: "GBP", pricescale: 100, minmov: 1, nseHolidays: false },
+  { exchange: "XETRA", timezone: "Europe/Berlin", intervals: [[540, 510]], pre: 0, post: 0, currency: "EUR", pricescale: 100, minmov: 1, nseHolidays: false },
+  { exchange: "TSE", timezone: "Asia/Tokyo", intervals: [[540, 150], [750, 150]], pre: 0, post: 0, currency: "JPY", pricescale: 1, minmov: 1, nseHolidays: false },
+  { exchange: "HKEX", timezone: "Asia/Hong_Kong", intervals: [[570, 150], [780, 180]], pre: 0, post: 0, currency: "HKD", pricescale: 100, minmov: 1, nseHolidays: false },
+  { exchange: "ASX", timezone: "Australia/Sydney", intervals: [[600, 360]], pre: 0, post: 0, currency: "AUD", pricescale: 100, minmov: 1, nseHolidays: false },
+];
+
+/** Venue contract for an exchange code. Throws on unknown codes (callers
+ *  resolve through `venueOf`, which only yields listed venues). */
+export function venueInfo(exchange: string): VenueInfo {
+  const hit = VENUES.find((v) => v.exchange === exchange);
+  if (!hit) throw new Error(`unknown sample venue: ${exchange}`);
+  return hit;
 }
 
 /** UTC calendar date string for a UTC instant — the backend's `today_utc`
@@ -289,14 +297,34 @@ function utcDateStr(utcMs: number): string {
   return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, "0")}-${String(t.getUTCDate()).padStart(2, "0")}`;
 }
 
-/** UTC millis of an IST wall-clock time. Single probe: UTC = wall-as-UTC minus
- *  the zone offset measured at that instant (exact for IST, which has no DST).
- *  NOTE: the classic two-probe loop overshoots by exactly one offset — the
- *  correction at the true answer is still -offset, so a second pass breaks a
- *  converged result. */
-function istWallToUtc(y: number, m: number, d: number, hh: number, mm: number): number {
+const tzFmtCache = new Map<string, Intl.DateTimeFormat>();
+function tzParts(tz: string, utcMs: number): { y: number; m: number; d: number; hh: number; mm: number } {
+  let f = tzFmtCache.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hour12: false,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    tzFmtCache.set(tz, f);
+  }
+  const p: Record<string, string> = {};
+  for (const x of f.formatToParts(new Date(utcMs))) {
+    if (x.type !== "literal") p[x.type] = x.value;
+  }
+  return { y: +p.year, m: +p.month, d: +p.day, hh: +p.hour === 24 ? 0 : +p.hour, mm: +p.minute };
+}
+
+/** UTC millis of an exchange-local wall-clock time. Single probe: UTC =
+ *  wall-as-UTC minus the zone offset measured at that instant (DST-aware;
+ *  session opens never land in a transition hour). */
+function tzWallToUtc(tz: string, y: number, m: number, d: number, hh: number, mm: number): number {
   const wallAsUtc = Date.UTC(y, m - 1, d, hh, mm);
-  const p = istParts(wallAsUtc);
+  const p = tzParts(tz, wallAsUtc);
   const asUtc = Date.UTC(p.y, p.m - 1, p.d, p.hh, p.mm);
   return wallAsUtc - (asUtc - wallAsUtc);
 }
@@ -337,33 +365,34 @@ function holidaySpec(): string {
 }
 
 /** Per-venue session descriptor for a listed symbol (mirrors the backend's
- *  symbol_session): venue hours, NSE holidays, NSE 0.05 tick. */
+ *  symbol_session): venue hours and time zone, lunch breaks included. */
 export function sampleSymbolSession(symbol: string): SymbolSession {
   const t = bare(symbol);
   if (!isKnownSymbol(t)) throw new Error(`no sample data for ${t}`);
-  const venue = venueOf(symbol);
-  const sess = venueSession(venue);
+  const info = venueInfo(venueOf(symbol));
   const fmt = (m: number): string =>
     `${String(Math.floor(m / 60)).padStart(2, "0")}${String(((m % 60) + 60) % 60).padStart(2, "0")}`;
-  const rth = `${fmt(sess.open)}-${fmt(sess.close)}`;
+  const rth = info.intervals.map(([o, len]) => `${fmt(o)}-${fmt(o + len)}`).join(",");
   const subsessions: SymbolSession["subsessions"] = [
     { id: "regular", description: "Regular Trading Hours", session: rth, corrections: "" },
   ];
-  if (sess.pre + sess.post > 0) {
+  if (info.pre + info.post > 0) {
+    const firstOpen = info.intervals[0][0];
+    const lastClose = Math.max(...info.intervals.map(([o, len]) => o + len));
     subsessions.push(
-      { id: "extended", description: "Extended Trading Hours", session: `${fmt(sess.open - sess.pre)}-${fmt(sess.close + sess.post)}`, corrections: "" },
-      { id: "premarket", description: "Premarket", session: `${fmt(sess.open - sess.pre)}-${fmt(sess.open)}`, corrections: "" },
-      { id: "postmarket", description: "Postmarket", session: `${fmt(sess.close)}-${fmt(sess.close + sess.post)}`, corrections: "" },
+      { id: "extended", description: "Extended Trading Hours", session: `${fmt(firstOpen - info.pre)}-${fmt(lastClose + info.post)}`, corrections: "" },
+      { id: "premarket", description: "Premarket", session: `${fmt(firstOpen - info.pre)}-${fmt(firstOpen)}`, corrections: "" },
+      { id: "postmarket", description: "Postmarket", session: `${fmt(lastClose)}-${fmt(lastClose + info.post)}`, corrections: "" },
     );
   }
   return {
-    timezone: "Asia/Kolkata",
+    timezone: info.timezone,
     session: rth,
     subsessions,
-    holidays: holidaySpec(),
+    holidays: info.nseHolidays ? holidaySpec() : "",
     corrections: "",
-    pricescale: 100,
-    minmov: 5,
+    pricescale: info.pricescale,
+    minmov: info.minmov,
     variableTickSize: "",
   };
 }
@@ -562,8 +591,8 @@ export function sampleDailyHistoryBefore(
 function genMinutesUnadjusted(ticker: string, venue: string, dates: string[], multMin: number): Candle[] {
   const t = bare(ticker);
   const m = modelFor(t);
-  const sess = venueSession(venue);
-  const lenMin = sess.close - sess.open;
+  const info = venueInfo(venue);
+  const totalMin = info.intervals.reduce((a, [, len]) => a + len, 0);
   // One extra leading calendar day anchors the first session open
   // (mirrors the backend — even a weekend, its close is anchor-only).
   const ext = [addDays(dates[0], -1)];
@@ -571,40 +600,44 @@ function genMinutesUnadjusted(ticker: string, venue: string, dates: string[], mu
   const closeByDate = new Map<string, number>();
   [...ext, ...dates].forEach((ds, i) => closeByDate.set(ds, daily[i].close));
   const out: Candle[] = [];
-  // Venue session in minutes (NSE 375, MCX 870).
-  const perDay = Math.floor(lenMin / multMin);
+  // Volume shape anchors: first interval open → last interval close.
+  const dayOpen = info.intervals[0][0];
+  const dayClose = Math.max(...info.intervals.map(([o, len]) => o + len));
   dates.forEach((ds) => {
     const [y, mo, d] = parseDate(ds);
     const anchor = closeByDate.get(addDays(ds, -1)) ?? closeByDate.get(ds) ?? m.base;
     const rng = xorshift64(fnv1a(`min|${t}|${ds}|${multMin}`));
     const vol = m.vol * regimeFor(t, ds.slice(0, 7));
     let px = anchor * (1 + gaussian(rng) * vol * 0.15);
-    const vBase = m.dayVol / lenMin;
-    for (let i = 0; i < perDay; i++) {
-      const startMin = sess.open + i * multMin;
-      const hh = Math.floor(startMin / 60);
-      const mm = startMin % 60;
-      const time = istWallToUtc(y, mo, d, hh, mm) / 1000;
-      const open = px;
-      const steps = Math.max(1, multMin);
-      let high = open;
-      let low = open;
-      for (let s = 0; s < steps; s++) {
-        px = Math.max(0.5, px * (1 + gaussian(rng) * vol * 0.09));
-        high = Math.max(high, px);
-        low = Math.min(low, px);
+    const vBase = m.dayVol / totalMin;
+    for (const [openMin, lenMin] of info.intervals) {
+      const perDay = Math.floor(lenMin / multMin);
+      for (let i = 0; i < perDay; i++) {
+        const startMin = openMin + i * multMin;
+        const hh = Math.floor(startMin / 60);
+        const mm = startMin % 60;
+        const time = tzWallToUtc(info.timezone, y, mo, d, hh, mm) / 1000;
+        const open = px;
+        const steps = Math.max(1, multMin);
+        let high = open;
+        let low = open;
+        for (let s = 0; s < steps; s++) {
+          px = Math.max(0.5, px * (1 + gaussian(rng) * vol * 0.09));
+          high = Math.max(high, px);
+          low = Math.min(low, px);
+        }
+        // U-shaped volume: heavier near the session open and close.
+        const tod = hh * 60 + mm;
+        const shape = 1 + 1.6 * Math.exp(-Math.pow(tod - dayOpen, 2) / 4000) + 1.2 * Math.exp(-Math.pow(tod - dayClose, 2) / 6000);
+        out.push({
+          time,
+          open: round2(open),
+          high: round2(high),
+          low: round2(low),
+          close: round2(px),
+          volume: Math.round(vBase * multMin * shape * (0.5 + rng())),
+        });
       }
-      // U-shaped volume: heavier near the session open and close.
-      const tod = hh * 60 + mm;
-      const shape = 1 + 1.6 * Math.exp(-Math.pow(tod - sess.open, 2) / 4000) + 1.2 * Math.exp(-Math.pow(tod - sess.close, 2) / 6000);
-      out.push({
-        time,
-        open: round2(open),
-        high: round2(high),
-        low: round2(low),
-        close: round2(px),
-        volume: Math.round(vBase * multMin * shape * (0.5 + rng())),
-      });
     }
   });
   return out;
@@ -650,8 +683,8 @@ export function sampleAggregatesBefore(
 function genSecondsUnadjusted(ticker: string, venue: string, dates: string[], multSec: number): Candle[] {
   const t = bare(ticker);
   const m = modelFor(t);
-  const sess = venueSession(venue);
-  const lenSec = (sess.close - sess.open) * 60;
+  const info = venueInfo(venue);
+  const totalSec = info.intervals.reduce((a, [, len]) => a + len, 0) * 60;
   // One extra leading calendar day anchors the first session open
   // (mirrors the backend — even a weekend, its close is anchor-only).
   const ext = [addDays(dates[0], -1)];
@@ -663,35 +696,40 @@ function genSecondsUnadjusted(ticker: string, venue: string, dates: string[], mu
     byDate.set(ds, { o: i === 0 ? daily[0].close : daily[i - 1].close, c: daily[i].close }),
   );
   const out: Candle[] = [];
-  const perDay = Math.floor(lenSec / multSec);
+  const totalBars = Math.floor(totalSec / multSec);
   for (const ds of dates) {
     const [y, mo, d] = parseDate(ds);
     const ref = byDate.get(ds) ?? { o: m.base, c: m.base };
     const rng = xorshift64(fnv1a(`sec|${t}|${ds}|${multSec}`));
     const vol = m.vol * regimeFor(t, ds.slice(0, 7));
-    // Walk open→close so the day shape stays plausible.
-    const drift = (ref.c - ref.o) / perDay;
+    // Walk open→close so the day shape stays plausible (one drift over the
+    // whole day, bars following each interval in turn).
+    const drift = (ref.c - ref.o) / totalBars;
     let px = ref.o;
-    const sessionOpen = istWallToUtc(y, mo, d, Math.floor(sess.open / 60), sess.open % 60) / 1000;
-    for (let i = 0; i < perDay; i++) {
-      const time = sessionOpen + i * multSec;
-      const open = px;
-      let high = open;
-      let low = open;
-      const steps = Math.min(multSec, 5);
-      for (let s = 0; s < steps; s++) {
-        px = Math.max(0.5, px + drift / steps + gaussian(rng) * vol * 0.02 * px);
-        high = Math.max(high, px);
-        low = Math.min(low, px);
+    const steps = Math.min(multSec, 5);
+    for (const [openMin, lenMin] of info.intervals) {
+      const sessionOpen =
+        tzWallToUtc(info.timezone, y, mo, d, Math.floor(openMin / 60), openMin % 60) / 1000;
+      const perDay = Math.floor((lenMin * 60) / multSec);
+      for (let i = 0; i < perDay; i++) {
+        const time = sessionOpen + i * multSec;
+        const open = px;
+        let high = open;
+        let low = open;
+        for (let s = 0; s < steps; s++) {
+          px = Math.max(0.5, px + drift / steps + gaussian(rng) * vol * 0.02 * px);
+          high = Math.max(high, px);
+          low = Math.min(low, px);
+        }
+        out.push({
+          time,
+          open: round2(open),
+          high: round2(high),
+          low: round2(low),
+          close: round2(px),
+          volume: Math.round((m.dayVol / totalSec) * multSec * (0.4 + rng() * 1.2)),
+        });
       }
-      out.push({
-        time,
-        open: round2(open),
-        high: round2(high),
-        low: round2(low),
-        close: round2(px),
-        volume: Math.round((m.dayVol / lenSec) * multSec * (0.4 + rng() * 1.2)),
-      });
     }
   }
   return out;
@@ -778,6 +816,38 @@ const UNIVERSE: UniverseRow[] = [
   { ticker: "NIFTY27OCT26FUT", name: "Nifty Futures, 27 Oct 2026 Expiry", exchange: "NFO", type: "FUT", sector: "Derivatives" },
   { ticker: "BANKNIFTY27OCT26FUT", name: "Bank Nifty Futures, 27 Oct 2026 Expiry", exchange: "NFO", type: "FUT", sector: "Derivatives" },
   { ticker: "GOLD04DEC26FUT", name: "Gold Futures, 04 Dec 2026 Expiry", exchange: "MCX", type: "FUT", sector: "Commodities" },
+  // US equities (America/New_York).
+  { ticker: "AAPL", name: "Apple Inc.", exchange: "NASDAQ", type: "EQ", sector: "Technology" },
+  { ticker: "MSFT", name: "Microsoft Corp.", exchange: "NASDAQ", type: "EQ", sector: "Technology" },
+  { ticker: "NVDA", name: "NVIDIA Corp.", exchange: "NASDAQ", type: "EQ", sector: "Technology" },
+  { ticker: "TSLA", name: "Tesla Inc.", exchange: "NASDAQ", type: "EQ", sector: "Auto" },
+  { ticker: "JPM", name: "JPMorgan Chase & Co.", exchange: "NYSE", type: "EQ", sector: "Banking" },
+  { ticker: "XOM", name: "Exxon Mobil Corp.", exchange: "NYSE", type: "EQ", sector: "Energy" },
+  { ticker: "NDX", name: "Nasdaq 100 Index", exchange: "NASDAQ", type: "IX", sector: "Index" },
+  { ticker: "SPX", name: "S&P 500 Index", exchange: "NYSE", type: "IX", sector: "Index" },
+  // UK equities (Europe/London).
+  { ticker: "SHEL", name: "Shell plc", exchange: "LSE", type: "EQ", sector: "Energy" },
+  { ticker: "HSBA", name: "HSBC Holdings plc", exchange: "LSE", type: "EQ", sector: "Banking" },
+  { ticker: "AZN", name: "AstraZeneca plc", exchange: "LSE", type: "EQ", sector: "Pharma" },
+  { ticker: "FTSE", name: "FTSE 100 Index", exchange: "LSE", type: "IX", sector: "Index" },
+  // EU equities (Xetra, Europe/Berlin).
+  { ticker: "SAP", name: "SAP SE", exchange: "XETRA", type: "EQ", sector: "Technology" },
+  { ticker: "SIE", name: "Siemens AG", exchange: "XETRA", type: "EQ", sector: "Infra" },
+  { ticker: "DAX", name: "DAX Index", exchange: "XETRA", type: "IX", sector: "Index" },
+  // Japanese equities (Asia/Tokyo, lunch break).
+  { ticker: "7203", name: "Toyota Motor Corp.", exchange: "TSE", type: "EQ", sector: "Auto" },
+  { ticker: "6758", name: "Sony Group Corp.", exchange: "TSE", type: "EQ", sector: "Technology" },
+  { ticker: "9984", name: "SoftBank Group Corp.", exchange: "TSE", type: "EQ", sector: "Finance" },
+  { ticker: "NIKKEI", name: "Nikkei 225 Index", exchange: "TSE", type: "IX", sector: "Index" },
+  // Hong Kong equities (Asia/Hong_Kong, lunch break).
+  { ticker: "0700", name: "Tencent Holdings Ltd.", exchange: "HKEX", type: "EQ", sector: "Technology" },
+  { ticker: "0939", name: "China Construction Bank Corp.", exchange: "HKEX", type: "EQ", sector: "Banking" },
+  { ticker: "0388", name: "Hong Kong Exchanges & Clearing Ltd.", exchange: "HKEX", type: "EQ", sector: "Finance" },
+  { ticker: "HSI", name: "Hang Seng Index", exchange: "HKEX", type: "IX", sector: "Index" },
+  // Australian equities (Australia/Sydney).
+  { ticker: "CBA", name: "Commonwealth Bank of Australia", exchange: "ASX", type: "EQ", sector: "Banking" },
+  { ticker: "BHP", name: "BHP Group Ltd.", exchange: "ASX", type: "EQ", sector: "Metals" },
+  { ticker: "ASX200", name: "S&P/ASX 200 Index", exchange: "ASX", type: "IX", sector: "Index" },
 ];
 
 export function sampleSearch(query: string, typeFilter: string | null): SymbolSearchResult[] {
@@ -831,7 +901,7 @@ export function sampleTickerInfo(symbol: string): TickerInfo {
     exchange,
     industry: known?.sector ?? "Sample",
     sector: known?.sector ?? "Sample",
-    currency: ["NSE", "BSE", "NFO", "MCX"].includes(exchange) ? "INR" : "USD",
+    currency: venueInfo(known?.exchange ?? "NSE").currency,
     description: `${known?.name ?? t} — deterministic sample instrument for browser development.`,
     homepageUrl: null,
     totalEmployees: 10000 + Number(fnv1a(`ref|${t}`) % 150000n),
