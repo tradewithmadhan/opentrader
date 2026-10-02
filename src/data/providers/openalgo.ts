@@ -142,21 +142,31 @@ export function normalizeIntervals(data: OaIntervals): NormalizedIntervals {
 
 const INTERVAL_TTL_MS = 24 * 3600 * 1000;
 let intervalCache: { at: number; normalized: NormalizedIntervals } | null = null;
+let intervalsPending: Promise<NormalizedIntervals | null> | null = null;
 
 /** Broker intervals, cached a day. Falls back to null when unreachable —
- *  callers then use the `FALLBACK_MINUTE_INTERVAL` table (today's behavior). */
+ *  callers then use the `FALLBACK_MINUTE_INTERVAL` table (today's behavior).
+ *  Concurrent callers share one in-flight request. */
 export async function fetchIntervals(): Promise<NormalizedIntervals | null> {
   const hit = intervalCache;
   if (hit && Date.now() - hit.at < INTERVAL_TTL_MS) return hit.normalized;
-  try {
-    const res = await post<{ status?: string; data?: OaIntervals }>(openAlgoConfig(), "/api/v1/intervals", {});
-    if (!res.data || typeof res.data !== "object") throw new Error("OpenAlgo /intervals: bad payload");
-    const normalized = normalizeIntervals(res.data);
-    intervalCache = { at: Date.now(), normalized };
-    return normalized;
-  } catch {
-    return null;
-  }
+  if (intervalsPending) return intervalsPending;
+  const run = async (): Promise<NormalizedIntervals | null> => {
+    try {
+      const res = await post<{ status?: string; data?: OaIntervals }>(openAlgoConfig(), "/api/v1/intervals", {});
+      if (!res.data || typeof res.data !== "object") throw new Error("OpenAlgo /intervals: bad payload");
+      const normalized = normalizeIntervals(res.data);
+      intervalCache = { at: Date.now(), normalized };
+      return normalized;
+    } catch {
+      return null;
+    }
+  };
+  const p = run().finally(() => {
+    if (intervalsPending === p) intervalsPending = null;
+  });
+  intervalsPending = p;
+  return p;
 }
 
 /** Currently known minute-multiplier → broker token (broker list when
@@ -561,32 +571,55 @@ export function buildExchangeSession(build: CalendarBuild): SymbolSession {
 const HOLIDAY_TTL_MS = 24 * 3600 * 1000;
 
 const holidaysCache = new Map<number, { at: number; timezone: string; rows: OaHoliday[] }>();
+const holidaysPending = new Map<number, Promise<{ timezone: string; rows: OaHoliday[] }>>();
 
-/** Holidays (+response timezone) for a year, cached a day. */
+/** Holidays (+response timezone) for a year, cached a day. Concurrent
+ *  callers share one in-flight request (a watchlist resolves dozens of
+ *  symbols at once — without this every symbol fires its own calls). */
 export async function fetchHolidays(year: number): Promise<{ timezone: string; rows: OaHoliday[] }> {
   const hit = holidaysCache.get(year);
   if (hit && Date.now() - hit.at < HOLIDAY_TTL_MS) return { timezone: hit.timezone, rows: hit.rows };
-  const cfg = openAlgoConfig();
-  const res = await post<{ status?: string; timezone?: string; data?: OaHoliday[] }>(cfg, "/api/v1/market/holidays", {
-    year,
+  const pending = holidaysPending.get(year);
+  if (pending) return pending;
+  const run = async (): Promise<{ timezone: string; rows: OaHoliday[] }> => {
+    const cfg = openAlgoConfig();
+    const res = await post<{ status?: string; timezone?: string; data?: OaHoliday[] }>(cfg, "/api/v1/market/holidays", {
+      year,
+    });
+    const rows = Array.isArray(res.data) ? res.data : [];
+    const timezone = typeof res.timezone === "string" && res.timezone ? res.timezone : "Asia/Kolkata";
+    holidaysCache.set(year, { at: Date.now(), timezone, rows });
+    return { timezone, rows };
+  };
+  const p = run().finally(() => {
+    if (holidaysPending.get(year) === p) holidaysPending.delete(year);
   });
-  const rows = Array.isArray(res.data) ? res.data : [];
-  const timezone = typeof res.timezone === "string" && res.timezone ? res.timezone : "Asia/Kolkata";
-  holidaysCache.set(year, { at: Date.now(), timezone, rows });
-  return { timezone, rows };
+  holidaysPending.set(year, p);
+  return p;
 }
 
 const timingsCache = new Map<string, { at: number; rows: OaTiming[] }>();
+const timingsPending = new Map<string, Promise<OaTiming[]>>();
 
-/** Timings for one date (empty on holidays), cached a day. */
+/** Timings for one date (empty on holidays), cached a day. Concurrent
+ *  callers share one in-flight request, like holidays above. */
 export async function fetchTimings(date: string): Promise<OaTiming[]> {
   const hit = timingsCache.get(date);
   if (hit && Date.now() - hit.at < HOLIDAY_TTL_MS) return hit.rows;
-  const cfg = openAlgoConfig();
-  const res = await post<{ status?: string; data?: OaTiming[] }>(cfg, "/api/v1/market/timings", { date });
-  const rows = Array.isArray(res.data) ? res.data : [];
-  timingsCache.set(date, { at: Date.now(), rows });
-  return rows;
+  const pending = timingsPending.get(date);
+  if (pending) return pending;
+  const run = async (): Promise<OaTiming[]> => {
+    const cfg = openAlgoConfig();
+    const res = await post<{ status?: string; data?: OaTiming[] }>(cfg, "/api/v1/market/timings", { date });
+    const rows = Array.isArray(res.data) ? res.data : [];
+    timingsCache.set(date, { at: Date.now(), rows });
+    return rows;
+  };
+  const p = run().finally(() => {
+    if (timingsPending.get(date) === p) timingsPending.delete(date);
+  });
+  timingsPending.set(date, p);
+  return p;
 }
 
 const sessionCache = new Map<string, { at: number; session: SymbolSession }>();
@@ -611,10 +644,15 @@ export async function openAlgoSymbolSession(symbol: string): Promise<SymbolSessi
   }
 }
 
-/** Fetch years + special-day timings and build one prefix's descriptor. */
+/** Fetch years + special-day timings and build one prefix's descriptor. The
+ *  current year always; next year only in December, when January specials
+ *  (and countdown over New Year) need it — the rest of the year one call
+ *  suffices. */
 async function buildFreshSession(prefix: string): Promise<SymbolSession> {
-  const thisYear = new Date().getUTCFullYear();
-  const settled = await Promise.allSettled([fetchHolidays(thisYear), fetchHolidays(thisYear + 1)]);
+  const now = new Date();
+  const thisYear = now.getUTCFullYear();
+  const years = now.getUTCMonth() === 11 ? [thisYear, thisYear + 1] : [thisYear];
+  const settled = await Promise.allSettled(years.map((y) => fetchHolidays(y)));
   const ok = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
   if (ok.length === 0) throw new Error("OpenAlgo calendar unreachable");
   const timezone = ok[0].timezone;
