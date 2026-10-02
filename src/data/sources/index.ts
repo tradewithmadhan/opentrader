@@ -5,11 +5,12 @@
  *
  * Selection order: `?source=` URL param → persisted `localStorage` choice →
  * default (sample feed in a plain browser, Tauri backend in the shell).
+ * Each provider is one file (engine + `DataSource` + presentation adapter);
+ * a future `real.ts` adds one line here and one in `../providers`.
  */
-import { sampleSource } from "./sample";
+import { sampleSource, useSampleFeed } from "./sample";
 import { openalgoSource } from "./openalgo";
 import { tauriSource } from "./tauri";
-import { useSampleFeed } from "../sample-feed";
 import type { DataSource } from "./types";
 
 /** Registry of known sources. A future `real.ts` adds one line here. */

@@ -145,11 +145,20 @@
       fingerprint) applies automatically; stale = earlier UTC day → re-probe.
       History commands wait at most `FLOOR_WAIT` (5s) only when no cache exists.
 
-## 6. Frontend adapter — `src/data/providers/<name>.ts`
+## 6. Frontend — one file: `src/data/sources/<name>.ts`
 
+A provider is a single module holding its engine, its `DataSource` socket
+object, and its `FrontendProvider` presentation adapter (see
+`sources/sample.ts`). Register both objects: one line in
+`sources/index.ts::REGISTRY`, one line in `providers/index.ts::REGISTRY`.
+Nothing else in the app changes.
+
+- [ ] `export const <name>Source: DataSource` — history, reference, live,
+      meta, seeds; optional `symbolSessions` / `fundingStatus` slots where
+      the source has its own calendar or public endpoints.
 - [ ] `export const <name>: FrontendProvider { name, defaultExchange,
-      exchangeName(code), searchResultToRow(r), typeFilters }`, registered in
-      `index.ts::REGISTRY`. `name` must match the backend `DataProvider::name()`;
+      exchangeName(code), exchangeCode(code), searchResultToRow(r),
+      typeFilters }`. `name` must match the backend `DataProvider::name()`;
       `syncProvider()` selects it via `get_data_provider()`.
 - [ ] `exchangeName`: vendor code → display label (identity function if codes
       are already friendly).

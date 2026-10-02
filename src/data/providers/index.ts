@@ -17,8 +17,8 @@ import { commands } from "../../bindings";
 import type { SymbolSearchResult } from "../../bindings";
 import type { SymbolRow, TypeFilter } from "../symbol-search";
 import { massive } from "./massive";
-import { sample } from "./sample";
-import { openalgo } from "./openalgo";
+import { sample } from "../sources/sample";
+import { openalgo } from "../sources/openalgo";
 import { source } from "../sources";
 
 /** The vendor-specific presentation an adapter must provide. */
@@ -39,8 +39,9 @@ export interface FrontendProvider {
   typeFilters: TypeFilter[];
 }
 
-/** Frontend adapters keyed by provider name. Add a sibling adapter + entry here
- *  when the backend gains a new provider. */
+/** Frontend adapters keyed by provider name. Each provider is one file under
+ *  `../sources/` exporting both its `DataSource` and its adapter — add both
+ *  registry entries when the backend gains a provider. */
 const REGISTRY: Record<string, FrontendProvider> = { massive, sample, openalgo };
 
 /** Currently active adapter — selected from the active data source's name
