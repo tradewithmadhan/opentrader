@@ -208,8 +208,10 @@ const fmtDate = (d: Date): string =>
   `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 
 /** Split a [start, end] UTC-millis range into ≤ maxDays-day `YYYY-MM-DD`
- *  windows (intraday history is capped at 30 days per request). Day-aligned
- *  so an exact multiple never spills a 1-day tail chunk. */
+ *  windows (intraday history is capped at 30 days per request). A trailing
+ *  window ending mid-day touches one more calendar date than the day count
+ *  (e.g. a 30-day window ending today spans 31 dates), so the last chunk is
+ *  a 1-day tail fetching today — that is expected, not a spill bug. */
 export function chunkRanges(startMs: number, endMs: number, maxDays: number): [string, string][] {
   const out: [string, string][] = [];
   const day = 86400000;
