@@ -74,9 +74,10 @@ export function splitOpenAlgo(symbol: string): { exchange: string; ticker: strin
   return { exchange: "NSE", ticker: head };
 }
 
-/** App minute-multiplier → OpenAlgo interval. Seconds map 1:1 (broker serves
- *  none today — caps advertise `seconds: []`, so datafeed never calls). */
-export const MINUTE_INTERVAL: Record<number, string> = {
+/** App minute-multiplier → OpenAlgo interval. Fallback table used until the
+ *  broker's own list arrives (`fetchIntervals`) and when it is unreachable;
+ *  verified live against the broker. */
+const FALLBACK_MINUTE_INTERVAL: Record<number, string> = {
   1: "1m",
   3: "3m",
   5: "5m",
@@ -88,9 +89,85 @@ export const MINUTE_INTERVAL: Record<number, string> = {
   120: "2h",
 };
 
+/** Broker interval tokens: "1m" → 1, "2h" → 120, "D" → day. Null when the
+ *  token is not a minute multiple (exported for tests). */
+export function minuteTokenToMult(token: string): number | null {
+  const m = /^(\d+)\s*(m|min|h|hour)?$/i.exec(token.trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  if (!Number.isFinite(n) || n < 1) return null;
+  const unit = (m[2] ?? "m").toLowerCase();
+  return unit.startsWith("h") ? n * 60 : n;
+}
+
+export type OaIntervals = {
+  months?: unknown;
+  weeks?: unknown;
+  days?: unknown;
+  hours?: unknown;
+  minutes?: unknown;
+  seconds?: unknown;
+};
+
+export type NormalizedIntervals = {
+  /** Directly served minute multiples → broker tokens. */
+  minutes: Map<number, string>;
+  /** Served second multiples (informational: second history stays
+   *  unimplemented, so caps keep `seconds: []`). */
+  seconds: number[];
+  daily: boolean;
+};
+
+/** Normalize a broker `/intervals` payload (exported for tests). Unknown
+ *  tokens are skipped, never trusted. */
+export function normalizeIntervals(data: OaIntervals): NormalizedIntervals {
+  const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((t): t is string => typeof t === "string") : []);
+  const minutes = new Map<number, string>();
+  for (const token of [...strings(data.minutes), ...strings(data.hours)]) {
+    const mult = minuteTokenToMult(token);
+    if (mult != null && !minutes.has(mult)) minutes.set(mult, token.trim());
+  }
+  const seconds: number[] = [];
+  for (const token of strings(data.seconds)) {
+    const m = /^(\d+)\s*s(?:ec)?$/i.exec(token.trim());
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (Number.isFinite(n) && n >= 1 && !seconds.includes(n)) seconds.push(n);
+    }
+  }
+  seconds.sort((a, b) => a - b);
+  return { minutes, seconds, daily: strings(data.days).some((t) => t.trim().toUpperCase() === "D") };
+}
+
+const INTERVAL_TTL_MS = 24 * 3600 * 1000;
+let intervalCache: { at: number; normalized: NormalizedIntervals } | null = null;
+
+/** Broker intervals, cached a day. Falls back to null when unreachable —
+ *  callers then use the `FALLBACK_MINUTE_INTERVAL` table (today's behavior). */
+export async function fetchIntervals(): Promise<NormalizedIntervals | null> {
+  const hit = intervalCache;
+  if (hit && Date.now() - hit.at < INTERVAL_TTL_MS) return hit.normalized;
+  try {
+    const res = await post<{ status?: string; data?: OaIntervals }>(openAlgoConfig(), "/api/v1/intervals", {});
+    if (!res.data || typeof res.data !== "object") throw new Error("OpenAlgo /intervals: bad payload");
+    const normalized = normalizeIntervals(res.data);
+    intervalCache = { at: Date.now(), normalized };
+    return normalized;
+  } catch {
+    return null;
+  }
+}
+
+/** Currently known minute-multiplier → broker token (broker list when
+ *  fetched, else the fallback table). */
+function minuteTable(): Map<number, string> {
+  if (intervalCache) return intervalCache.normalized.minutes;
+  return new Map(Object.entries(FALLBACK_MINUTE_INTERVAL).map(([k, v]) => [Number(k), v]));
+}
+
 export function resolveInterval(kind: "second" | "minute", mult: number): string {
   if (kind === "second") return `${mult}s`;
-  const hit = MINUTE_INTERVAL[mult];
+  const hit = minuteTable().get(mult);
   if (!hit) throw new Error(`OpenAlgo: minute multiplier ${mult} has no interval mapping`);
   return hit;
 }
@@ -827,8 +904,12 @@ export const openalgoSource: DataSource = {
 
   minuteAggs: async (symbol, days, intervalMin, _adjusted) => {
     const { exchange, ticker } = splitOpenAlgo(symbol);
+    await fetchIntervals();
     if (intervalMin === 240) {
       // No 4h interval: aggregate client-side from 2h.
+      if (!minuteTable().has(120)) {
+        throw new Error("OpenAlgo: 240m needs the broker 2h interval, which is not served");
+      }
       const [from, to] = todayRange(days);
       return aggregate2h(await fetchHistory(ticker, exchange, "2h", from, to));
     }
@@ -852,8 +933,12 @@ export const openalgoSource: DataSource = {
     const { exchange, ticker } = splitOpenAlgo(symbol);
     const endMs = beforeSec * 1000 - 86400000;
     const startMs = endMs - spanDays * 86400000;
+    await fetchIntervals();
     // Reuse the chunked fetcher over explicit calendar bounds.
     const oa = mult === 240 ? "2h" : resolveInterval("minute", mult);
+    if (mult === 240 && !minuteTable().has(120)) {
+      throw new Error("OpenAlgo: 240m needs the broker 2h interval, which is not served");
+    }
     const out: Candle[] = [];
     for (const [from, to] of chunkRanges(startMs, endMs, 30)) {
       const res = await post<HistoryData>(openAlgoConfig(), "/api/v1/history", {
@@ -951,35 +1036,45 @@ export const openalgoSource: DataSource = {
     });
   },
 
-  capabilities: async () => ({
-    name: "openalgo",
-    resolutions: {
-      seconds: [] as number[],
-      minutes: [1, 3, 5, 10, 15, 30, 60, 120, 240],
-      daily: true,
-      weeklyMonthlyFromDaily: true,
-    },
-    maxBarsPerRequest: 50000,
-    adjustedToggle: false,
-    extendedHours: false,
-    session: {
-      timezone: "Asia/Kolkata",
-      openMin: 555,
-      closeMin: 930,
-      preMin: 15,
-      postMin: 30,
-    },
-    reference: {
-      search: true,
-      searchTypeFilter: true,
-      snapshot: true,
-      dividends: false,
-      splits: false,
-      news: false,
-      icons: false,
-    },
-    entitlements: null,
-  }),
+  capabilities: async () => {
+    // Served sizes come from the broker's own interval list when reachable;
+    // otherwise the verified fallback table (today's behavior). 240m is
+    // synthesized client-side from 2h, so it is advertised only with it.
+    const fetched = await fetchIntervals();
+    const direct = fetched
+      ? [...fetched.minutes.keys()].sort((a, b) => a - b)
+      : [1, 3, 5, 10, 15, 30, 60, 120, 240];
+    const minutes = direct.includes(120) && !direct.includes(240) ? [...direct, 240] : direct;
+    return {
+      name: "openalgo",
+      resolutions: {
+        seconds: [] as number[],
+        minutes,
+        daily: fetched ? fetched.daily : true,
+        weeklyMonthlyFromDaily: true,
+      },
+      maxBarsPerRequest: 50000,
+      adjustedToggle: false,
+      extendedHours: false,
+      session: {
+        timezone: "Asia/Kolkata",
+        openMin: 555,
+        closeMin: 930,
+        preMin: 15,
+        postMin: 30,
+      },
+      reference: {
+        search: true,
+        searchTypeFilter: true,
+        snapshot: true,
+        dividends: false,
+        splits: false,
+        news: false,
+        icons: false,
+      },
+      entitlements: null,
+    };
+  },
 
   watchCapabilities: () => Promise.resolve(() => {}),
   session: () => SESSION,
