@@ -11,7 +11,7 @@
  */
 use super::capabilities::{
     DataStatus, HistoryFloor, HistoryProbe, ProviderCapabilities, ReferenceCaps, ResolutionCaps,
-    SessionCaps, StreamCaps,
+    StreamCaps,
 };
 use super::entitlements;
 use super::{DataProvider, HistoryProvider, RealtimeProvider, ReferenceProvider};
@@ -200,13 +200,6 @@ impl DataProvider for MassiveProvider {
                 splits: true,
                 news: true,
                 icons: true,
-            },
-            session: SessionCaps {
-                timezone: "America/New_York".to_string(),
-                open_min: 9 * 60 + 30,
-                close_min: 16 * 60,
-                pre_min: 5 * 60 + 30,
-                post_min: 4 * 60,
             },
             entitlements: None,
         }

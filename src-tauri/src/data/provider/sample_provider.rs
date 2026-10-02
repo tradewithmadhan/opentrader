@@ -22,7 +22,7 @@
  */
 use super::capabilities::{
     DataStatus, HistoryFloor, HistoryProbe, ProviderCapabilities, ReferenceCaps, ResolutionCaps,
-    SessionCaps, StreamCaps,
+    StreamCaps,
 };
 use super::{DataProvider, HistoryProvider, RealtimeProvider, ReferenceProvider};
 use crate::data::massive_ws::{ChartAggregate, SecondAggregate, SubscribeMsg, SubscriptionState, TradeTick, WsHandle};
@@ -1116,13 +1116,6 @@ impl DataProvider for SampleProvider {
                 splits: true,
                 news: true,
                 icons: false,
-            },
-            session: SessionCaps {
-                timezone: "Asia/Kolkata".to_string(),
-                open_min: 9 * 60 + 15,
-                close_min: 15 * 60 + 30,
-                pre_min: 15,
-                post_min: 30,
             },
             entitlements: None,
         }
