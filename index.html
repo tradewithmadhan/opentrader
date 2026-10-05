@@ -63,9 +63,10 @@
       </div>
     </div>
     <script>
-      // Only the main window shows the splash; detached chart windows load
-      // straight into their tabs.
-      if ((window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label ?? "main") !== "main") {
+      // The splash shows only in the Tauri main window: detached chart windows
+      // load straight into their tabs, and plain browsers boot into the app
+      // without it (no __TAURI_INTERNALS__ there).
+      if (!window.__TAURI_INTERNALS__ || (window.__TAURI_INTERNALS__.metadata?.currentWindow?.label ?? "main") !== "main") {
         document.getElementById("splash")?.remove();
       }
     </script>
