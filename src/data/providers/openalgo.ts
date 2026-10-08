@@ -156,6 +156,12 @@ export async function fetchIntervals(): Promise<NormalizedIntervals | null> {
       const res = await post<{ status?: string; data?: OaIntervals }>(openAlgoConfig(), "/api/v1/intervals", {});
       if (!res.data || typeof res.data !== "object") throw new Error("OpenAlgo /intervals: bad payload");
       const normalized = normalizeIntervals(res.data);
+      // Degenerate payload (broker hiccup returning [] or {}): an empty
+      // minutes map must never reach the 24h cache — minuteTable() prefers
+      // the cache over the fallback table, so caching it would break minute
+      // history, scroll-back and the advertised resolutions until expiry,
+      // long after the broker recovers. Null keeps the fallback in play.
+      if (normalized.minutes.size === 0) return null;
       intervalCache = { at: Date.now(), normalized };
       return normalized;
     } catch {
