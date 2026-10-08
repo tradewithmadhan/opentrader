@@ -1004,13 +1004,26 @@ function todayRange(days: number): [number, number] {
   return [end - days * 86400000, end];
 }
 
+/** Snap a broker day bar to its IST calendar date's midnight (verified live:
+ *  day bars stamp UTC midnight, e.g. 2026-10-08T00:00Z for the Oct-8 NSE
+ *  session). The app keys daily bars by exchange-local midnight (see
+ *  dailyBarStamp in datafeed.ts); without this, history's last bar sorts
+ *  after the live "today" stamp, so every live day-bar update reads as stale
+ *  and is dropped — the 1D chart freezes while minute charts tick on. */
+function snapDayBar(c: Candle): Candle {
+  const t = c.time as number;
+  const [y, m, d] = istDateFmt.format(new Date(t * 1000)).split("-").map(Number);
+  const snapped = Math.floor(Date.UTC(y, m - 1, d) / 1000) - 19800; // IST midnight in UTC seconds
+  return snapped === t ? c : { ...c, time: snapped };
+}
+
 export const openalgoSource: DataSource = {
   name: "openalgo",
 
   dailyAggs: async (symbol, days, _adjusted) => {
     const { exchange, ticker } = splitOpenAlgo(symbol);
     const [from, to] = todayRange(Math.min(days, 3650));
-    return fetchHistory(ticker, exchange, "D", from, to);
+    return (await fetchHistory(ticker, exchange, "D", from, to)).map(snapDayBar);
   },
 
   minuteAggs: async (symbol, days, intervalMin, _adjusted) => {
@@ -1071,7 +1084,7 @@ export const openalgoSource: DataSource = {
     const endMs = beforeSec * 1000 - 86400000;
     const startMs = endMs - spanDays * 86400000;
     const out = await fetchHistory(ticker, exchange, "D", startMs, endMs);
-    return out.filter((b) => b.time < beforeSec);
+    return out.map(snapDayBar).filter((b) => b.time < beforeSec);
   },
 
   tickerInfo: async (symbol) => {
