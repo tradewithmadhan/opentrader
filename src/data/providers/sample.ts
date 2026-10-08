@@ -1239,6 +1239,13 @@ export function sampleOnTradeTick(fn: (t: TradeTick) => void): () => void {
   };
 }
 
+/** Test hook (smokes): inject a trade tick into the sample engine's
+ *  listeners, bypassing the live timer. `__`-prefixed like the other
+ *  closed-market testing hook above. */
+export function __emitSampleTick(t: TradeTick): void {
+  for (const fn of tickListeners) fn(t);
+}
+
 
 
 
