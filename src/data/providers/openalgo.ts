@@ -699,6 +699,55 @@ const secondListeners = new Set<(t: SecondAggregate) => void>();
 const tickListeners = new Set<(t: TradeTick) => void>();
 const minuteBuckets = new Map<string, { start: number; o: number; h: number; l: number; v: number }>();
 
+/** Live minute-volume baseline per symbol: the sum of today's completed
+ *  minute volumes (every intraday candle except the forming one). The forming
+ *  bucket's live volume is then `dayVolume - baseline`: exact from the first
+ *  tick even on a mid-day attach, and self-correcting across reconnect gaps
+ *  (a day-volume jump lands in the bucket instead of being lost). The broker
+ *  only streams cumulative day volume, so without this the bucket stays 0. */
+type VolBaseline = { date: string; sum: number; ready: boolean; pending: boolean; retryAt: number };
+const volBaselines = new Map<string, VolBaseline>();
+const lastDayVol = new Map<string, number>();
+const istDateFmt = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Kolkata",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+/** Today's completed minute volumes for `sym`, fetched once per symbol-day
+ *  from the provider's own 1-minute history. Fire-and-forget: ticks arriving
+ *  before it resolves keep emitting 0 (today's behaviour) until it lands. */
+async function ensureVolBaseline(sym: string, nowSec: number): Promise<void> {
+  const date = istDateFmt.format(new Date(nowSec * 1000));
+  const nowMs = Date.now();
+  const cur = volBaselines.get(sym);
+  if (cur && cur.date === date && (cur.ready || cur.pending || nowMs < cur.retryAt)) return;
+  const b: VolBaseline = { date, sum: 0, ready: false, pending: true, retryAt: 0 };
+  volBaselines.set(sym, b);
+  try {
+    const bars = await openalgoSource.minuteAggs(sym, 1, 1, true);
+    const curMinute = Math.floor(nowSec / 60) * 60;
+    let sum = 0;
+    for (const c of bars) {
+      const t = c.time as number;
+      if (istDateFmt.format(new Date(t * 1000)) !== date) continue; // yesterday's tail of the trailing window
+      if (t === curMinute) continue; // forming bucket — not history yet
+      sum += c.volume ?? 0;
+    }
+    if (volBaselines.get(sym) === b) {
+      b.sum = sum;
+      b.ready = true;
+    }
+  } catch {
+    // No minute history (unknown symbol, broker error): stay on 0 rather
+    // than guessing, and retry at most once a minute while ticks flow.
+    if (volBaselines.get(sym) === b) b.retryAt = Date.now() + 60000;
+  } finally {
+    if (volBaselines.get(sym) === b) b.pending = false;
+  }
+}
+
 let ws: WebSocket | null = null;
 let wsWanted = false;
 let backoffMs = 1000;
@@ -851,16 +900,31 @@ function onQuoteTick(symbol: string, exchange: string, q: OaQuote): void {
     volume: q.volume,
     source: "live",
   };
+  // Last known day volume (some ticks omit it): the forming bucket's volume
+  // is day volume minus the baseline.
+  const dayVol: number | undefined =
+    Number.isFinite(q.volume) ? q.volume : lastDayVol.get(sym);
+  if (dayVol != null) lastDayVol.set(sym, dayVol);
   for (const fn of tickListeners) fn(tick);
-  // Minute bucket for ChartAggregate (quotes carry day OHLC, not minute bars).
+  // Minute bucket for ChartAggregate (quotes carry day OHLC, not minute bars;
+  // day volume minus the baseline below rebuilds the bucket's own volume).
   const start = Math.floor(now / 60) * 60;
+  void ensureVolBaseline(sym, now);
+  const bl = volBaselines.get(sym);
+  const today = istDateFmt.format(new Date(now * 1000));
   let b = minuteBuckets.get(sym);
   if (!b || b.start !== start) {
+    // Rollover: the finished bucket joins history — fold its final volume
+    // into the baseline so the new bucket stays exact.
+    if (b && bl && bl.ready && bl.date === today) bl.sum += b.v;
     b = { start, o: q.ltp, h: q.ltp, l: q.ltp, v: 0 };
     minuteBuckets.set(sym, b);
   }
   b.h = Math.max(b.h, q.ltp);
   b.l = Math.min(b.l, q.ltp);
+  if (dayVol != null && bl && bl.ready && bl.date === today) {
+    b.v = Math.max(0, dayVol - bl.sum);
+  }
   const agg: ChartAggregate = {
     symbol: sym,
     time: start,
