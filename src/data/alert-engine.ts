@@ -1,14 +1,18 @@
 /*
- * Alert engine — client-side evaluation of the configured alert rules.
+ * Alert engine — the window's side of the alerts: delivery of every fire
+ * (toast + OS notification + sound + webhook + log entry) and evaluation of
+ * the rules the backend cannot compute.
  *
- * There is no alert backend, so this module does the evaluation in the
- * frontend: it listens to the same live tick stream the watchlist/chart use
- * (data/datafeed-live.ts), evaluates each enabled rule whose symbol just ticked,
- * respects the rule's trigger frequency, and records a fire (toast + OS
- * notification + sound + log entry) when a condition crosses/holds.
+ * The backend evaluates the rules that compare the price with a value or a
+ * drawing's levels (data/alert-backend.ts hands them over and brings their
+ * fires back here). The rules on an indicator, an anchored VWAP or a moving
+ * percentage are evaluated in this module: it listens to the same live tick
+ * stream the watchlist/chart use (data/datafeed-live.ts), evaluates each of
+ * those rules whose symbol just ticked and respects its trigger frequency.
  *
- * Limitations of the frontend-first approach (to be lifted when evaluation
- * moves into the Rust poller):
+ * It runs in one window (see `whenAlertLeader`).
+ *
+ * Limitations of the evaluation done here:
  *  • Indicator-operand conditions prefer the charted study values (they honour
  *    the chart's configured inputs); uncharted symbols fall back to a 60s
  *    getBars poll computed with the study's DEFAULT inputs.
@@ -26,6 +30,7 @@ import { setSubscription } from "./subscriptions";
 import { alertStore, type AlertRule } from "./alert-store";
 import { alertSettings } from "./alert-settings";
 import { playAlertSound } from "./alert-sounds";
+import { evaluatedByBackend, startAlertBackend } from "./alert-backend";
 import { describeCondition, drawingBand, drawingPositionLevels, drawingTime, isBandOperator, isPercentOperator, operandValue, type EvalContext } from "./alert-condition";
 import { chartBars, chartLastBarTime, indicatorPlotValue, type ChartBar } from "./chart-state-registry";
 import { getIndicatorEntry } from "../window/chart/indicators/registry";
@@ -256,11 +261,19 @@ function frequencyAllows(rule: AlertRule, barRefMs: number): boolean {
 }
 
 function fire(rule: AlertRule, ctx: EvalContext, barRefMs: number): void {
+  deliverFire(rule, ctx.price, barBucket(rule.symbol, rule.resolution, barRefMs) ?? barRefMs);
+}
+
+/** Deliver a fire of `rule` at `price`, in the bar opened at `barTime`
+ *  (epoch ms). `offline`: the time it happened, for a fire found in the bars
+ *  missed while the app was not running; it goes to the log and the rule's
+ *  webhook only (no sound, notification or toast). */
+function deliverFire(rule: AlertRule, price: number, barTime: number | null, offline?: { fireTime: number }): void {
   const now = Date.now();
   const condText = describeCondition(rule);
   const message = rule.message?.trim()
     ? rule.message
-    : `${tickerOf(rule.symbol)} ${condText} (last ${ctx.price})`;
+    : `${tickerOf(rule.symbol)} ${condText} (last ${price})`;
   const title = rule.name?.trim() ? rule.name : `Alert · ${tickerOf(rule.symbol)}`;
 
   alertStore.recordFire({
@@ -269,25 +282,32 @@ function fire(rule: AlertRule, ctx: EvalContext, barRefMs: number): void {
     resolution: rule.resolution,
     name: rule.name?.trim() ? rule.name : null,
     message,
-    fireTime: now,
-    barTime: barBucket(rule.symbol, rule.resolution, barRefMs) ?? barRefMs,
+    fireTime: offline ? offline.fireTime : now,
+    barTime,
     soundFile: rule.sound,
     logoUrl: null,
+    ...(offline ? { offline: true, receivedAt: now } : {}),
   });
 
-  playAlertSound(rule.sound);
+  // "Only Once" rules disable themselves after the single fire.
+  if (rule.frequency === "only_once") {
+    alertStore.setEnabled(rule.id, false);
+  }
+  if (!offline) playAlertSound(rule.sound);
 
   // Webhook — fire-and-forget; a failing endpoint must not affect local delivery.
+  // An offline fire is posted too, with the time it happened and `offline`.
   const webhookUrl = alertWebhook(rule.id);
   if (webhookUrl) {
     const payload = JSON.stringify({
       id: rule.id,
       name: title,
       symbol: rule.symbol,
-      price: ctx.price,
+      price,
       condition: condText,
       message,
-      time: new Date(now).toISOString(),
+      time: new Date(offline ? offline.fireTime : now).toISOString(),
+      ...(offline ? { offline: true } : {}),
     });
     // Native POST in the shell: the webview's fetch originates from
     // tauri.localhost, so most receivers reject its CORS preflight. Plain fetch
@@ -308,6 +328,7 @@ function fire(rule: AlertRule, ctx: EvalContext, barRefMs: number): void {
       }
     }
   }
+  if (offline) return;
 
   if (rule.popup && alertSettings.systemNotifications()) {
     try {
@@ -326,11 +347,6 @@ function fire(rule: AlertRule, ctx: EvalContext, barRefMs: number): void {
       /* a bad listener must not break firing */
     }
   }
-
-  // "Only Once" rules disable themselves after the single fire.
-  if (rule.frequency === "only_once") {
-    alertStore.setEnabled(rule.id, false);
-  }
 }
 
 /** Evaluate every enabled rule for the symbol that just ticked. Ticks carry
@@ -338,7 +354,8 @@ function fire(rule: AlertRule, ctx: EvalContext, barRefMs: number): void {
  *  per listing: one listing's ticks can never fire another listing's rules. */
 function onTick(t: TradeTick): void {
   const full = t.symbol.toUpperCase();
-  const rules = alertStore.enabledRules().filter((r) => r.symbol === full);
+  // The backend evaluates the other rules of the symbol.
+  const rules = alertStore.enabledRules().filter((r) => r.symbol === full && !evaluatedByBackend(r));
   if (rules.length === 0) return;
 
   const now = Date.now();
@@ -584,11 +601,17 @@ export function stopAlertEngine(): void {
   started = false;
 }
 
-/** Start the engine: wire the tick listener and keep the backend subscribed to
- *  the union of enabled-rule symbols. Idempotent. */
-export function startAlertEngine(): void {
+/** Start the engine: wire the tick listener, hand the backend its rules and
+ *  keep it subscribed to the union of enabled-rule symbols. Idempotent.
+ *  `windowLabel`: the window it runs in (the fires addressed to it). */
+export function startAlertEngine(windowLabel = "main"): void {
   if (started) return;
   started = true;
+
+  startAlertBackend(
+    (f) => deliverFire(f.rule, f.price, f.barTime, f.offline ? { fireTime: f.fireTime } : undefined),
+    windowLabel,
+  );
 
   onTradeTick(onTick).then((u) => {
     unlisten = u;
