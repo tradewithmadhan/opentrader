@@ -44,7 +44,9 @@ import {
   type PaneChart,
   type PaneIndicatorSettings,
   type TabChart,
+  reviveLayoutSizes,
 } from "./window/shell/tabs";
+import type { Sizing } from "./window/chart/layout-sizes";
 import { COMPARE_COLORS, newCompareStyle, type CompareStyleState } from "./window/chart/compare/compare-style";
 import { recentSymbols, recordRecentSymbol } from "./data/recent-symbols";
 import { AppSettingsDialog, type AppSettingsTabId } from "./window/header/AppSettingsDialog";
@@ -424,7 +426,7 @@ function App() {
         if (!(key in drawings)) drawings[key] = drawingsFor(key);
       }
     }
-    return { layout: t.layout, activePane: t.activePane, panes: t.panes, drawings, sync: t.sync };
+    return { layout: t.layout, activePane: t.activePane, panes: t.panes, drawings, sync: t.sync, layoutSizes: t.layoutSizes };
   };
   const activeSaved = () => {
     const id = activeTab().savedLayoutId;
@@ -524,6 +526,7 @@ function App() {
       activePane: Math.min(l.snapshot.activePane, l.snapshot.panes.length - 1),
       // Layouts saved before per-tab sync keep the tab's current toggles.
       sync: l.snapshot.sync ? reviveLayoutSync(l.snapshot.sync) : activeTab().sync,
+      layoutSizes: reviveLayoutSizes(l.snapshot.layoutSizes),
       savedLayoutId: l.id,
       savedLayoutName: l.name,
     });
@@ -550,6 +553,7 @@ function App() {
       panes: fresh.panes,
       activePane: 0,
       sync: defaultLayoutSync(),
+      layoutSizes: undefined,
       savedLayoutId: undefined,
       savedLayoutName: undefined,
     });
@@ -893,7 +897,18 @@ function App() {
     label: string;
     at: number;
   };
-  type UndoEntry = DrawingUndoEntry | StudyUndoEntry | CompareUndoEntry;
+  /** Chart sizes of a layout template changed with a splitter (drag, or a
+   *  double click = back to equal sizes). */
+  type LayoutSizesUndoEntry = {
+    kind: "layout-sizes";
+    tabId: string;
+    layout: LayoutId;
+    before: Sizing | undefined;
+    after: Sizing | undefined;
+    label: string;
+    at: number;
+  };
+  type UndoEntry = DrawingUndoEntry | StudyUndoEntry | CompareUndoEntry | LayoutSizesUndoEntry;
   const UNDO_CAP = 100;
   const [undoStack, setUndoStack] = createSignal<UndoEntry[]>([]);
   const [redoStack, setRedoStack] = createSignal<UndoEntry[]>([]);
@@ -961,6 +976,10 @@ function App() {
   }
   /** Apply one side of an undo entry. */
   function applyUndoEntry(e: UndoEntry, side: "before" | "after") {
+    if (e.kind === "layout-sizes") {
+      setTabLayoutSizes(e.tabId, e.layout, e[side]);
+      return;
+    }
     if (e.kind === "compare") {
       setPaneCompare(e.tabId, e.paneIndex, e[side]);
       return;
@@ -1034,6 +1053,34 @@ function App() {
     if (redoStack().length) setRedoStack([]);
   }
 
+  /** Write a tab's chart sizes of one template (no undo record). */
+  function setTabLayoutSizes(tabId: string, layout: LayoutId, sizes: Sizing | undefined) {
+    const tab = tabOf(tabId);
+    if (!tab) return;
+    const next = { ...tab.layoutSizes };
+    if (sizes) next[layout] = sizes;
+    else delete next[layout];
+    patchTab(tabId, { layoutSizes: Object.keys(next).length ? next : undefined });
+  }
+  /** A splitter drag ended (`sizes`) or a splitter was double-clicked
+   *  (undefined): one undo step. */
+  function changeLayoutSizes(tabId: string, sizes: Sizing | undefined) {
+    const tab = tabOf(tabId);
+    if (!tab) return;
+    const entry: LayoutSizesUndoEntry = {
+      kind: "layout-sizes",
+      tabId,
+      layout: tab.layout,
+      before: tab.layoutSizes?.[tab.layout],
+      after: sizes,
+      label: sizes ? "resize layout" : "reset layout sizes",
+      at: Date.now(),
+    };
+    applyUndoEntry(entry, "after");
+    const stack = undoStack();
+    setUndoStack([...stack.slice(Math.max(0, stack.length - (UNDO_CAP - 1))), entry]);
+    if (redoStack().length) setRedoStack([]);
+  }
   /** Write a pane's compare list (no undo record). */
   function setPaneCompare(tabId: string, paneIndex: number, list: CompareEntry[] | undefined) {
     const tab = tabOf(tabId);
@@ -1575,6 +1622,7 @@ function App() {
       panes: src.panes.map((p) => ({ ...p, id: newPaneId(), indicators: [...p.indicators] })),
       isChart: src.isChart,
       sync: { ...src.sync },
+      layoutSizes: src.layoutSizes,
     };
     const arr = tabs().slice();
     // An unpinned copy goes after the pinned block.
@@ -2509,6 +2557,8 @@ function App() {
               setActivePane={setActivePaneIndex}
               maximized={tabId === activeTabId() && maximized()}
               onToggleMaximize={toggleMaximize}
+              sizes={tab().layoutSizes?.[tab().layout]}
+              onSizes={(sizes) => changeLayoutSizes(tabId, sizes)}
               theme={theme()}
               timeZone={timezone().iana}
               timeZoneLabel={timezone().label}
