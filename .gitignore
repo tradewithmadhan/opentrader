@@ -47,6 +47,9 @@ src/bindings.ts
 # Scratch / temp (verify harness, screenshots, etc.)
 .tmp/
 
+# Node smoke harness (esbuild bundles + stubs + runners, local only — never ships)
+.smokes/
+
 # Claude / agent session artifacts
 .claude/
 .playwright-mcp/
