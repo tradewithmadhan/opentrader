@@ -943,6 +943,7 @@ export function ChartView(props: Props) {
       },
       indicatorLegend: () => controller?.getLegend() ?? [],
       resolution: () => props.interval ?? "",
+      session: () => props.session ?? "RTH",
       bars: () => raw as ChartBar[],
     });
     onCleanup(() => unregisterChartState(key));
