@@ -39,6 +39,12 @@ jobs:
       - name: Install npm dependencies
         run: npm ci --no-audit --no-fund
 
+      # Fresh checkouts have no generated src/bindings.ts (gitignored,
+      # emitted by tauri-specta on Rust builds). Web-only builds use the
+      # tracked fallback instead; real Tauri builds are untouched.
+      - name: Fallback bindings for web-only build
+        run: if [ ! -f src/bindings.ts ]; then cp src/bindings-fallback.ts src/bindings.ts; fi
+
       - name: Build web bundle
         run: npm run build -- --base=/${{ github.event.repository.name }}/
 

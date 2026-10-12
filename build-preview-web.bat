@@ -23,6 +23,10 @@ if not exist "node_modules" (
 )
 
 echo [preview] Building... takes a few minutes, one time per src change.
+REM Fresh clones have no generated src\bindings.ts (gitignored, emitted by
+REM tauri-specta on Rust builds): fall back to the tracked copy for web-only
+REM builds. Real Tauri builds are untouched.
+if not exist "src\bindings.ts" copy "src\bindings-fallback.ts" "src\bindings.ts" >nul
 call npm run build
 if errorlevel 1 (
   echo [preview] Build failed. See errors above.
