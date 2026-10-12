@@ -836,12 +836,22 @@ let resyncTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Subscribed full "EXCHANGE:TICKER" names (uppercased, deduped): tick
  *  identity resolves against this set. */
-function allSymbols(): Set<string> {
-  const out = new Set<string>();
+function allSymbols(): Set<string> {  const out = new Set<string>();
   const add = (s: string) => out.add(s.split(",")[0].trim().toUpperCase());
   for (const s of chartSubs.values()) add(s);
   for (const set of watchSubs.values()) for (const s of set) add(s);
   return out;
+}
+
+/** True when `sym` (resolved full name) is charted in this window: minute
+ *  buckets, volume baselines and synthetic second bars are maintained for
+ *  charted symbols only, so watch-only rows never cost a history fetch. */
+function isCharted(sym: string): boolean {
+  const u = sym.toUpperCase();
+  for (const c of chartSubs.values()) {
+    if (typeof c === "string" && c.split(",")[0].trim().toUpperCase() === u) return true;
+  }
+  return false;
 }
 
 /** Tick identity for a broker echo: the subscribed name it belongs to, or
@@ -987,6 +997,11 @@ function onQuoteTick(symbol: string, exchange: string, q: OaQuote): void {
     Number.isFinite(q.volume) ? q.volume : lastDayVol.get(sym);
   if (dayVol != null) lastDayVol.set(sym, dayVol);
   for (const fn of tickListeners) fn(tick);
+  // Chart-only work below: minute buckets, volume baselines and synthetic
+  // second bars exist to paint chart bars. Watch-only symbols (ticks for
+  // quotes/alerts) skip all of it — otherwise every watchlist row costs a
+  // 1-minute history fetch on its first tick of the day.
+  if (!isCharted(sym)) return;
   // Minute bucket for ChartAggregate (quotes carry day OHLC, not minute bars;
   // day volume minus the baseline below rebuilds the bucket's own volume).
   const start = Math.floor(now / 60) * 60;
