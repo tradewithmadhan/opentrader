@@ -3,9 +3,10 @@
  * socket. Talks to an OpenAlgo server (REST + WebSocket) directly from the
  * page; no Tauri backend involved.
  *
- * Configuration lives in OPENALGO_* consts below (local-only values — the
+ * Configuration comes from Settings → Data (localStorage, per provider —
+ *  see ../broker-credentials) with the local `.env` as dev fallback: the
  *  browser cannot read process env, so neither the bat nor vite config can
- *  supply them at runtime). Traffic goes direct to the host, which must allow
+ *  supply values at runtime. Traffic goes direct to the host, which must allow
  *  the page origin (CORS).
  *
  * Coverage notes vs the sample source: seconds are NOT served (broker
@@ -21,9 +22,11 @@ import type { Candle, SymbolSearchResult, SymbolSession } from "../../bindings";
 import type { Snapshot, TickerInfo } from "../datafeed-rest";import type { ChartAggregate, SecondAggregate, TradeTick } from "../datafeed-live";
 import type { DataSource, MarketSessionDef } from "../sources/types";
 import type { SymbolRow, SymbolCategoryId, TypeFilter } from "../symbol-search";
+import { getBrokerCreds, hasBrokerCreds } from "../broker-credentials";
 // ── Config ───────────────────────────────────────────────────────────────────
-// Browser web access: credentials come from the local `.env` (see
-// `.env.example`; Vite inlines `VITE_*` at startup — restart dev after
+// Browser web access: credentials come from the Settings → Data tab (stored
+// per provider in localStorage — see ../broker-credentials), else from the
+// local `.env` (`VITE_*`, inlined by Vite at startup — restart dev after
 // editing). Empty values fail fast in `requireKey` below, never silently.
 // Traffic goes direct to the host, which must allow the page origin (CORS);
 // without that the browser blocks every request regardless of code.
@@ -35,12 +38,16 @@ const OPENALGO_KEY = import.meta.env?.VITE_OPENALGO_KEY ?? "";
 export type OpenAlgoConfig = { base: string; ws: string; key: string };
 
 export function openAlgoConfig(): OpenAlgoConfig {
+  // Runtime credentials first (Settings → Data); the inlined `.env` values
+  // stay as the dev fallback so existing setups keep working untouched.
+  const stored = getBrokerCreds("openalgo");
+  if (hasBrokerCreds(stored)) return { base: stored.base, ws: stored.ws, key: stored.key };
   return { base: OPENALGO_BASE, ws: OPENALGO_WS, key: OPENALGO_KEY };
 }
 
 function requireKey(cfg: OpenAlgoConfig): string {
   if (!cfg.key) {
-    throw new Error("OpenAlgo API key missing — set VITE_OPENALGO_KEY in .env (see .env.example).");
+    throw new Error("OpenAlgo API key missing — add it in Settings → Data (or VITE_OPENALGO_KEY in .env).");
   }
   return cfg.key;
 }

@@ -227,6 +227,14 @@
   font-size: 13px;
   color: var(--color-content-primary-neutral-semi-bold);
 }
+/* Small muted note under a section (broker storage notice). */
+.app-settings-note {
+  margin-top: 8px;
+  max-width: 360px;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--color-cold-gray-500, #6a6d78);
+}
 
 /* Downloads path row */
 .app-settings-path-row {
