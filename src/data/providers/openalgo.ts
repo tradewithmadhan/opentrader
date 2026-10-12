@@ -246,6 +246,12 @@ function isNoData(e: unknown): boolean {
   return e instanceof Error && /no data/i.test(e.message);
 }
 
+/** An HTTP 5xx from the history endpoint (the upstream Flattrade API failing
+ *  on a window rather than answering it). */
+function isHttp5xx(e: unknown): boolean {
+  return e instanceof Error && /HTTP 5\d\d/.test(e.message);
+}
+
 /** One history chunk: its bars, or [] when the window holds no trading. Any
  *  other failure (auth, HTTP, unreachable host) stays loud — a bad key
  *  rendering as an empty chart would be worse than an error. */
@@ -272,6 +278,43 @@ async function historyChunk(
   }
 }
 
+const dayNum = (iso: string): number => Math.floor(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)) / 86400000);
+const dayIso = (n: number): string => fmtDate(new Date(n * 86400000));
+
+/** A date window's bars with split-retry: an HTTP 5xx (the upstream API
+ *  failing on a window outright, verified live on wide 15m ranges) narrows
+ *  the window in halves until it serves. A persistently failing range leaves
+ *  a gap with a warning instead of failing the page (partial data beats an
+ *  empty chart); a lone dead date is just a gap. Auth/4xx/rate-limit errors
+ *  never enter here. */
+async function historyWindow(
+  cfg: OpenAlgoConfig,
+  ticker: string,
+  exchange: string,
+  oaInterval: string,
+  from: string,
+  to: string,
+  depth = 0,
+): Promise<OaBar[]> {
+  try {
+    return await historyChunk(cfg, ticker, exchange, oaInterval, from, to);
+  } catch (e) {
+    if (!isHttp5xx(e)) throw e;
+    const a = dayNum(from);
+    const b = dayNum(to);
+    if (a >= b || depth >= 5) {
+      console.warn(`[openalgo] history ${from}..${to} failing (HTTP 5xx); leaving a gap`);
+      return [];
+    }
+    const mid = Math.floor((a + b) / 2);
+    const [left, right] = await Promise.all([
+      historyWindow(cfg, ticker, exchange, oaInterval, dayIso(a), dayIso(mid), depth + 1),
+      historyWindow(cfg, ticker, exchange, oaInterval, dayIso(mid + 1), dayIso(b), depth + 1),
+    ]);
+    return [...left, ...right];
+  }
+}
+
 async function fetchHistory(
   symbol: string,
   exchange: string,
@@ -285,7 +328,7 @@ async function fetchHistory(
   const cfg = openAlgoConfig();
   const out: Candle[] = [];
   for (const [from, to] of chunkRanges(startMs, endMs, maxDays)) {
-    for (const b of await historyChunk(cfg, symbol, exchange, oaInterval, from, to)) out.push(toCandle(b));
+    for (const b of await historyWindow(cfg, symbol, exchange, oaInterval, from, to)) out.push(toCandle(b));
   }
   out.sort((a, b) => a.time - b.time);
   return out;
@@ -1097,7 +1140,7 @@ export const openalgoSource: DataSource = {
     }
     const out: Candle[] = [];
     for (const [from, to] of chunkRanges(startMs, endMs, 30)) {
-      for (const b of await historyChunk(openAlgoConfig(), ticker, exchange, oa, from, to)) out.push(toCandle(b));
+      for (const b of await historyWindow(openAlgoConfig(), ticker, exchange, oa, from, to)) out.push(toCandle(b));
     }
     out.sort((a, b) => a.time - b.time);
     const rows = out.filter((b) => b.time < beforeSec);
