@@ -2435,7 +2435,15 @@ export function ChartView(props: Props) {
     // Read the live session so older pages match the displayed series. A session
     // change bumps fetchGen + clears the prefetch buffer (see the symbol/session
     // effect), so an in-flight page for the old session is discarded on landing.
-    return getBarsBefore(sym, int, beforeSec, props.session ?? "RTH", spanDays).then((r) => r, () => null);
+    return getBarsBefore(sym, int, beforeSec, props.session ?? "RTH", spanDays).then(
+      (r) => r,
+      (e) => {
+        // Swallowed rejections made scroll-back failures undebuggable (a dead
+        // page just reads as "transient, retry later"); log once per failure.
+        console.warn(`[scrollback] page failed (${sym} ${int} before=${beforeSec}):`, e instanceof Error ? e.message : e);
+        return null;
+      },
+    );
   }
 
   /** Indicator recompute after a history prepend, debounced. Every study
