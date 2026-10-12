@@ -98,6 +98,7 @@ import { chartTemplates } from "../header/chart-templates";
 import { clearActiveChartProbe, setActiveChartProbe } from "./active-chart";
 import type { CompareEntry, PaneIndicatorSettings } from "../shell/tabs";
 import { isTauri } from "../shell/window-bridge";
+import { source } from "../../data/sources";
 import { openSnapshotInBrowser } from "../../data/drawing-images-web";
 import { CompareLayer } from "./compare/compare-layer";
 import { compareColor, compareSource, type CompareStyleState } from "./compare/compare-style";
@@ -4280,7 +4281,12 @@ export function ChartView(props: Props) {
       }
       framed = view === null ? "all" : String(view);
     }
-    if (rawDaily.length > 0) historyExhausted = true;
+    // The daily family preloads its full history up front and marks paging
+    // exhausted — unless the source caps daily history (a finite day limit),
+    // in which case older bars page in lazily through dailyBefore like
+    // intraday. Uncapped sources (Tauri/Massive, sample) keep today's
+    // zero-network behavior.
+    if (rawDaily.length > 0 && source().historyLimits()?.day == null) historyExhausted = true;
     updateHistoryEnd();
     {
       const _r = chart.timeScale().getVisibleLogicalRange();
