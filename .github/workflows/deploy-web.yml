@@ -1,0 +1,62 @@
+# Deploy the web frontend to GitHub Pages (manual only).
+#
+# Run it from Actions → "Deploy web to Pages" → Run workflow. Builds the
+# browser shell (`dist/`, sample data + Settings → Data for broker creds —
+# the runner has no .env, so no secrets are baked in) and publishes it to
+# https://<owner>.github.io/<repo>/ (project site, so the base is derived
+# from the repository name).
+#
+# NOTE: this takes over the repo's Pages site. Upstream serves its docs/
+# website from Pages; on a fork that is fine, on upstream main it would
+# replace the docs site — keep this workflow on branches that ship the app.
+name: Deploy web to Pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build web bundle
+        run: npm run build -- --base=/${{ github.event.repository.name }}/
+
+      - name: Disable Jekyll processing
+        run: touch dist/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
