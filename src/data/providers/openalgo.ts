@@ -240,6 +240,38 @@ export function chunkRanges(startMs: number, endMs: number, maxDays: number): [s
 
 type HistoryData = { status?: string; data?: OaBar[] };
 
+/** The broker's benign empty: a window with no trading in it (a single-date
+ *  tail chunk on a weekend/holiday, or past the retention edge). */
+function isNoData(e: unknown): boolean {
+  return e instanceof Error && /no data/i.test(e.message);
+}
+
+/** One history chunk: its bars, or [] when the window holds no trading. Any
+ *  other failure (auth, HTTP, unreachable host) stays loud — a bad key
+ *  rendering as an empty chart would be worse than an error. */
+async function historyChunk(
+  cfg: OpenAlgoConfig,
+  ticker: string,
+  exchange: string,
+  oaInterval: string,
+  from: string,
+  to: string,
+): Promise<OaBar[]> {
+  try {
+    const res = await post<HistoryData>(cfg, "/api/v1/history", {
+      symbol: ticker,
+      exchange,
+      interval: oaInterval,
+      start_date: from,
+      end_date: to,
+    });
+    return res.data ?? [];
+  } catch (e) {
+    if (!isNoData(e)) throw e;
+    return [];
+  }
+}
+
 async function fetchHistory(
   symbol: string,
   exchange: string,
@@ -253,14 +285,7 @@ async function fetchHistory(
   const cfg = openAlgoConfig();
   const out: Candle[] = [];
   for (const [from, to] of chunkRanges(startMs, endMs, maxDays)) {
-    const res = await post<HistoryData>(cfg, "/api/v1/history", {
-      symbol,
-      exchange,
-      interval: oaInterval,
-      start_date: from,
-      end_date: to,
-    });
-    for (const b of res.data ?? []) out.push(toCandle(b));
+    for (const b of await historyChunk(cfg, symbol, exchange, oaInterval, from, to)) out.push(toCandle(b));
   }
   out.sort((a, b) => a.time - b.time);
   return out;
@@ -1072,14 +1097,7 @@ export const openalgoSource: DataSource = {
     }
     const out: Candle[] = [];
     for (const [from, to] of chunkRanges(startMs, endMs, 30)) {
-      const res = await post<HistoryData>(openAlgoConfig(), "/api/v1/history", {
-        symbol: ticker,
-        exchange,
-        interval: oa,
-        start_date: from,
-        end_date: to,
-      });
-      for (const b of res.data ?? []) out.push(toCandle(b));
+      for (const b of await historyChunk(openAlgoConfig(), ticker, exchange, oa, from, to)) out.push(toCandle(b));
     }
     out.sort((a, b) => a.time - b.time);
     const rows = out.filter((b) => b.time < beforeSec);
