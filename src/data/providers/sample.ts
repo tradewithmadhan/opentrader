@@ -1016,6 +1016,9 @@ export function sampleTickerInfo(symbol: string): TickerInfo {
     sector: known?.sector ?? "Sample",
     currency: venueInfo(known?.exchange ?? "NSE").currency,
     description: `${known?.name ?? t} — deterministic sample instrument for browser development.`,
+    // Script symbol type (syminfo.type): sample equities are stocks; indices
+    // and derivatives have no measured equivalent (mirrors the backend map).
+    symbolType: known?.type === "EQ" ? "stock" : null,
     homepageUrl: null,
     totalEmployees: 10000 + Number(fnv1a(`ref|${t}`) % 150000n),
     marketCap: Math.round(m.base * (100000000 + Number(fnv1a(`mc|${t}`) % 900000000n))),
