@@ -404,7 +404,7 @@ function DataTab() {
     setSecret("");
   };
   return (
-    <>
+    <div class="app-settings-data">
       <Section label="DATA SOURCE">
         <select
           class="app-settings-input"
@@ -438,7 +438,7 @@ function DataTab() {
           </div>
         </Section>
       </Show>
-    </>
+    </div>
   );
 }
 

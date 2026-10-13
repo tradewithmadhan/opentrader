@@ -236,6 +236,29 @@
   color: var(--color-cold-gray-500, #6a6d78);
 }
 
+/* Compact density for the Data tab (broker credentials): four inputs plus
+ * actions must fit the dialog without scrolling. Scoped so other tabs keep
+ * their spacing. */
+.app-settings-data .app-settings-section {
+  padding: 8px 0 10px;
+}
+.app-settings-data .app-settings-section-label {
+  margin-bottom: 6px;
+}
+.app-settings-data .app-settings-section-content {
+  gap: 6px;
+}
+.app-settings-data .app-settings-field {
+  padding: 2px 0;
+  gap: 4px;
+}
+.app-settings-data .app-settings-input {
+  height: 32px;
+}
+.app-settings-data .app-settings-note {
+  margin-top: 4px;
+}
+
 /* Downloads path row */
 .app-settings-path-row {
   display: flex;
