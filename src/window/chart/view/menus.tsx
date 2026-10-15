@@ -564,14 +564,21 @@ export function createMenus(cx: ChartCx): MenusApi {
 
   /** Legend compared-symbol "More" → its actions menu. Rows with no OT
    *  feature are left out (same rule as the study menu): Add indicator /
-   *  financial metric on the symbol, Symbol info, Visual order, Visibility on
-   *  intervals, Move to, Pin to scale, Copy. */
+   *  financial metric on the symbol, Symbol info, Move to, Pin to scale. */
   function openCompareMoreMenu(id: string, anchor: DOMRect, price?: number | null) {
     const e = cx.compareEntry(id);
     if (!e) return;
+    // Rows on the symbol (reference order: alert, add to entire layout).
+    const top: CtxNode[] = [];
     const alert = compareAlertRow(id, price);
+    if (alert) top.push(alert);
+    const layout = cx.sourceLayoutRow(id);
+    if (layout) top.push(layout);
+    const arrange = cx.sourceArrangeRows(id);
     const nodes: CtxNode[] = [
-      ...(alert ? [alert, { kind: "separator" } as CtxNode] : []),
+      ...(top.length ? [...top, { kind: "separator" } as CtxNode] : []),
+      ...(arrange.length ? [...arrange, { kind: "separator" } as CtxNode] : []),
+      cx.sourceCopyRow(id),
       { kind: "item", id: "hide", label: e.hidden ? "Show" : "Hide", icon: e.hidden ? CtxIcons.show : CtxIcons.hide,
         onSelect: () => props.onCompareChange?.(id, { hidden: !e.hidden }) },
       { kind: "item", id: "remove", label: "Remove", shortcut: "Del", icon: CtxIcons.remove,
