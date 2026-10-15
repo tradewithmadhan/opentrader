@@ -44,6 +44,7 @@ import {
   STRATEGY_OPERATORS,
   isStrategyOperator,
 } from "../../data/alert-condition";
+import { isStrategyId } from "../chart/indicators/strategy-entries";
 import { chartComparesFor, chartLastPrice, indicatorPlotValue } from "../../data/chart-state-registry";
 import { isStrategyId } from "../chart/indicators/strategy-entries";
 import { quoteFor } from "../../data/quotes";
