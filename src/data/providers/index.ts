@@ -11,12 +11,12 @@
  *
  * The exported hooks delegate to the active adapter (read at call time), so once
  * `syncProvider()` resolves, every consumer follows the backend's choice with no
- * re-import. Until it resolves, the bundled default ("massive") is used.
+ * re-import. Until it resolves, the bundled default ("gateway") is used.
  */
 import { commands } from "../../bindings";
 import type { SymbolSearchResult } from "../../bindings";
 import type { SymbolRow, TypeFilter } from "../symbol-search";
-import { massive } from "./massive";
+import { gateway } from "./gateway";
 import { sample } from "./sample";
 import { openalgo } from "./openalgo";
 import { source } from "../sources";
@@ -37,16 +37,19 @@ export interface FrontendProvider {
   searchResultToRow(r: SymbolSearchResult): SymbolRow;
   /** "All types" dropdown options for the symbol-search filter chip. */
   typeFilters: TypeFilter[];
+  /** A saved Type filter code in this adapter's values (translates the code
+   *  an earlier version saved; anything else is returned as it is). */
+  migrateTypeCode(code: string): string;
 }
 
 /** Frontend adapters keyed by provider name. Each provider is one file under
  *  `../sources/` exporting both its `DataSource` and its adapter — add both
  *  registry entries when the backend gains a provider. */
-const REGISTRY: Record<string, FrontendProvider> = { massive, sample, openalgo };
+const REGISTRY: Record<string, FrontendProvider> = { gateway, sample, openalgo };
 
 /** Currently active adapter — selected from the active data source's name
  *  (`sources/`), refined by `syncProvider()` once the backend answers. */
-let active: FrontendProvider = REGISTRY[source().name] ?? massive;
+let active: FrontendProvider = REGISTRY[source().name] ?? gateway;
 
 /** The active adapter object (use when you need the whole adapter). */
 export function activeProvider(): FrontendProvider {
@@ -61,6 +64,7 @@ export const exchangeCode = (code: string | null | undefined): string => active.
 export const searchResultToRow = (r: SymbolSearchResult): SymbolRow => active.searchResultToRow(r);
 export const defaultExchange = (): string => active.defaultExchange;
 export const typeFilters = (): TypeFilter[] => active.typeFilters;
+export const migrateTypeCode = (code: string): string => active.migrateTypeCode(code);
 
 /** Select the adapter matching the backend's active provider. Best-effort: when
  *  the backend reports a provider we have no adapter for (or we're running

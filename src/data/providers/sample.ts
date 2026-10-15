@@ -975,7 +975,7 @@ export function sampleSearch(query: string, typeFilter: string | null): SymbolSe
     name: r.name,
     market: "stocks",
     locale: "us",
-    primaryExchange: r.exchange,
+    exchange: r.exchange,
     type: r.type,
   }));
   // Always allow opening exactly what was typed (custom/unknown tickers work).
@@ -988,7 +988,7 @@ export function sampleSearch(query: string, typeFilter: string | null): SymbolSe
       name: `${q} (sample)`,
       market: "stocks",
       locale: "us",
-      primaryExchange: "NSE",
+      exchange: "NSE",
       type: fallbackType,
     });
   }
@@ -1049,7 +1049,7 @@ export function sampleSnapshot(symbol: string): Snapshot {
     dayVolume: Math.round(lastBar.volume * 0.65),
     extChangePercent: null,
     source: "live",
-    updatedNs: Date.now() * 1e6,
+    updatedMs: Date.now(),
   };
 }
 
@@ -1335,7 +1335,7 @@ const TYPE_CATEGORY: Partial<Record<string, SymbolCategoryId>> = {
 /** Map one raw search result into a dialog row. The vendor half of symbol
  *  search; ../symbol-search applies the generic ranking. */
 export function searchResultToRow(r: SymbolSearchResult): SymbolRow {
-  const ex = r.primaryExchange || "";
+  const ex = r.exchange || "";
   const marketType = (r.type && TYPE_LABELS[r.type]) || "stock";
   return {
     symbolName: ex ? `${ex}:${r.ticker}` : r.ticker,
@@ -1362,5 +1362,7 @@ export const sample: FrontendProvider = {
   exchangeCode,
   searchResultToRow,
   typeFilters,
+  // Sample type codes never changed: nothing to migrate.
+  migrateTypeCode: (code: string) => code,
 };
 

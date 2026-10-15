@@ -387,7 +387,7 @@ export function shapeSnapshot(ticker: string, q: OaQuote): Snapshot {
     dayVolume: q.volume,
     extChangePercent: null,
     source: "live",
-    updatedNs: Date.now() * 1e6,
+    updatedMs: Date.now(),
   };
 }
 
@@ -477,7 +477,7 @@ export function mapSearchRows(rows: OaSearchRow[], type: string | null): SymbolS
       name: r.name ?? "",
       market: "stocks",
       locale: null,
-      primaryExchange: r.exchange ?? "",
+      exchange: r.exchange ?? "",
       type: r.instrumenttype ?? "",
     }));
 }
@@ -1362,7 +1362,7 @@ const TYPE_CATEGORY: Partial<Record<string, SymbolCategoryId>> = {
 /** Map one raw search result into a dialog row. The vendor half of symbol
  *  search; ../symbol-search applies the generic ranking. */
 export function searchResultToRow(r: SymbolSearchResult): SymbolRow {
-  const ex = exchangeName(r.primaryExchange);
+  const ex = exchangeName(r.exchange);
   // Equity arrives as "EQ" (search) or "" (symbol detail) — both are stock.
   const marketType = (r.type && TYPE_LABELS[r.type]) || "stock";
   return {
@@ -1390,5 +1390,7 @@ export const openalgo: FrontendProvider = {
   exchangeCode,
   searchResultToRow,
   typeFilters,
+  // Broker type codes never changed: nothing to migrate.
+  migrateTypeCode: (code: string) => code,
 };
 

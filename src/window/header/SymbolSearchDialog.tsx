@@ -12,6 +12,7 @@ import { Portal } from "solid-js/web";
 import {
   CATEGORIES,
   TYPE_FILTERS,
+  migrateTypeCode,
   SYMBOLS,
   filterSymbols,
   liveResultsToRows,
@@ -30,7 +31,7 @@ import type { ComparePlacement } from "../shell/tabs";
 
 /** Durable key for the Type filter chip, so the chosen filter survives both a
  *  query change (already independent state) and closing/reopening the modal or
- *  an app reload. Stores the Massive `type` code; absent = "All types" (null). */
+ *  an app reload. Stores the provider's security `type`; absent = "All types" (null). */
 const TYPE_FILTER_KEY = "ot:symbol-search:type-filter";
 /** The symbol search opens on the category tab used last (All at first). */
 const CATEGORY_KEY = "ot:symbol-search:category";
@@ -39,10 +40,15 @@ function loadCategory(): SymbolCategoryId {
   return raw && CATEGORIES.some((c) => c.id === raw) ? (raw as SymbolCategoryId) : "all";
 }
 
-/** Read the persisted Type filter, ignoring anything not in the current catalog. */
+/** Read the persisted Type filter, ignoring anything not in the current
+ *  catalog. A code saved by an earlier version is translated and saved back. */
 function loadTypeCode(): string | null {
-  const raw = kv.getItem(TYPE_FILTER_KEY);
-  return raw != null && TYPE_FILTERS().some((t) => t.code === raw) ? raw : null;
+  const saved = kv.getItem(TYPE_FILTER_KEY);
+  if (saved == null) return null;
+  const code = migrateTypeCode(saved);
+  if (!TYPE_FILTERS().some((t) => t.code === code)) return null;
+  if (code !== saved) kv.setItem(TYPE_FILTER_KEY, code);
+  return code;
 }
 
 /** Persist the Type filter — remove the key for "All types" (null = no filter). */
@@ -163,7 +169,7 @@ export function SymbolSearchDialog(props: Props) {
   const searchText = () =>
     multiMode() ? (tokenAt(query(), caret())?.value.trim().toUpperCase() ?? "") : query();
   const [highlightIdx, setHighlightIdx] = createSignal(0);
-  // Active "All types" filter — null = no type filter (Massive `type` param).
+  // Active "All types" filter — null = no type filter (the `type` parameter of the search).
   // Seeded from the persisted value so it survives reopen / reload.
   const [typeCode, setTypeCode] = createSignal<string | null>(loadTypeCode());
   const [typeMenuOpen, setTypeMenuOpen] = createSignal(false);
@@ -217,7 +223,7 @@ export function SymbolSearchDialog(props: Props) {
   });
   // Displayed rows — derived synchronously from the live results (or the static
   // catalogue) and the active category, so switching tabs updates immediately
-  // without a refetch. With an explicit type filter, Massive already constrains
+  // without a refetch. With an explicit type filter, the gateway already constrains
   // the results, so the tab/category client filter is skipped (an ETF type would
   // otherwise be dropped by the Stocks tab, since ETF→funds category).
   // Empty query, All tab (symbol search only): the symbols picked before
@@ -596,7 +602,7 @@ export function SymbolSearchDialog(props: Props) {
               (provider `type` filter) remains. */}
           <Show when={!props.compare && category() === "stocks"}>
             <div class="symbol-search-filters">
-              {/* Type — functional dropdown (Massive `type` filter). */}
+              {/* Type — functional dropdown (the search `type` filter). */}
               <div class="symbol-search-filter-wrap" ref={typeWrap}>
                 <button
                   type="button"

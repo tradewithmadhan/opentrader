@@ -25,7 +25,7 @@ use super::capabilities::{
     StreamCaps,
 };
 use super::{DataProvider, HistoryProvider, RealtimeProvider, ReferenceProvider};
-use crate::data::massive_ws::{ChartAggregate, SecondAggregate, SubscribeMsg, SubscriptionState, TradeTick, WsHandle};
+use crate::data::market_stream::{ChartAggregate, SecondAggregate, SubscribeMsg, SubscriptionState, TradeTick, WsHandle};
 use crate::data::session::{Subsession, SymbolSession};
 use crate::data::symbol::SymbolRef;
 use chrono_tz::Tz;
