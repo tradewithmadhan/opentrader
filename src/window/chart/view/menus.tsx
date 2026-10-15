@@ -499,10 +499,7 @@ export function createMenus(cx: ChartCx): MenusApi {
     if (nodes.length) nodes.push({ kind: "separator" });
     const arrange = cx.sourceArrangeRows(id);
     if (arrange.length) nodes.push(...arrange, { kind: "separator" });
-<<<<<<< HEAD
-=======
     // A script's source: its own section after the placement rows.
->>>>>>> 420514f (Merge branch 'builtin-source-code' (#73))
     const source = sourceCodeMenuRows(id);
     if (source.length) nodes.push(...source, { kind: "separator" });
     nodes.push(
