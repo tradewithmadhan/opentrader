@@ -117,7 +117,7 @@ describe("periodStart — trading days", () => {
 });
 
 describe("aggregateCandles", () => {
-  const c = (t: number, o: number, h: number, l: number, cl: number, v: number | null = 100): Candle => ({ time: t, open: o, high: h, low: l, close: cl, volume: v });
+  const c = (t: number, o: number, h: number, l: number, cl: number, v: number | null = 100): Candle => ({ time: t, open: o, high: h, low: l, close: cl, volume: v ?? 0 });
 
   it("weekly OHLCV reduce", () => {
     const daily = [
@@ -133,12 +133,13 @@ describe("aggregateCandles", () => {
   });
 
   it("sorts the input and skips candles with a null field", () => {
+    // Null-field rows are tolerated at runtime, hence the cast.
     const daily = [
       c(stamp(2026, 2, 3), 20, 21, 19, 20.5),
       c(stamp(2026, 2, 2), 19, 22, 18, 20),
       { time: stamp(2026, 2, 4), open: null, high: 99, low: 1, close: 50, volume: 10 },
       { time: null, open: 1, high: 1, low: 1, close: 1, volume: 1 },
-    ];
+    ] as unknown as Candle[];
     const out = aggregateCandles(daily, { unit: "month", n: 1 }, spec);
     expect(out).toEqual([{ time: key(2026, 2, 1), open: 19, high: 22, low: 18, close: 20.5, volume: 200 }]);
   });
