@@ -566,13 +566,13 @@ export function ChartView(props: ChartViewProps) {
     try { return chart.priceScale("left").width(); } catch { return 0; }
   }
   /** Price axes shown: the chosen side, and the other one while the series
-   *  (in a study pane it shares) or a compared symbol on a new price scale
-   *  uses it. Studies stay on the chosen side (defaultVisiblePriceScaleId). */
+   *  (in a study pane it shares), a compared symbol on a new price scale or a
+   *  study pinned to it ("Pin to scale") uses it. */
   function syncScaleSides() {
     if (!chart) return;
     const placement = currentTokens().scalesPlacement;
     const other = placement === "right" ? "left" : "right";
-    const used = mainSide() === other || cx.compareUsesOtherSide();
+    const used = mainSide() === other || cx.compareUsesOtherSide() || !!controller?.usesSide(other);
     chart.applyOptions(other === "left" ? { leftPriceScale: { visible: used } } : { rightPriceScale: { visible: used } });
   }
   /** The price pane moved or changed (controller hook): the series goes to

@@ -30,6 +30,7 @@ export interface CompareApi {
   compareLegendRows: (time?: number) => IndicatorLegendRow[];
   compareLiveDirty: boolean;
   compareTitle: (e: CompareEntry) => string;
+  compareSources: () => CompareSource[];
   compareUsesOtherSide: () => boolean;
   holdCompares: (ids: string[]) => void;
   followMainPane: () => void;
@@ -141,9 +142,8 @@ export function createCompare(cx: ChartCx): CompareApi {
   function compareUsesOtherSide(): boolean {
     return currentTokens().scalesMode === "auto" && !cx.controller?.seriesShares() && compareEntries().some((e) => e.placement === "scale");
   }
-  /** Studies changed their scale: the other side's scale follows (applied
-   *  only when it changes). */
-  const syncSideScales = () => syncCompareScaleVisibility(false);
+  /** Studies changed their scale ("Pin to scale"): the other side's scale follows. */
+  const syncSideScales = () => cx.syncScaleSides();
   function compareVisible(e: CompareEntry): boolean {
     return !e.hidden && isVisibleOnInterval(e.style.visibility, props.interval);
   }
@@ -406,6 +406,7 @@ export function createCompare(cx: ChartCx): CompareApi {
       compareLiveDirty = v;
     },
     compareTitle,
+    compareSources,
     compareUsesOtherSide,
     holdCompares,
     followMainPane,

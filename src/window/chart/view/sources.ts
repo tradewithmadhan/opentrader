@@ -504,16 +504,15 @@ export function createSources(cx: ChartCx): SourcesApi {
   }
   /** "Move to" rows of a study (reference rules): a pane above / below to
    *  merge into unless it is the first / last pane; a new pane above / below
-   *  when its pane holds another source (the main series counts). The price
-   *  pane stays the top pane here: no new pane above it. */
+   *  when its pane holds another source (the main series counts). */
   function studyMoves(id: string): StudyMoves | null {
     const c = cx.controller;
     if (!c || cx.compareEntry(id)) return null;
     const pane = c.paneOf(id);
     if (pane === null) return null;
     const last = (cx.chart?.panes().length ?? 1) - 1;
-    const shared = pane === 0 || c.idsInPane(pane).length > 1;
-    return { mergeUp: pane > 0, unmergeUp: pane > 0 && shared, mergeDown: pane < last, unmergeDown: shared };
+    const shared = pane === cx.mainPane() || c.idsInPane(pane).length > 1;
+    return { mergeUp: pane > 0, unmergeUp: shared, mergeDown: pane < last, unmergeDown: shared };
   }
   /** Apply a "Move to" row: merge into the pane above / below, or a new
    *  pane right above / below the study's pane. */
@@ -526,18 +525,15 @@ export function createSources(cx: ChartCx): SourcesApi {
       mergeStudyToPane(id, move === "mergeUp" ? pane - 1 : pane + 1);
       return;
     }
-    // Stacked panes, top to bottom, before the move.
+    // Stacked panes, top to bottom, before the move (the price pane as `_series` when the series has its own).
     const before = c.stackedOrder().filter((x) => x !== id);
-    const mates = pane > 0 ? c.idsInPane(pane).filter((x) => x !== id) : [];
+    const mates = [...c.idsInPane(pane).filter((x) => x !== id), ...(pane === cx.mainPane() ? [MAIN_SOURCE_ID] : [])];
     const options = c.unmergeToNewPane(id);
     if (!options) return;
-    let at = 0;
-    if (pane > 0) {
-      const first = before.findIndex((x) => mates.includes(x));
-      let lastMate = first;
-      before.forEach((x, k) => { if (mates.includes(x)) lastMate = k; });
-      at = move === "unmergeUp" ? Math.max(0, first) : lastMate + 1;
-    }
+    const first = before.findIndex((x) => mates.includes(x));
+    let lastMate = first;
+    before.forEach((x, k) => { if (mates.includes(x)) lastMate = k; });
+    const at = first < 0 ? (move === "unmergeUp" ? 0 : before.length) : move === "unmergeUp" ? first : lastMate + 1;
     studyPaneChanged(id, options, [...before.slice(0, at), id, ...before.slice(at)]);
   }
   listenWhenShown(TREE_HIDE_EVENT, onTreeHideRequest);

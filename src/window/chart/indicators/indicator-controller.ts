@@ -786,7 +786,7 @@ export class IndicatorController {
     if (!inst || inst.owner) return null;
     if (inst.overlay) return this.moveToNewPane(id);
     // Alone in its pane: nothing to leave (the series counts as a mate).
-    if (this.studiesInPane(inst.paneIndex).length < 2 && inst.paneIndex !== this.mainPane) return null;
+    if (this.idsInPane(inst.paneIndex).length < 2 && inst.paneIndex !== this.mainPane) return null;
     // A group of its own: the studies left behind keep the pane's group.
     const options = { ...(this.options.get(id) ?? defaultIndicatorOptions()), ownPane: false, paneGroup: this.ownGroup(id, true) };
     this.options.set(id, cloneIndicatorOptions(options));
