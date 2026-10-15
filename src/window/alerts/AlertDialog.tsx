@@ -46,7 +46,6 @@ import {
 } from "../../data/alert-condition";
 import { isStrategyId } from "../chart/indicators/strategy-entries";
 import { chartComparesFor, chartLastPrice, indicatorPlotValue } from "../../data/chart-state-registry";
-import { isStrategyId } from "../chart/indicators/strategy-entries";
 import { quoteFor } from "../../data/quotes";
 import { cachedSymbolSessions } from "../../data/session";
 import { buildIntervalMenu, sectionOf, SECTION_TITLES, type IntervalSection } from "../chart/custom-intervals";
