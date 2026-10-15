@@ -710,6 +710,7 @@ function App() {
               theme={theme()}
               indicators={indicators()}
               onToggleIndicator={toggleScriptOnChart}
+              onAddIndicator={addIndicator}
               onClose={() => setOakPanelOpen(false)}
             />
           </Show>
