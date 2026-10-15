@@ -95,8 +95,14 @@ describe("watchlistStore: lists", () => {
   it("seeds the default list with its sections, and every colour list", () => {
     const seed = wl.lists().find((l) => l.id === "watchlist")!;
     expect(seed.name).toBe("Watchlist");
-    expect(seed.groups.map((g) => g.name)).toEqual(["INDEX", "LARGE CAPS"]);
-    expect(seed.groups[0].rows.map((r) => r.ticker)).toEqual(["AMEX:SPY", "NASDAQ:QQQ", "AMEX:DIA", "AMEX:IWM"]);
+    // Sections come from the active data source's seeds (the sample feed
+    // here), so assert shape, not exact upstream content.
+    expect(seed.groups.length).toBeGreaterThan(0);
+    for (const g of seed.groups) {
+      expect(g.name).toBeTruthy();
+      expect(g.rows.length).toBeGreaterThan(0);
+      for (const r of g.rows) expect(r.ticker).toContain(":");
+    }
     expect(wl.lists().filter((l) => l.id.startsWith("color-")).map((l) => l.name)).toEqual([
       "Red list",
       "Blue list",
@@ -132,7 +138,9 @@ describe("watchlistStore: lists", () => {
     expect(wl.active()!.collapsed).toEqual(["S1"]);
     const other = wl.copyList("watchlist", "Mine")!;
     expect(wl.activeId()).toBe(copy);
-    expect(wl.lists().find((l) => l.id === other)!.groups).toHaveLength(2);
+    expect(wl.lists().find((l) => l.id === other)!.groups).toHaveLength(
+      wl.lists().find((l) => l.id === "watchlist")!.groups.length,
+    );
     expect(wl.copyList("nope")).toBeUndefined();
   });
 
