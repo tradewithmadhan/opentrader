@@ -306,6 +306,8 @@ function App() {
     updateDrawing,
     removeDrawing,
     cloneDrawing,
+    drawingSyncForSymbol,
+    setDrawingsSyncForSymbol,
     toggleHide,
     toggleLock,
     removeAllDrawings,
@@ -701,6 +703,8 @@ function App() {
               updateDrawingForSymbol={updateDrawingForSymbol}
               updateDrawingsForSymbol={updateDrawingsForSymbol}
               cloneDrawingForSymbol={cloneDrawingForSymbol}
+              drawingSyncForSymbol={drawingSyncForSymbol}
+              setDrawingsSyncForSymbol={setDrawingsSyncForSymbol}
               reorderDrawingForSymbol={reorderDrawingForSymbol}
               placeDrawingsForSymbol={placeDrawingsForSymbol}
               removeDrawingForSymbol={removeDrawingForSymbol}
