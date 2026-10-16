@@ -443,6 +443,8 @@ export function shapeTickerInfo(ticker: string, exchange: string, d: OaSymbolInf
     // Script symbol type (syminfo.type): broker equities are stocks; other
     // instrument types have no measured equivalent (mirrors the backend map).
     symbolType: d.instrumenttype === "EQ" ? "stock" : null,
+    // Security type as served.
+    securityType: d.instrumenttype === "EQ" ? "stock" : null,
   };
 }
 

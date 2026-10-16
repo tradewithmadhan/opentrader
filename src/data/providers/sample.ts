@@ -1019,6 +1019,8 @@ export function sampleTickerInfo(symbol: string): TickerInfo {
     // Script symbol type (syminfo.type): sample equities are stocks; indices
     // and derivatives have no measured equivalent (mirrors the backend map).
     symbolType: known?.type === "EQ" ? "stock" : null,
+    // Security type as served: sample equities are stock.
+    securityType: known?.type === "EQ" ? "stock" : null,
     homepageUrl: null,
     totalEmployees: 10000 + Number(fnv1a(`ref|${t}`) % 150000n),
     marketCap: Math.round(m.base * (100000000 + Number(fnv1a(`mc|${t}`) % 900000000n))),
