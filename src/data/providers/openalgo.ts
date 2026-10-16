@@ -441,6 +441,13 @@ export function displayName(
   return parts.join(" ");
 }
 
+/** Company logo URL for a ticker (dharun public logo API, symbol last).
+ *  Stocks only — indices and derivatives 404, so callers pass EQ rows and
+ *  the UI hides failures (letter fallback). Exported for tests. */
+export function logoUrl(ticker: string): string {
+  return `https://api.dharun.dev/v1/logos/${ticker.toUpperCase()}`;
+}
+
 export function shapeTickerInfo(ticker: string, exchange: string, d: OaSymbolInfo): TickerInfo {
   const lotsize = d.lotsize ?? 1;
   return {
@@ -458,7 +465,6 @@ export function shapeTickerInfo(ticker: string, exchange: string, d: OaSymbolInf
     totalEmployees: null,
     marketCap: null,
     figi: null,
-    iconUrl: null,
     // Script symbol type (syminfo.type): broker equities are stocks; other
     // instrument types have no measured equivalent (mirrors the backend map).
     symbolType: d.instrumenttype === "EQ" ? "stock" : null,
@@ -467,6 +473,8 @@ export function shapeTickerInfo(ticker: string, exchange: string, d: OaSymbolInf
     // Contract multiplier: one point of price moves pointValue currency
     // units (equities stay 1).
     pointValue: lotsize,
+    // Company logo for stocks; indices/derivatives 404 (letter fallback).
+    iconUrl: d.instrumenttype === "EQ" ? logoUrl(ticker) : null,
   };
 }
 
@@ -1304,7 +1312,7 @@ export const openalgoSource: DataSource = {
         dividends: false,
         splits: false,
         news: false,
-        icons: false,
+        icons: true,
       },
       entitlements: null,
     };
@@ -1400,6 +1408,9 @@ export function searchResultToRow(r: SymbolSearchResult): SymbolRow {
     category: (r.type && TYPE_CATEGORY[r.type]) || "stocks",
     // All broker venues are Indian listings.
     country: "IN",
+    // Logo for stocks only ("EQ" search rows, "stock" detail rows);
+    // indices/derivatives 404, and the dialog hides failures.
+    logoSrc: r.type === "EQ" || r.type === "stock" ? logoUrl(r.ticker) : undefined,
   };
 }
 
