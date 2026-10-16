@@ -448,14 +448,41 @@ export function logoUrl(ticker: string): string {
   return `https://api.dharun.dev/v1/logos/${ticker.toUpperCase()}`;
 }
 
-export function shapeTickerInfo(ticker: string, exchange: string, d: OaSymbolInfo): TickerInfo {
+/** Company profile from the public dharun API (sector, industry, ISIN —
+ *  none of which the broker serves). Unknown tickers 404: null, never fatal. */
+export type OaCompanyProfile = {
+  company?: string;
+  sector?: string;
+  industry?: string;
+  isin?: string;
+  currency?: string;
+};
+
+export async function fetchCompanyProfile(ticker: string): Promise<OaCompanyProfile | null> {
+  try {
+    const res = await fetch(`https://api.dharun.dev/v1/companies/${ticker.toUpperCase()}`);
+    if (!res.ok) return null;
+    const json = (await res.json()) as { data?: OaCompanyProfile };
+    if (!json.data || typeof json.data !== "object") return null;
+    return json.data;
+  } catch {
+    return null;
+  }
+}
+
+export function shapeTickerInfo(
+  ticker: string,
+  exchange: string,
+  d: OaSymbolInfo,
+  profile: OaCompanyProfile | null = null,
+): TickerInfo {
   const lotsize = d.lotsize ?? 1;
   return {
     ticker,
     name: displayName(d.name || ticker, d),
     exchange,
-    industry: null,
-    sector: null,
+    industry: profile?.industry ?? null,
+    sector: profile?.sector ?? null,
     currency: INDIAN_EXCHANGES.has(exchange) ? "INR" : null,
     description:
       `${d.brsymbol || ticker}` +
@@ -465,6 +492,8 @@ export function shapeTickerInfo(ticker: string, exchange: string, d: OaSymbolInf
     totalEmployees: null,
     marketCap: null,
     figi: null,
+    // India uses ISIN (no FIGI): the company profile's code, if known.
+    isin: profile?.isin ?? null,
     // Script symbol type (syminfo.type): broker equities are stocks; other
     // instrument types have no measured equivalent (mirrors the backend map).
     symbolType: d.instrumenttype === "EQ" ? "stock" : null,
@@ -1208,12 +1237,15 @@ export const openalgoSource: DataSource = {
   tickerInfo: async (symbol) => {
     const { exchange, ticker } = splitOpenAlgo(symbol);
     const cfg = openAlgoConfig();
-    const res = await post<{ status?: string; data?: OaSymbolInfo }>(cfg, "/api/v1/symbol", {
-      symbol: ticker,
-      exchange,
-    });
+    const [res, profile] = await Promise.all([
+      post<{ status?: string; data?: OaSymbolInfo }>(cfg, "/api/v1/symbol", {
+        symbol: ticker,
+        exchange,
+      }),
+      fetchCompanyProfile(ticker),
+    ]);
     if (!res.data) throw new Error(`OpenAlgo /symbol: no data for ${ticker}`);
-    return shapeTickerInfo(ticker, exchange, res.data);
+    return shapeTickerInfo(ticker, exchange, res.data, profile);
   },
 
   tickerSnapshot: async (symbol) => {

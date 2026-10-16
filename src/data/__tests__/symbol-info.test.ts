@@ -31,6 +31,14 @@ describe("symbol info", () => {
     expect(fut[1].find((f) => f.title === "Point value")).toMatchObject({ value: "65" });
   });
 
+  it("shows ISIN in place of FIGI for Indian listings", () => {
+    const indian = symbolInfoGroups({ symbol: "NSE:SBIN", name: "State Bank of India", isin: "INE062A01020" });
+    const titles = indian[0].map((f) => f.title);
+    expect(titles).toContain("ISIN");
+    expect(titles).not.toContain("FIGI");
+    expect(indian[0].find((f) => f.title === "ISIN")).toMatchObject({ value: "INE062A01020" });
+  });
+
   it("splits a trading day into pre-market, market open, post-market", () => {
     const week = sessionWeek(RTH, ETH, Date.UTC(2026, 9, 15, 17) / 1000); // Thursday 13:00 New York
     expect(week.map((d) => d.weekday)).toEqual(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]);

@@ -44,6 +44,7 @@ export function SymbolInfoDialog(props: Props) {
       securityType: i?.securityType,
       listedExchange: exchange,
       flag: flagUrl(countryOfExchange(exchange)) ?? null,
+      isin: i?.isin ?? null,
       currency: i?.currency,
       tickSize: tick != null ? String(Number(tick.toPrecision(6))) : null,
       pointValue: i?.pointValue ?? null,

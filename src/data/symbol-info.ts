@@ -48,6 +48,8 @@ export type InfoInput = {
   sector?: string | null;
   industry?: string | null;
   figi?: string | null;
+  /** India uses ISIN instead of FIGI: shown in its place when present. */
+  isin?: string | null;
   homepageUrl?: string | null;
   /** Security type as served ("etf", "stock"…). */
   securityType?: string | null;
@@ -80,6 +82,7 @@ export function symbolInfoGroups(i: InfoInput): InfoField[][] {
   if (i.sector) first.push({ title: "Sector", value: i.sector });
   if (i.industry) first.push({ title: "Industry", value: i.industry });
   if (i.figi) first.push({ title: "FIGI", value: i.figi, copy: true });
+  if (i.isin) first.push({ title: "ISIN", value: i.isin, copy: true });
   if (i.homepageUrl && (isStock || isFund)) first.push({ title: isStock ? "Website" : "Home page", value: siteName(i.homepageUrl), link: i.homepageUrl });
   const second: InfoField[] = [];
   const type = securityTypeLabel(i.securityType);
