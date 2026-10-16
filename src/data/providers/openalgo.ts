@@ -422,11 +422,30 @@ export type OaSymbolInfo = {
   tick_size?: number;
 };
 
+/** Display name for a broker instrument. Stocks keep the plain name; a
+ *  contract with an expiry reads `Name Strike Type Expiry` (e.g. "NIFTY
+ *  23050 CE 19-OCT-26"), skipping missing parts. The broker marks "none"
+ *  as an empty expiry and a negative strike — both read as absent. Exported
+ *  for tests. */
+export function displayName(
+  name: string,
+  d: { instrumenttype?: string; strike?: number; expiry?: string },
+): string {
+  const expiry = (d.expiry ?? "").trim();
+  if (!expiry) return name;
+  const parts = [name];
+  if (d.strike != null && d.strike >= 0) parts.push(String(d.strike));
+  const kind = (d.instrumenttype ?? "").trim();
+  if (kind) parts.push(kind);
+  parts.push(expiry);
+  return parts.join(" ");
+}
+
 export function shapeTickerInfo(ticker: string, exchange: string, d: OaSymbolInfo): TickerInfo {
   const lotsize = d.lotsize ?? 1;
   return {
     ticker,
-    name: d.name || ticker,
+    name: displayName(d.name || ticker, d),
     exchange,
     industry: null,
     sector: null,
@@ -445,6 +464,9 @@ export function shapeTickerInfo(ticker: string, exchange: string, d: OaSymbolInf
     symbolType: d.instrumenttype === "EQ" ? "stock" : null,
     // Security type as served.
     securityType: d.instrumenttype === "EQ" ? "stock" : null,
+    // Contract multiplier: one point of price moves pointValue currency
+    // units (equities stay 1).
+    pointValue: lotsize,
   };
 }
 
@@ -476,7 +498,7 @@ export function mapSearchRows(rows: OaSearchRow[], type: string | null): SymbolS
     .filter((r) => !allow || allow.has(r.instrumenttype ?? ""))
     .map((r) => ({
       ticker: r.symbol,
-      name: r.name ?? "",
+      name: displayName(r.name ?? "", r),
       market: "stocks",
       locale: null,
       exchange: r.exchange ?? "",

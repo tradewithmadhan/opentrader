@@ -93,6 +93,8 @@ export type TickerInfo = {
   symbolType: string | null;
   /** Security type as served ("stock", "etf", "adr"…). */
   securityType: string | null;
+  /** Contract multiplier (lot size); null when the source reports none. */
+  pointValue?: number | null;
   /** Branding icon via the `ticker-icon` proxy (Rust adds the token) — usable as <img src>. */
   iconUrl: string | null;
 };

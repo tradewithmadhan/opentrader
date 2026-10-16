@@ -26,6 +26,11 @@ describe("symbol info", () => {
     expect(siteName("https://www.ssga.com/us/en")).toBe("ssga.com");
   });
 
+  it("shows the contract point value when the source reports a lot size", () => {
+    const fut = symbolInfoGroups({ symbol: "NFO:NIFTY", pointValue: 65 });
+    expect(fut[1].find((f) => f.title === "Point value")).toMatchObject({ value: "65" });
+  });
+
   it("splits a trading day into pre-market, market open, post-market", () => {
     const week = sessionWeek(RTH, ETH, Date.UTC(2026, 9, 15, 17) / 1000); // Thursday 13:00 New York
     expect(week.map((d) => d.weekday)).toEqual(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]);
