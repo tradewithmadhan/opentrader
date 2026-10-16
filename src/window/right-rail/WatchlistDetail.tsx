@@ -376,7 +376,7 @@ export function WatchlistDetail(props: Props) {
           }
         >
           {(url) => (
-            <img class="watchlist-detail-logo-img" src={url()} alt="" width="24" height="24" loading="lazy" onError={(e) => ((e.currentTarget as HTMLImageElement).style.display = "none")} />
+            <img class="watchlist-detail-logo-img" src={url()} alt="" width="24" height="24" loading="lazy" />
           )}
         </Show>
         <span class="watchlist-detail-title" data-qa-id="details-element-symbol">
