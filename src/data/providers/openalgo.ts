@@ -9,11 +9,12 @@
  *  supply values at runtime. Traffic goes direct to the host, which must allow
  *  the page origin (CORS).
  *
- * Coverage notes vs the sample source: seconds are NOT served (broker
- * `intervals.seconds` is empty — caps say so, the picker greys out);
- * `adjusted_toggle` is false (`/history` has no adjust flag);
- * `SecondAggregate` is synthesized per quote tick (documented approximation);
- * 240m aggregates client-side from 2h; 1W/1M aggregate client-side from daily.
+ * Coverage notes vs the sample source: second frames come from the broker's
+ *  own `intervals.seconds` list (unlisted multiples stay greyed out; 3-day
+ *  windows per request, 30-day retention); `adjusted_toggle` is false
+ *  (`/history` has no adjust flag); the live `SecondAggregate` is synthesized
+ *  per quote tick (documented approximation — history backfills the rest);
+ *  240m aggregates client-side from 2h; 1W/1M aggregate client-side from daily.
  * Sessions come from the broker calendar (`/market/timings` + `/market/holidays`,
  * incl. SPECIAL_SESSION days) — see `openAlgoSymbolSession`; the static SESSION
  * below is only the last-resort fallback.
@@ -120,9 +121,10 @@ export type OaIntervals = {
 export type NormalizedIntervals = {
   /** Directly served minute multiples → broker tokens. */
   minutes: Map<number, string>;
-  /** Served second multiples (informational: second history stays
-   *  unimplemented, so caps keep `seconds: []`). */
+  /** Served second multiples. */
   seconds: number[];
+  /** Second multiple → broker token (exact request strings). */
+  secondTokens: Map<number, string>;
   daily: boolean;
 };
 
@@ -135,16 +137,15 @@ export function normalizeIntervals(data: OaIntervals): NormalizedIntervals {
     const mult = minuteTokenToMult(token);
     if (mult != null && !minutes.has(mult)) minutes.set(mult, token.trim());
   }
-  const seconds: number[] = [];
+  const seconds = new Map<number, string>();
   for (const token of strings(data.seconds)) {
     const m = /^(\d+)\s*s(?:ec)?$/i.exec(token.trim());
-    if (m) {
-      const n = parseInt(m[1], 10);
-      if (Number.isFinite(n) && n >= 1 && !seconds.includes(n)) seconds.push(n);
-    }
+    if (!m) continue;
+    const n = parseInt(m[1], 10);
+    if (Number.isFinite(n) && n >= 1 && !seconds.has(n)) seconds.set(n, token.trim());
   }
-  seconds.sort((a, b) => a - b);
-  return { minutes, seconds, daily: strings(data.days).some((t) => t.trim().toUpperCase() === "D") };
+  const secondList = [...seconds.keys()].sort((a, b) => a - b);
+  return { minutes, seconds: secondList, secondTokens: seconds, daily: strings(data.days).some((t) => t.trim().toUpperCase() === "D") };
 }
 
 const INTERVAL_TTL_MS = 24 * 3600 * 1000;
@@ -189,8 +190,19 @@ function minuteTable(): Map<number, string> {
   return new Map(Object.entries(FALLBACK_MINUTE_INTERVAL).map(([k, v]) => [Number(k), v]));
 }
 
+/** Currently known second-multiplier → broker token (broker list when
+ *  fetched; empty when not — unlisted multiples stay unadvertised). */
+function secondTable(): Map<number, string> {
+  if (intervalCache) return intervalCache.normalized.secondTokens;
+  return new Map();
+}
+
 export function resolveInterval(kind: "second" | "minute", mult: number): string {
-  if (kind === "second") return `${mult}s`;
+  if (kind === "second") {
+    const hit = secondTable().get(mult);
+    if (!hit) throw new Error(`OpenAlgo: second multiplier ${mult} is not served (see /intervals)`);
+    return hit;
+  }
   const hit = minuteTable().get(mult);
   if (!hit) throw new Error(`OpenAlgo: minute multiplier ${mult} has no interval mapping`);
   return hit;
@@ -322,9 +334,11 @@ async function fetchHistory(
   startMs: number,
   endMs: number,
 ): Promise<Candle[]> {
-  // Per-request range limits: intraday intervals cap at 30 days (chunked);
-  // daily and longer allow up to 1 year in one call.
-  const maxDays = oaInterval === "D" || oaInterval === "W" || oaInterval === "M" ? 365 : 30;
+  // Per-request range limits: daily and longer allow up to 1 year in one
+  // call; second bars cap at 3 days per request (broker limit), everything
+  // else at 30 days (chunked).
+  const maxDays =
+    oaInterval === "D" || oaInterval === "W" || oaInterval === "M" ? 365 : /s$/i.test(oaInterval) ? 3 : 30;
   const cfg = openAlgoConfig();
   const out: Candle[] = [];
   for (const [from, to] of chunkRanges(startMs, endMs, maxDays)) {
@@ -1196,29 +1210,36 @@ export const openalgoSource: DataSource = {
     return fetchHistory(ticker, exchange, oa, from, to);
   },
 
-  secondAggs: async () => {
-    throw new Error("OpenAlgo broker serves no second bars (intervals.seconds is empty)");
+  secondAggs: async (symbol, mult, days, _adjusted) => {
+    const { exchange, ticker } = splitOpenAlgo(symbol);
+    await fetchIntervals();
+    const oa = resolveInterval("second", mult);
+    const [from, to] = todayRange(days);
+    return fetchHistory(ticker, exchange, oa, from, to);
   },
 
-  secondTail: async () => {
-    throw new Error("OpenAlgo broker serves no second bars (intervals.seconds is empty)");
+  secondTail: async (symbol, mult, sinceSec, _adjusted) => {
+    const { exchange, ticker } = splitOpenAlgo(symbol);
+    await fetchIntervals();
+    const oa = resolveInterval("second", mult);
+    const endMs = Date.now();
+    const out = await fetchHistory(ticker, exchange, oa, sinceSec * 1000, endMs);
+    return out.filter((b) => b.time > sinceSec);
   },
 
   aggregatesBefore: async (symbol, timespan, mult, beforeSec, spanDays, _adjusted) => {
-    if (timespan === "second") {
-      throw new Error("OpenAlgo broker serves no second bars (intervals.seconds is empty)");
-    }
     const { exchange, ticker } = splitOpenAlgo(symbol);
     const endMs = beforeSec * 1000 - 86400000;
     const startMs = endMs - spanDays * 86400000;
     await fetchIntervals();
-    // Reuse the chunked fetcher over explicit calendar bounds.
-    const oa = mult === 240 ? "2h" : resolveInterval("minute", mult);
-    if (mult === 240 && !minuteTable().has(120)) {
+    // Reuse the chunked fetcher over explicit calendar bounds (second
+    // windows cap at 3 days per request, like the initial loads above).
+    const oa = timespan === "minute" && mult === 240 ? "2h" : resolveInterval(timespan, mult);
+    if (mult === 240 && timespan === "minute" && !minuteTable().has(120)) {
       throw new Error("OpenAlgo: 240m needs the broker 2h interval, which is not served");
     }
     const out: Candle[] = [];
-    for (const [from, to] of chunkRanges(startMs, endMs, 30)) {
+    for (const [from, to] of chunkRanges(startMs, endMs, timespan === "second" ? 3 : 30)) {
       for (const b of await historyWindow(openAlgoConfig(), ticker, exchange, oa, from, to)) out.push(toCandle(b));
     }
     out.sort((a, b) => a.time - b.time);
@@ -1319,10 +1340,13 @@ export const openalgoSource: DataSource = {
       ? [...fetched.minutes.keys()].sort((a, b) => a - b)
       : [1, 3, 5, 10, 15, 30, 60, 120, 240];
     const minutes = direct.includes(120) && !direct.includes(240) ? [...direct, 240] : direct;
+    // Second frames come from the broker's list too (no fallback: unlisted
+    // multiples stay greyed out rather than advertising guesses).
+    const seconds = fetched ? [...fetched.seconds] : [];
     return {
       name: "openalgo",
       resolutions: {
-        seconds: [] as number[],
+        seconds,
         minutes,
         daily: fetched ? fetched.daily : true,
         weeklyMonthlyFromDaily: true,
@@ -1353,7 +1377,7 @@ export const openalgoSource: DataSource = {
   watchCapabilities: () => Promise.resolve(() => {}),
   session: () => SESSION,
   seeds: () => OPENALGO_SEEDS,
-  historyLimits: () => ({ second: 0, minute: 30, day: 365 }),
+  historyLimits: () => ({ second: 30, minute: 30, day: 365 }),
 };
 
 
