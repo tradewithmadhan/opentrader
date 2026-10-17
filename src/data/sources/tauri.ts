@@ -31,12 +31,7 @@ const SESSION: MarketSessionDef = {
 };
 
 const US_SEEDS: SourceSeeds = {
-  defaultSymbol: "NASDAQ:INTC",
-  starterTabs: [
-    { symbol: "NASDAQ:INTC", interval: "1D" },
-    { symbol: "NASDAQ:AAPL", interval: "60" },
-    { symbol: "NASDAQ:TSLA", interval: "240" },
-  ],
+  defaultSymbol: "NASDAQ:AAPL",
   watchlistGroups: [
     { name: "INDEX", tickers: ["AMEX:SPY", "NASDAQ:QQQ", "AMEX:DIA", "AMEX:IWM"] },
     {

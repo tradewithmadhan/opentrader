@@ -52,11 +52,6 @@ export const SAMPLE_FUNDING = {
 
 const SAMPLE_SEEDS: SourceSeeds = {
   defaultSymbol: "NSE:RELIANCE",
-  starterTabs: [
-    { symbol: "NSE:RELIANCE", interval: "1D" },
-    { symbol: "NSE:INFY", interval: "60" },
-    { symbol: "NSE:TATAMOTORS", interval: "240" },
-  ],
   // One row per venue so every exchange shows live data out of the box.
   // (Sample generates for any ticker; the openalgo source serves the same
   // rows from the broker where each was verified.)

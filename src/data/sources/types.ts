@@ -43,10 +43,9 @@ export type MarketSessionDef = {
   mintick?: number;
 };
 
-/** Seed content for a fresh profile (tabs + watchlist). */
+/** Seed content for a fresh profile (default chart + watchlist). */
 export type SourceSeeds = {
   defaultSymbol: string;
-  starterTabs: { symbol: string; interval: string }[];
   watchlistGroups: { name: string; tickers: string[] }[];
 };
 

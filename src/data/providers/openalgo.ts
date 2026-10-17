@@ -1138,11 +1138,6 @@ const SESSION: MarketSessionDef = {
 
 const OPENALGO_SEEDS = {
   defaultSymbol: "NSE:RELIANCE",
-  starterTabs: [
-    { symbol: "NSE:RELIANCE", interval: "1D" },
-    { symbol: "NSE:INFY", interval: "60" },
-    { symbol: "NSE:SBIN", interval: "240" },
-  ],
   watchlistGroups: [
     // Index venues verified live (NSE:NIFTY does NOT exist on the broker).
     // Derivative contracts below are near-month as verified; they roll

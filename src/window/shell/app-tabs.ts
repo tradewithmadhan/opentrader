@@ -44,7 +44,7 @@ import { migrateDrawingKey } from "../drawings/persistence";
 import { setSelectedDrawingId } from "../drawings/drawing-selection";
 
 export function createAppTabs(windowLabel: string, singleView = false) {
-  const initial = loadTabs(windowLabel, takeDetachPayload(windowLabel), singleView);
+  const initial = loadTabs(windowLabel, takeDetachPayload(windowLabel));
   const [tabs, setTabs] = createSignal<TabChart[]>(initial.tabs);
   const [activeTabId, setActiveTabId] = createSignal<string>(initial.activeId);
   const activeTab = () => tabs().find((t) => t.id === activeTabId()) ?? tabs()[0];

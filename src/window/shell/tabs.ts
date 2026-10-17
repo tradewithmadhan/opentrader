@@ -312,11 +312,13 @@ export function newPaneId(): string {
 /** Convenience pane-shaped overrides accepted by `makeTab`. */
 type MakeTabPartial = Partial<PaneChart> & { layout?: LayoutId; isChart?: boolean };
 
-/** Studies a brand-new pane starts with (registry ids). `colored-volume` is the
- *  library's Volume bars study — a non-overlay columns pane below price, the
- *  default volume. Only seeds fresh tabs/panes; persisted panes keep their
+/** Studies a brand-new pane starts with (registry ids): the Volume study on
+ *  the price pane. Only seeds fresh tabs/panes; persisted panes keep their
  *  own saved list. */
-export const DEFAULT_INDICATORS: string[] = ["colored-volume"];
+export const DEFAULT_INDICATORS: string[] = ["volume"];
+
+/** Interval of a brand-new chart (the symbol comes from the active source). */
+export const DEFAULT_INTERVAL = "1D";
 
 /** Fresh-pane symbol fallback — from the active source's seeds. */
 export const defaultSymbol = (): string => source().seeds().defaultSymbol;
@@ -325,7 +327,7 @@ export function makeTab(partial: MakeTabPartial = {}): TabChart {
   const { layout = DEFAULT_LAYOUT, isChart = true, ...pane } = partial;
   const base: Omit<PaneChart, "id"> = {
     symbol: pane.symbol ?? defaultSymbol(),
-    interval: pane.interval ?? "1D",
+    interval: pane.interval ?? DEFAULT_INTERVAL,
     chartType: pane.chartType ?? DEFAULT_CHART_TYPE,
     session: pane.session ?? "RTH",
     indicators: pane.indicators ?? [...DEFAULT_INDICATORS],
@@ -363,7 +365,7 @@ function revivePane(p: Partial<PaneChart>): PaneChart {
   return {
     id: typeof p.id === "string" ? p.id : newPaneId(),
     symbol: p.symbol ?? defaultSymbol(),
-    interval: p.interval ?? "1D",
+    interval: p.interval ?? DEFAULT_INTERVAL,
     chartType: p.chartType ?? DEFAULT_CHART_TYPE,
     session: p.session ?? "RTH",
     indicators: studies.indicators,
@@ -408,7 +410,7 @@ export function migrateTab(raw: any): TabChart {
     const base: PaneChart = {
       id: newPaneId(),
       symbol: raw?.symbol ?? defaultSymbol(),
-      interval: raw?.interval ?? "1D",
+      interval: raw?.interval ?? DEFAULT_INTERVAL,
       chartType: raw?.chartType ?? DEFAULT_CHART_TYPE,
       session: raw?.session ?? "RTH",
       indicators: currentStudies(Array.isArray(raw?.indicators) ? [...raw.indicators] : [], undefined).ids,
@@ -459,23 +461,6 @@ export function tickerInitial(ticker: string): string {
   return (ticker[0] ?? "").toUpperCase();
 }
 
-/** Layout-name part shown after the ticker ("/ Daily"), derived from interval
- *  (the mock has no saved layout names). */
-export function layoutNameFromInterval(interval: string): string {
-  const s = interval.toUpperCase();
-  switch (s) {
-    case "1D": return "Daily";
-    case "1W": return "Weekly";
-    case "1M": return "Monthly";
-    case "12M": return "Yearly";
-    default: break;
-  }
-  if (/^\d+M$/.test(s)) return `${s.slice(0, -1)} Months`;
-  if (/^\d+W$/.test(s)) return `${s.slice(0, -1)} Weeks`;
-  if (/^\d+D$/.test(s)) return `${s.slice(0, -1)} Days`;
-  return "Intraday";
-}
-
 // Per-window storage (Tauri WebView2 windows share one localStorage origin, so
 // each window scopes its tab state by its window label — see window-bridge.ts).
 const tabsKey = (label: string) => `ot:tabs:${label}`;
@@ -492,11 +477,10 @@ function bumpSeqPast(id: string): void {
 /**
  * Load this window's tabs. `seed` (a tab handed off by a detach) wins — a
  * detached window opens showing only that one tab. Otherwise restore the
- * label-scoped persisted set, falling back to the defaults on the main
- * window's first run. `singleView` (browser shell) seeds one tab instead of
- * the starter set — tabs are a desktop windowing concept.
+ * label-scoped persisted set, falling back to one new chart (the active
+ * source's default symbol) on first run.
  */
-export function loadTabs(label: string, seed?: TabChart | null, singleView = false): Persisted {
+export function loadTabs(label: string, seed?: TabChart | null): Persisted {
   if (seed) {
     const tab = migrateTab(seed);
     bumpSeqPast(tab.id);
@@ -519,16 +503,9 @@ export function loadTabs(label: string, seed?: TabChart | null, singleView = fal
   } catch {
     /* malformed / unavailable — fall through to defaults */
   }
-  // Detached windows that lost their handoff shouldn't resurrect the defaults;
-  // only the main window seeds the starter set (from the active source) —
-  // or a single tab in single-view (browser) mode.
-  const seeds = source().seeds().starterTabs;
-  const tabs =
-    label === "main"
-      ? (singleView && seeds.length > 0 ? [seeds[0]] : seeds).map((s) =>
-          makeTab({ symbol: s.symbol, interval: s.interval }),
-        )
-      : [makeTab()];
+  // First run opens one chart on the active source's default symbol (upstream
+  // 0.4.0: a single tab, not the old demo set).
+  const tabs = [makeTab()];
   return { tabs, activeId: tabs[0].id };
 }
 
