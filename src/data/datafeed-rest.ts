@@ -119,7 +119,10 @@ export async function getTickerInfo(symbol: string): Promise<TickerInfo> {
   return coalesce(`info:${symbol.toUpperCase()}`, () => source().tickerInfo(symbol));
 }
 
-export async function getTickerSnapshot(symbol: string): Promise<Snapshot> {
+export async function getTickerSnapshot(symbol: string, _wanted?: () => boolean): Promise<Snapshot> {
+  // `_wanted` (upstream's retry-loop cancel hook) is accepted for call-site
+  // compatibility with upstream; the source socket's snapshot is a one-shot
+  // coalesced request, so there is no retry loop to stop.
   return coalesce(`snap:${symbol.toUpperCase()}`, () => source().tickerSnapshot(symbol));
 }
 

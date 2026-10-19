@@ -27,6 +27,7 @@ import {
   getTickerInfo,
 } from "./datafeed-rest";
 import { getItem, setItem } from "./kv";
+import { retryTransient } from "./connection";
 import {
   onChartAggregate,
   onSecondAggregate,
@@ -306,7 +307,10 @@ export async function searchSymbols(
 export type ChartEvent = { time: number; kind: "dividend" | "split"; label: string };
 
 /** Dividend + split markers for `symbol`, time-ascending. Best-effort: a failing
- *  endpoint contributes nothing rather than throwing (events are decorative). */
+ *  endpoint contributes nothing rather than throwing (events are decorative).
+ *  The upstream connection-recovery retry applies to backend calls with its
+ *  (NETWORK…)-code envelope; the source socket's providers degrade directly,
+ *  so the `.catch` fallback below already yields stale-then-empty behaviour. */
 export async function getEvents(symbol: string): Promise<ChartEvent[]> {
   const [divs, splits, sessions] = await Promise.all([
     source().dividends(symbol).catch((): DividendEvent[] => []),
@@ -479,6 +483,10 @@ export type BarsResult = {
   daily: Candle[] | null;
   /** Aggregation period applied to produce `bars` from `daily`; null otherwise. */
   aggregate: AggregatePeriod | null;
+  /** A part of the company's history (daily archive, an earlier symbol, a
+   *  symbol used in between) could not be read because the server could not
+   *  be reached: read the series again to complete it. */
+  partial?: boolean;
 };
 
 /** Fetch the initial window of bars for a resolution. Routes:
@@ -487,11 +495,18 @@ export type BarsResult = {
  *                                rebuilt from a served base when needed
  *   • daily family (ND/NW/NM)  → S3 daily flat files, aggregated client-side
  *  Throws on backend error (the caller decides how to degrade). */
-export async function getBars(
+export function getBars(
   symbol: string,
   resolution: string,
   session: SessionId = "ETH",
+  /** False once the caller no longer needs the bars: stops the retries. */
+  wanted?: () => boolean,
 ): Promise<BarsResult> {
+  // A server that cannot be reached is tried again until it answers (see ./connection).
+  return retryTransient(() => getBarsOnce(symbol, resolution, session), wanted);
+}
+
+async function getBarsOnce(symbol: string, resolution: string, session: SessionId): Promise<BarsResult> {
   // Guard the catch-all daily branch below: an unservable resolution (tick,
   // range, too large a multiplier) must error here rather than silently
   // resolve to daily bars. The picker gates on the same set, so this is a
@@ -507,6 +522,8 @@ export async function getBars(
       sessionsFor(symbol),
     ]);
     // Second buckets divide every minute open, so an exact filter suffices.
+    // `partial` is the backend archive concept; the source socket serves the
+    // whole requested window.
     return { bars: inSession(bars, sessions.spec(session)), daily: null, aggregate: null };
   }
   const intra = minuteConfig(resolution);
