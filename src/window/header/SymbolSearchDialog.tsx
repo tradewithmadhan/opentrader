@@ -261,7 +261,9 @@ export function SymbolSearchDialog(props: Props) {
   const [liveRaw, setLiveRaw] = createSignal<SymbolSearchResult[] | null>(null);
   let reqSeq = 0;
   // Economy tab: the catalogue's series, the most popular for an empty query, within the Sources / Categories
-  // filters (null until they arrive, or outside the tab).
+  // filters (null until they arrive, or outside the tab). Backend-served
+  // (upstream): hidden in the browser shell, like the other backend-only services.
+  const HAS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   const economy = () => HAS_TAURI && !props.compare && !multiMode() && category() === "economy";
   const [econRaw, setEconRaw] = createSignal<SymbolSearchResult[] | null>(null);
   const [sources, setSources] = createSignal<string[]>([]);

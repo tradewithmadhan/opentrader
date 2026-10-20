@@ -18,6 +18,7 @@
  * the backend `Candle.time`.
  */
 import type { Candle, DividendEvent, SplitEvent, SymbolSearchResult } from "../bindings";
+import { commands } from "../bindings";
 import { source } from "./sources";
 import {
   getSecondHistory,
