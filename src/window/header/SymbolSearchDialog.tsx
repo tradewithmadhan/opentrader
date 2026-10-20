@@ -293,11 +293,10 @@ export function SymbolSearchDialog(props: Props) {
   createEffect(() => {
     const q = searchText().trim();
     const type = activeType();
-<<<<<<< HEAD
+    // Our searchSymbols routes through the active source (works in the
+    // browser shell), so no HAS_TAURI gate here — upstream needs it because
+    // their live search calls the backend directly.
     if (q.length < 1) {
-=======
-    if (!HAS_TAURI || q.length < 1 || economy()) {
->>>>>>> d750f19 (Economy search filters, four more statistics metrics)
       reqSeq++; // cancel any in-flight request
       setLiveRaw(null);
       setSearching(false);
