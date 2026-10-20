@@ -34,6 +34,12 @@ export type EngineGrid = any;
 export type AlertFired = any;
 export type AlertLeader = any;
 export type AlertEngineInfo = any;
+export type Fundamentals = any;
+export type EarningsEvent = any;
+export type FundamentalPeriods = any;
+export type FundamentalMetric = any;
+export type EconomicSeries = any;
+export type EconomicPoint = any;
 export type Subsession = {
   id: string;
   description: string;
