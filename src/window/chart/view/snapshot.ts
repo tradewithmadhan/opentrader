@@ -23,6 +23,8 @@ import { isTauri } from "../../shell/window-bridge";
 import { openSnapshotInBrowser } from "../../../data/drawing-images-web";
 import { commands } from "../../../bindings";
 import { legendShowsSingleValue, type ChartTypeId, type OHLC } from "../chart-types";
+import { tradingPrefs } from "../../../data/trading/trading-prefs";
+import { paintDomLayer } from "./dom-paint";
 import { type ChartCx } from "./context";
 
 /** What createSnapshot adds to the chart context. */
@@ -210,6 +212,15 @@ export function createSnapshot(cx: ChartCx): SnapshotApi {
     if (ctx) {
       await paintSnapshotDrawings(ctx, dpr, leftW);
       paintSnapshotCurrency(ctx, dpr, leftW);
+      // Settings → Trading → "Orders, executions, and positions in chart
+      // snapshots" (app-wide): the trading lines layer on top.
+      const trading = tradingPrefs.prefs().snapshot ? cx.paneRoot.querySelector<HTMLElement>('[data-name="trading-lines"]') : null;
+      if (trading) {
+        ctx.save();
+        ctx.scale(dpr, dpr);
+        await paintDomLayer(ctx, trading, cx.chart.chartElement().getBoundingClientRect());
+        ctx.restore();
+      }
     }
     return {
       rect: cx.paneRoot.getBoundingClientRect(),
