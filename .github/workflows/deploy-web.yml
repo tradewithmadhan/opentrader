@@ -48,11 +48,13 @@ jobs:
       # Fresh checkouts lack the sibling drawing-core repo that
       # vite.config.ts aliases to ../lightweight-charts-drawing (also
       # gitignored-by-absence, like src/bindings.ts above). Clone it at the
-      # same ref the release workflow pins (DRAWING_REF), so web builds
-      # always match a released backend.
+      # same ref the release workflow pins. Since the release automation
+      # (upstream cherry-pick 8756cb9) the pin lives in package.json's
+      # config.drawingRef (kept current by scripts/release-bump.mjs) —
+      # release.yml no longer carries a DRAWING_REF: env line.
       - name: Checkout drawing core
         run: |
-          REF=$(sed -n 's/^  DRAWING_REF: //p' .github/workflows/release.yml)
+          REF=$(node -p "require('./package.json').config.drawingRef")
           git clone --depth 1 --branch "$REF" https://github.com/deepentropy/lightweight-charts-drawing.git ../lightweight-charts-drawing
 
       - name: Build web bundle
