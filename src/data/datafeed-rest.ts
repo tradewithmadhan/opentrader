@@ -115,8 +115,25 @@ export type Snapshot = {
   updatedMs: number;
 };
 
-export async function getTickerInfo(symbol: string): Promise<TickerInfo> {
-  return coalesce(`info:${symbol.toUpperCase()}`, () => source().tickerInfo(symbol));
+/** Reference data changes at most once a day: an answer is reused for an hour. */
+const INFO_TTL_MS = 60 * 60_000;
+
+/** Ticker info requests, one per symbol: the answer serves every caller for
+ *  INFO_TTL_MS. A failure is not kept (the next call routes anew). */
+const infoCache = new Map<string, { at: number; p: Promise<TickerInfo> }>();
+
+/** Reference data of `symbol`, routed to the active source. */
+export function getTickerInfo(symbol: string): Promise<TickerInfo> {
+  const key = symbol.toUpperCase();
+  const hit = infoCache.get(key);
+  if (hit && Date.now() - hit.at < INFO_TTL_MS) return hit.p;
+  const entry = { at: Date.now(), p: source().tickerInfo(symbol) };
+  infoCache.set(key, entry);
+  entry.p.then(
+    () => { entry.at = Date.now(); },
+    () => { if (infoCache.get(key) === entry) infoCache.delete(key); },
+  );
+  return entry.p;
 }
 
 export async function getTickerSnapshot(symbol: string, _wanted?: () => boolean): Promise<Snapshot> {
@@ -137,7 +154,23 @@ export type NewsItem = {
   description: string | null;
 };
 
+/** Charts of the same symbol refresh their headline on the same period: one
+ *  request serves them all for NEWS_SHARE_MS. */
+const NEWS_SHARE_MS = 60_000;
+const newsCache = new Map<string, { at: number; p: Promise<NewsItem[]> }>();
+
 /** Newest `limit` headlines tagged with `symbol`; `[]` on backend failure. */
-export async function getLatestNews(symbol: string, limit = 1): Promise<NewsItem[]> {
-  return source().latestNews(symbol, limit);
+/** Newest `limit` headlines tagged with `symbol`, routed to the active source
+ *  (browsers without headlines keep re-asking: a failure is not kept). */
+export function getLatestNews(symbol: string, limit = 1): Promise<NewsItem[]> {
+  const key = `${symbol}|${limit}`;
+  const hit = newsCache.get(key);
+  if (hit && Date.now() - hit.at < NEWS_SHARE_MS) return hit.p;
+  const entry = { at: Date.now(), p: source().latestNews(symbol, limit) };
+  newsCache.set(key, entry);
+  entry.p.then(
+    () => { entry.at = Date.now(); },
+    () => { if (newsCache.get(key) === entry) newsCache.delete(key); },
+  );
+  return entry.p;
 }
