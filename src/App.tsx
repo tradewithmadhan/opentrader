@@ -811,6 +811,7 @@ function App() {
             intraday={isIntradayInterval(interval())}
             intervalSec={intervalSeconds(interval())}
             interval={interval()}
+            chartStyle={activePaneState().chartType}
             symbol={activeFullSymbol() ?? symbol()}
             properties={(id) => ((activePaneState().indicatorSettings?.[id]?.inputs as Record<string, unknown> | undefined)?.[PROPERTIES_INPUT] ?? {}) as Record<string, unknown>}
             onPatchProperties={(id, patch) => {
