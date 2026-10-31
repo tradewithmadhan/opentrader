@@ -868,14 +868,13 @@ const secondListeners = new Set<(t: SecondAggregate) => void>();
 const tickListeners = new Set<(t: TradeTick) => void>();
 const minuteBuckets = new Map<string, { start: number; o: number; h: number; l: number; v: number }>();
 
-/** Live minute-volume baseline per symbol: the sum of today's completed
- *  minute volumes (every intraday candle except the forming one). The forming
- *  bucket's live volume is then `dayVolume - baseline`: exact from the first
- *  tick even on a mid-day attach, and self-correcting across reconnect gaps
- *  (a day-volume jump lands in the bucket instead of being lost). The broker
- *  only streams cumulative day volume, so without this the bucket stays 0. */
-type VolBaseline = { date: string; sum: number; ready: boolean; pending: boolean; retryAt: number };
-const volBaselines = new Map<string, VolBaseline>();
+/** Forming-minute volume over day-volume deltas: the broker WS streams only
+ *  cumulative day volume, so a bucket's own volume is the day volume minus its
+ *  value at the bucket's first tick. The day's earlier bars keep their history
+ *  volumes from the initial load — no 1-minute history fetch here (there used
+ *  to be one per symbol per day to seed a completed-minutes baseline). */
+type VolBucket = { start: number; base: number | null };
+const volOpen = new Map<string, VolBucket>();
 const lastDayVol = new Map<string, number>();
 const istDateFmt = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Asia/Kolkata",
@@ -884,37 +883,19 @@ const istDateFmt = new Intl.DateTimeFormat("en-CA", {
   day: "2-digit",
 });
 
-/** Today's completed minute volumes for `sym`, fetched once per symbol-day
- *  from the provider's own 1-minute history. Fire-and-forget: ticks arriving
- *  before it resolves keep emitting 0 (today's behaviour) until it lands. */
-async function ensureVolBaseline(sym: string, nowSec: number): Promise<void> {
-  const date = istDateFmt.format(new Date(nowSec * 1000));
-  const nowMs = Date.now();
-  const cur = volBaselines.get(sym);
-  if (cur && cur.date === date && (cur.ready || cur.pending || nowMs < cur.retryAt)) return;
-  const b: VolBaseline = { date, sum: 0, ready: false, pending: true, retryAt: 0 };
-  volBaselines.set(sym, b);
-  try {
-    const bars = await openalgoSource.minuteAggs(sym, 1, 1, true);
-    const curMinute = Math.floor(nowSec / 60) * 60;
-    let sum = 0;
-    for (const c of bars) {
-      const t = c.time as number;
-      if (istDateFmt.format(new Date(t * 1000)) !== date) continue; // yesterday's tail of the trailing window
-      if (t === curMinute) continue; // forming bucket — not history yet
-      sum += c.volume ?? 0;
-    }
-    if (volBaselines.get(sym) === b) {
-      b.sum = sum;
-      b.ready = true;
-    }
-  } catch {
-    // No minute history (unknown symbol, broker error): stay on 0 rather
-    // than guessing, and retry at most once a minute while ticks flow.
-    if (volBaselines.get(sym) === b) b.retryAt = Date.now() + 60000;
-  } finally {
-    if (volBaselines.get(sym) === b) b.pending = false;
+/** Update the forming bucket's volume for `sym`: base = the day volume when
+ *  the current minute bucket's first tick with a volume arrived; the delta
+ *  never counts a pre-bucket day volume (a volume-less first tick delays the
+ *  base rather than pouring the gap into this bar). */
+function trackBucketVolume(sym: string, start: number, dayVol: number | undefined, qVol: unknown): number {
+  let vb = volOpen.get(sym);
+  if (!vb || vb.start !== start) {
+    vb = { start, base: Number.isFinite(qVol as number) ? (qVol as number) : null };
+    volOpen.set(sym, vb);
+  } else if (vb.base == null && Number.isFinite(qVol as number)) {
+    vb.base = qVol as number;
   }
+  return vb.base != null && dayVol != null ? Math.max(0, dayVol - vb.base) : 0;
 }
 
 let ws: WebSocket | null = null;
@@ -1080,35 +1061,32 @@ function onQuoteTick(symbol: string, exchange: string, q: OaQuote): void {
     source: "live",
   };
   // Last known day volume (some ticks omit it): the forming bucket's volume
-  // is day volume minus the baseline.
+  // is today's day volume minus the bucket's day volume at its first tick.
   const dayVol: number | undefined =
     Number.isFinite(q.volume) ? q.volume : lastDayVol.get(sym);
   if (dayVol != null) lastDayVol.set(sym, dayVol);
   for (const fn of tickListeners) fn(tick);
-  // Chart-only work below: minute buckets, volume baselines and synthetic
-  // second bars exist to paint chart bars. Watch-only symbols (ticks for
-  // quotes/alerts) skip all of it — otherwise every watchlist row costs a
-  // 1-minute history fetch on its first tick of the day.
+  // Chart-only work below: minute buckets and synthetic second bars exist to
+  // paint chart bars. Watch-only symbols (ticks for quotes/alerts) skip all
+  // of it — they only need the day-side quote numbers, never bucket volumes.
   if (!isCharted(sym)) return;
   // Minute bucket for ChartAggregate (quotes carry day OHLC, not minute bars;
-  // day volume minus the baseline below rebuilds the bucket's own volume).
+  // the bucket's volume = dayVolume − its base at the first tick, below).
   const start = Math.floor(now / 60) * 60;
-  void ensureVolBaseline(sym, now);
-  const bl = volBaselines.get(sym);
-  const today = istDateFmt.format(new Date(now * 1000));
   let b = minuteBuckets.get(sym);
-  if (!b || b.start !== start) {
-    // Rollover: the finished bucket joins history — fold its final volume
-    // into the baseline so the new bucket stays exact.
-    if (b && bl && bl.ready && bl.date === today) bl.sum += b.v;
+  if (!b) {
     b = { start, o: q.ltp, h: q.ltp, l: q.ltp, v: 0 };
     minuteBuckets.set(sym, b);
+  } else if (b.start !== start) {
+    b.start = start;
+    b.o = q.ltp;
+    b.h = q.ltp;
+    b.l = q.ltp;
+    b.v = 0;
   }
   b.h = Math.max(b.h, q.ltp);
   b.l = Math.min(b.l, q.ltp);
-  if (dayVol != null && bl && bl.ready && bl.date === today) {
-    b.v = Math.max(0, dayVol - bl.sum);
-  }
+  b.v = trackBucketVolume(sym, start, dayVol, q.volume);
   const agg: ChartAggregate = {
     symbol: sym,
     time: start,
