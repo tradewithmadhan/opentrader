@@ -1238,8 +1238,11 @@ export const openalgoSource: DataSource = {
 
   aggregatesBefore: async (symbol, timespan, mult, beforeSec, spanDays, _adjusted) => {
     const { exchange, ticker } = splitOpenAlgo(symbol);
+    // Exactly `spanDays` calendar dates strictly before `beforeSec`'s date:
+    // otherwise the +1 span spills a lone 1-date tail call past the broker's
+    // 30-dates-per-request cap (one 30-day page = two calls).
     const endMs = beforeSec * 1000 - 86400000;
-    const startMs = endMs - spanDays * 86400000;
+    const startMs = endMs - (spanDays - 1) * 86400000;
     await fetchIntervals();
     // Reuse the chunked fetcher over explicit calendar bounds (second
     // windows cap at 3 days per request, like the initial loads above).
@@ -1258,8 +1261,9 @@ export const openalgoSource: DataSource = {
 
   dailyBefore: async (symbol, beforeSec, spanDays, _adjusted) => {
     const { exchange, ticker } = splitOpenAlgo(symbol);
+    // `spanDays` dates exactly — see aggregatesBefore.
     const endMs = beforeSec * 1000 - 86400000;
-    const startMs = endMs - spanDays * 86400000;
+    const startMs = endMs - (spanDays - 1) * 86400000;
     const out = await fetchHistory(ticker, exchange, "D", startMs, endMs);
     return out.map(snapDayBar).filter((b) => b.time < beforeSec);
   },
