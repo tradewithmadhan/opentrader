@@ -233,10 +233,11 @@ const fmtDate = (d: Date): string =>
   `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 
 /** Split a [start, end] UTC-millis range into ≤ maxDays-day `YYYY-MM-DD`
- *  windows (intraday history is capped at 30 days per request). A trailing
- *  window ending mid-day touches one more calendar date than the day count
- *  (e.g. a 30-day window ending today spans 31 dates), so the last chunk is
- *  a 1-day tail fetching today — that is expected, not a spill bug. */
+ *  windows (intraday history is capped at 30 days per request). A final
+ *  partial window is whatever dates remain — no dedicated tail call. The
+ *  initial loads size their range exactly (`todayRange`), so a capped
+ *  30-day lookback stays one chunk rather than spilling today into a
+ *  second call. */
 export function chunkRanges(startMs: number, endMs: number, maxDays: number): [string, string][] {
   const out: [string, string][] = [];
   const day = 86400000;
@@ -1164,7 +1165,11 @@ const OPENALGO_SEEDS = {
 
 function todayRange(days: number): [number, number] {
   const end = Date.now();
-  return [end - days * 86400000, end];
+  // Exactly `days` calendar dates ending today (inquiries say "last N days",
+  // not "N days plus today"): a 30-date lookback then fits the broker's
+  // 30-dates-per-request cap in ONE /history call instead of splitting into a
+  // 30-day window plus a 1-day tail for today.
+  return [end - (days - 1) * 86400000, end];
 }
 
 /** Snap a broker day bar to its IST calendar date's midnight (verified live:
