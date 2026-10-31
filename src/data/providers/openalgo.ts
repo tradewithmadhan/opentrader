@@ -266,8 +266,10 @@ function isHttp5xx(e: unknown): boolean {
 }
 
 /** One history chunk: its bars, or [] when the window holds no trading. Any
- *  other failure (auth, HTTP, unreachable host) stays loud — a bad key
- *  rendering as an empty chart would be worse than an error. */
+ *  other failure (auth, unreachable host) stays loud — a bad key rendering as
+ *  an empty chart would be worse than an error. An HTTP 5xx on a window this
+ *  size is usually the upstream API flapping: retried once on the SAME window
+ *  (below) before the split-retry in historyWindow narrows it. */
 async function historyChunk(
   cfg: OpenAlgoConfig,
   ticker: string,
@@ -276,18 +278,25 @@ async function historyChunk(
   from: string,
   to: string,
 ): Promise<OaBar[]> {
-  try {
-    const res = await post<HistoryData>(cfg, "/api/v1/history", {
-      symbol: ticker,
-      exchange,
-      interval: oaInterval,
-      start_date: from,
-      end_date: to,
-    });
-    return res.data ?? [];
-  } catch (e) {
-    if (!isNoData(e)) throw e;
-    return [];
+  const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  for (let attempt = 0; ; attempt++) {
+    try {
+      console.info(
+        `[openalgo] history ${exchange}:${ticker} ${oaInterval} ${from}..${to}${attempt > 0 ? ` (retry ${attempt})` : ""}`,
+      );
+      const res = await post<HistoryData>(cfg, "/api/v1/history", {
+        symbol: ticker,
+        exchange,
+        interval: oaInterval,
+        start_date: from,
+        end_date: to,
+      });
+      return res.data ?? [];
+    } catch (e) {
+      if (isNoData(e)) return [];
+      if (!(isHttp5xx(e) && attempt === 0)) throw e;
+      await wait(300);
+    }
   }
 }
 
