@@ -1507,6 +1507,10 @@ const KV_EXCLUDED = [
   "ot:broker:", // broker credentials never leave the device
   "ot:drawing-image:", // binary-purpose blobs (base64) — out of scope
 ];
+/** Exact keys excluded (no colon suffix to share the prefix form). */
+const KV_EXCLUDED_EXACT = ["ot:data-source"]; // provider choice = per-device
+const kvExcluded = (key: string): boolean =>
+  KV_EXCLUDED.some((p) => key.startsWith(p)) || KV_EXCLUDED_EXACT.includes(key);
 /** Raw-localStorage (outside ot:) marker for keys whose push failed. */
 const KV_STALE_KEY = "openalgo-kv-stale";
 
@@ -1628,7 +1632,7 @@ export function remoteKvBackend(): RemoteKvBackend | null {
       for (const [k, v] of Object.entries(data)) {
         if (typeof v !== "string" || v === "") continue; // "" = cleared/absent
         if (!k.startsWith(KV_RAW_PREFIX)) continue; // OpenAlgo's own fields stay untouched
-        if (KV_EXCLUDED.some((p) => k.startsWith(p))) {
+        if (kvExcluded(k)) {
           // Excluded keys must not exist in the record: a pre-exclusion boot's
           // one-time localStorage import could have uploaded `ot:broker:*` —
           // clear those (fields are upsert-only) rather than leak them forever.
@@ -1647,7 +1651,7 @@ export function remoteKvBackend(): RemoteKvBackend | null {
       } catch (e) {
         console.error(`[openalgo] cloud-KV local mirror failed for ${key}`, e);
       }
-      if (key.startsWith(KV_RAW_PREFIX) && !KV_EXCLUDED.some((p) => key.startsWith(p))) {
+      if (key.startsWith(KV_RAW_PREFIX) && !kvExcluded(key)) {
         kvQueue.set(key, value);
         kvSchedulePush(openAlgoConfig());
       }
@@ -1658,7 +1662,7 @@ export function remoteKvBackend(): RemoteKvBackend | null {
       } catch {
         /* nothing to remove */
       }
-      if (key.startsWith(KV_RAW_PREFIX) && !KV_EXCLUDED.some((p) => key.startsWith(p))) {
+      if (key.startsWith(KV_RAW_PREFIX) && !kvExcluded(key)) {
         kvQueue.set(key, ""); // "" clears the record field (see header comment)
         kvSchedulePush(openAlgoConfig());
       }
