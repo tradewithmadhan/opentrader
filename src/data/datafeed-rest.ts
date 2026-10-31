@@ -115,8 +115,9 @@ export type Snapshot = {
   updatedMs: number;
 };
 
-/** Reference data changes at most once a day: an answer is reused for an hour. */
-const INFO_TTL_MS = 60 * 60_000;
+/** Reference data changes at most once a day: an answer is reused for the
+ *  day (24h — our pick; upstream keeps it at 1h). */
+const INFO_TTL_MS = 24 * 60 * 60_000;
 
 /** Ticker info requests, one per symbol: the answer serves every caller for
  *  INFO_TTL_MS. A failure is not kept (the next call routes anew). */
