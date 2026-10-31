@@ -84,8 +84,11 @@ const SECOND_INTERVALS: Record<string, { mult: number; days: number }> = {
 /** Intraday interval ids → (lookback days, bucket minutes). Served by
  *  the backend's minute aggregates (server-side bucketing). */
 const INTRADAY_INTERVALS: Record<string, { days: number; mins: number }> = {
-  "1": { days: 5, mins: 1 },
-  "5": { days: 10, mins: 5 },
+  // Intraday frames at/below 15m all load 30 days (our pick; upstream uses
+  // tiered 5/10/30). Custom N-minute ids derive their lookback from this
+  // table's largest-at-or-under rule, so any ≤15m frame gets 30 days too.
+  "1": { days: 30, mins: 1 },
+  "5": { days: 30, mins: 5 },
   "15": { days: 30, mins: 15 },
   "30": { days: 60, mins: 30 },
   "60": { days: 90, mins: 60 },
