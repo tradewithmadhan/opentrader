@@ -1504,6 +1504,7 @@ const KV_EXCLUDED = [
   "ot:tabs:",
   "ot:active-tab:",
   "ot:detach:", // cross-window coordination — syncing would race
+  "ot:broker:", // broker credentials never leave the device
   "ot:drawing-image:", // binary-purpose blobs (base64) — out of scope
 ];
 /** Raw-localStorage (outside ot:) marker for keys whose push failed. */
@@ -1627,7 +1628,14 @@ export function remoteKvBackend(): RemoteKvBackend | null {
       for (const [k, v] of Object.entries(data)) {
         if (typeof v !== "string" || v === "") continue; // "" = cleared/absent
         if (!k.startsWith(KV_RAW_PREFIX)) continue; // OpenAlgo's own fields stay untouched
-        if (KV_EXCLUDED.some((p) => k.startsWith(p))) continue;
+        if (KV_EXCLUDED.some((p) => k.startsWith(p))) {
+          // Excluded keys must not exist in the record: a pre-exclusion boot's
+          // one-time localStorage import could have uploaded `ot:broker:*` —
+          // clear those (fields are upsert-only) rather than leak them forever.
+          kvQueue.set(k, "");
+          kvSchedulePush(cfg);
+          continue;
+        }
         if (stale.has(k)) continue; // local copy still wins until the push lands
         out.push([k, v]);
       }
