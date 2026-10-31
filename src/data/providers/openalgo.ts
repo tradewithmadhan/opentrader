@@ -1476,3 +1476,186 @@ export const openalgo: FrontendProvider = {
   migrateTypeCode: (code: string) => code,
 };
 
+// ── Cloud-KV backend (the broker's /api/v1/chart preference record) ─────────
+/* /api/v1/chart is a per-user field store (semantics verified live):
+ *   GET  /api/v1/chart?apikey=… → { status: "success", data: { field: value } }
+ *   POST /api/v1/chart { apikey, field: value, … } → MERGES per field: unknown
+ *   field names persist verbatim, existing fields survive, ≥512 KB values pass.
+ *   Fields cannot be deleted — "" is the clear value and reads treat it absent.
+ *
+ * remoteKvBackend() adapts this for ../kv: every app `ot:` key round-trips as
+ * a record field under its own name (colon field names are fine; OpenAlgo's
+ * own `tradingview.*` / `tv_*` / LocalStorageSaveLoadAdapter_* fields are
+ * never written). At boot the record mirrors into the KV so all app state
+ * (layouts, watchlists, drawings text, alerts, settings… ) survives across
+ * devices/browsers. Writes land in localStorage first (instant +
+ * offline-proof) and push only the dirty keys in one debounced POST.
+ * Failed pushes mark the keys stale (raw localStorage, outside ot:) so boot
+ * mirroring skips them → the local copies win and are re-pushed. In the
+ * Tauri shell the desktop file store owns persistence → this returns null. */
+export type RemoteKvBackend = {
+  entries(): Promise<[string, string][]>;
+  set(key: string, value: string): Promise<void>;
+  delete(key: string): Promise<boolean>;
+};
+
+const KV_RAW_PREFIX = "ot:"; // mirrors ../kv's key namespace
+const KV_EXCLUDED = [
+  "ot:tabs:",
+  "ot:active-tab:",
+  "ot:detach:", // cross-window coordination — syncing would race
+  "ot:drawing-image:", // binary-purpose blobs (base64) — out of scope
+];
+/** Raw-localStorage (outside ot:) marker for keys whose push failed. */
+const KV_STALE_KEY = "openalgo-kv-stale";
+
+function kvStale(): Set<string> {
+  try {
+    const raw = localStorage.getItem(KV_STALE_KEY);
+    return new Set<string>(raw ? (JSON.parse(raw) as string[]) : []);
+  } catch {
+    return new Set();
+  }
+}
+function kvMarkStale(keys: string[]): void {
+  try {
+    const s = kvStale();
+    for (const k of keys) s.add(k);
+    localStorage.setItem(KV_STALE_KEY, JSON.stringify([...s]));
+  } catch {
+    /* storage blocked — pushes stay queued and retry on the next write */
+  }
+}
+function kvDropStale(keys: string[]): void {
+  try {
+    const s = kvStale();
+    if (!s.size) return;
+    for (const k of keys) s.delete(k);
+    if (s.size) localStorage.setItem(KV_STALE_KEY, JSON.stringify([...s]));
+    else localStorage.removeItem(KV_STALE_KEY);
+  } catch {
+    /* storage blocked — nothing to clean */
+  }
+}
+
+// Push coalescing: mem/localStorage stay instant; the record POST carries
+// only the dirty keys, trailing-debounced with a hard cap so a sustained
+// burst (dragging a panel) stays one request per event.
+const kvQueue = new Map<string, string>(); // key → latest JSON; "" = cleared
+let kvTimer: ReturnType<typeof setTimeout> | null = null;
+let kvQueuedAt = 0;
+let kvFailures = 0;
+const KV_PUSH_DELAY = 400; // ms trailing debounce (app-level kv flushes at 120ms)
+const KV_PUSH_MAX = 5000; // ms cap for a sustained burst
+const KV_RETRY_MAX = 1; // one automatic retry per push burst, then wait for the next write
+
+function kvFlush(cfg: OpenAlgoConfig): Promise<void> {
+  if (kvTimer !== null) {
+    clearTimeout(kvTimer);
+    kvTimer = null;
+  }
+  if (kvQueue.size === 0) return Promise.resolve();
+  const fields = Object.fromEntries(kvQueue);
+  kvQueue.clear();
+  const keys = Object.keys(fields);
+  return fetch(`${cfg.base}/api/v1/chart`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apikey: requireKey(cfg), ...fields }),
+    keepalive: true, // survives the closing flush on window close
+  })
+    .then(async (res) => {
+      const j = (await res.json().catch(() => ({}))) as { status?: string; message?: string };
+      if (!res.ok || j.status === "error") throw new Error(j.message ?? `HTTP ${res.status}`);
+      kvFailures = 0;
+      kvDropStale(keys);
+    })
+    .catch((e) => {
+      // Keep the newest values queued (don't clobber later merges) and mark
+      // stale so boot prefers local copies until the push succeeds.
+      for (const [k, v] of Object.entries(fields)) if (!kvQueue.has(k)) kvQueue.set(k, v);
+      kvMarkStale(keys);
+      console.error("[openalgo] cloud-KV push failed; local state stands in", e);
+      if (kvFailures < KV_RETRY_MAX) {
+        kvFailures++;
+        // One delayed retry for transient blips; otherwise the next write
+        // triggers it (and boot re-pushes via the localStorage import).
+        kvTimer = setTimeout(() => {
+          kvTimer = null;
+          void kvFlush(openAlgoConfig());
+        }, KV_PUSH_MAX);
+      }
+    });
+}
+
+function kvSchedulePush(cfg: OpenAlgoConfig): void {
+  const now = Date.now();
+  if (kvTimer === null) kvQueuedAt = now;
+  else clearTimeout(kvTimer);
+  const wait = Math.min(KV_PUSH_DELAY, Math.max(0, KV_PUSH_MAX - (now - kvQueuedAt)));
+  kvTimer = setTimeout(() => {
+    kvTimer = null;
+    void kvFlush(cfg);
+  }, wait);
+}
+
+/** Drain/await any queued cloud push immediately (tests + explicit flushes). */
+export function flushCloudKv(): Promise<void> {
+  return kvFlush(openAlgoConfig());
+}
+
+/** The durable KV backend behind browser-shell persistence, or null when not
+ *  applicable (Tauri owns its file store; no credentials → nothing to store).
+ *  Consumed by ../kv's hydrate — providers must never call it themselves. */
+export function remoteKvBackend(): RemoteKvBackend | null {
+  if (typeof window === "undefined" || "__TAURI_INTERNALS__" in window) return null;
+  const cfg = openAlgoConfig();
+  if (!cfg.base || !cfg.key) return null;
+  return {
+    async entries(): Promise<[string, string][]> {
+      let res: Response;
+      try {
+        res = await fetch(`${cfg.base}/api/v1/chart?apikey=${encodeURIComponent(cfg.key)}`);
+      } catch (e) {
+        throw new Error(`OpenAlgo /api/v1/chart: network unreachable (${e instanceof Error ? e.message : e})`);
+      }
+      if (!res.ok) throw new Error(`OpenAlgo /api/v1/chart: HTTP ${res.status}`);
+      const j = (await res.json()) as { data?: Record<string, unknown> };
+      const data = j?.data ?? {};
+      const stale = kvStale();
+      const out: [string, string][] = [];
+      for (const [k, v] of Object.entries(data)) {
+        if (typeof v !== "string" || v === "") continue; // "" = cleared/absent
+        if (!k.startsWith(KV_RAW_PREFIX)) continue; // OpenAlgo's own fields stay untouched
+        if (KV_EXCLUDED.some((p) => k.startsWith(p))) continue;
+        if (stale.has(k)) continue; // local copy still wins until the push lands
+        out.push([k, v]);
+      }
+      return out;
+    },
+    async set(key: string, value: string): Promise<void> {
+      try {
+        localStorage.setItem(key, value); // the offline layer + boot fallback
+      } catch (e) {
+        console.error(`[openalgo] cloud-KV local mirror failed for ${key}`, e);
+      }
+      if (key.startsWith(KV_RAW_PREFIX) && !KV_EXCLUDED.some((p) => key.startsWith(p))) {
+        kvQueue.set(key, value);
+        kvSchedulePush(openAlgoConfig());
+      }
+    },
+    async delete(key: string): Promise<boolean> {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        /* nothing to remove */
+      }
+      if (key.startsWith(KV_RAW_PREFIX) && !KV_EXCLUDED.some((p) => key.startsWith(p))) {
+        kvQueue.set(key, ""); // "" clears the record field (see header comment)
+        kvSchedulePush(openAlgoConfig());
+      }
+      return true;
+    },
+  };
+}
+

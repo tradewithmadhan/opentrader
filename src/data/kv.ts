@@ -157,38 +157,101 @@ export function flushKv(): Promise<void> {
   return flushPending();
 }
 
+/** Register a durable KV backend before hydration (tests and shells).
+ *  Production boot instead resolves the persisted data source's provider
+ *  module and calls its `remoteKvBackend()` (see providers/openalgo.ts). */
+export function setRemoteKvBackend(backend: StoreLike | null): void {
+  remoteKvStore = backend;
+}
+let remoteKvStore: StoreLike | null = null;
+
+/** Persisted source choice — mirrors ../sources/index's SOURCE_KEY, kept
+ *  literal here so hydration never imports the provider module graph. */
+const KV_SOURCE_KEY = "ot:data-source";
+
 /**
- * One-time boot hydration. In Tauri: open the store file, mirror it into `mem`,
- * and run the one-time localStorage import. Anywhere else: stay on localStorage.
- * Always resolves (a store failure falls back to localStorage rather than
- * blocking the app from rendering).
+ * One-time boot hydration. Browser shells first try a source-owned cloud KV
+ * (a provider may export `remoteKvBackend`; e.g. OpenAlgo's /api/v1/chart
+ * preference record — see providers/openalgo.ts): the record mirrors into
+ * `mem` and writes push to the broker. Tauri: open the store file instead.
+ * Either way the one-time localStorage import runs, so a store failure —
+ * or no configured backend at all — falls back to localStorage rather than
+ * blocking the app from rendering. Always resolves.
  */
 export async function hydrateKv(): Promise<void> {
-  if (!isTauri()) {
-    useStore = false;
-    return;
-  }
-  try {
-    const { load } = await import("@tauri-apps/plugin-store");
-    // autoSave debounces writes to disk so setItem stays non-blocking.
-    store = (await load(STORE_FILE, { defaults: {}, autoSave: 300 })) as unknown as StoreLike;
-    for (const [k, v] of await store.entries()) {
-      if (typeof v === "string") mem.set(k, v);
+  if (isTauri()) {
+    try {
+      const { load } = await import("@tauri-apps/plugin-store");
+      // autoSave debounces writes to disk so setItem stays non-blocking.
+      store = (await load(STORE_FILE, { defaults: {}, autoSave: 300 })) as unknown as StoreLike;
+      for (const [k, v] of await store.entries()) {
+        if (typeof v === "string") mem.set(k, v);
+      }
+      useStore = true;
+      // Live cross-window sync over an app-global Tauri event (see CHANGE_EVENT).
+      const { emit, listen } = await import("@tauri-apps/api/event");
+      broadcast = (payload) => void emit(CHANGE_EVENT, payload);
+      await listen<ChangePayload>(CHANGE_EVENT, (e) => applyRemoteChange(e.payload));
+      // Don't lose a trailing-debounced write if the window closes mid-wait.
+      if (typeof window !== "undefined") window.addEventListener("beforeunload", flushPending);
+    } catch (e) {
+      console.error("[kv] store hydration failed; falling back to localStorage", e);
+      useStore = false;
+      store = null;
     }
-    useStore = true;
-    await migrateFromLocalStorage();
-    startedEmptyFlag = ![...mem.keys()].some((k) => k !== MIGRATED_SENTINEL);
-    // Live cross-window sync over an app-global Tauri event (see CHANGE_EVENT).
-    const { emit, listen } = await import("@tauri-apps/api/event");
-    broadcast = (payload) => void emit(CHANGE_EVENT, payload);
-    await listen<ChangePayload>(CHANGE_EVENT, (e) => applyRemoteChange(e.payload));
-    // Don't lose a trailing-debounced write if the window closes mid-wait.
+    if (!useStore) return;
+  } else {
+    // Browser shell: the persisted source may own a durable cloud KV. The
+    // intersection of source choice + that provider's credentials decides;
+    // with nothing configured nothing here runs (localStorage as before).
+    try {
+      if (remoteKvStore) {
+        store = remoteKvStore;
+        useStore = true;
+      } else {
+        let name: string | null = null;
+        try {
+          if (typeof localStorage !== "undefined") name = localStorage.getItem(KV_SOURCE_KEY);
+        } catch {
+          name = null;
+        }
+        if (name && /^[a-z][a-z0-9]*$/.test(name)) {
+          // Sources that own a cloud KV — mirrors ../sources/index's REGISTRY
+          // (only providers exporting `remoteKvBackend`; one declarative line
+          // per provider keeps kv free of provider logic). Literal dynamic
+          // imports resolve statically for both esbuild bundles and Vite.
+          const kvSources: Record<
+            string,
+            () => Promise<{ remoteKvBackend?: () => StoreLike | null }>
+          > = {
+            openalgo: () => import("../data/providers/openalgo"),
+          };
+          const load = kvSources[name];
+          if (load) {
+            const mod = await load();
+            const remote = mod.remoteKvBackend?.() ?? null;
+            if (remote) {
+              store = remote;
+              useStore = true;
+            }
+          }
+        }
+      }
+      if (store) {
+        for (const [k, v] of await store.entries()) {
+          if (typeof v === "string") mem.set(k, v);
+        }
+      }
+    } catch (e) {
+      console.error("[kv] cloud-KV hydration failed; falling back to localStorage", e);
+      useStore = false;
+      store = null;
+    }
+    if (!useStore) return;
     if (typeof window !== "undefined") window.addEventListener("beforeunload", flushPending);
-  } catch (e) {
-    console.error("[kv] store hydration failed; falling back to localStorage", e);
-    useStore = false;
-    store = null;
   }
+  await migrateFromLocalStorage();
+  startedEmptyFlag = ![...mem.keys()].some((k) => k !== MIGRATED_SENTINEL);
 }
 
 /** Copy existing `ot:*` localStorage state into the store exactly once, so
