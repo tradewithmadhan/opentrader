@@ -26,13 +26,30 @@ function clean(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
-/** Stored credentials for `providerId`, or null when never saved (or corrupt). */
+/** Stored credentials for `providerId`, or null when never saved (or corrupt).
+ *
+ * Credentials are device-local by design (excluded from cloud-KV sync — see
+ * providers/openalgo.ts), and the kv facade's remote backend mirrors every
+ * write into raw localStorage. Read that mirror FIRST: it is the device
+ * truth and resolves even before hydration completes (a provider's
+ * remoteKvBackend reads its config mid-hydrate, when the in-memory mirror is
+ * still empty — the facade would wrongly fall through to .env there).
+ * Desktop shells keep no raw-localStorage mirror for kv writes, so the read
+ * falls through to the file store there as before. */
 export function getBrokerCreds(providerId: string): BrokerCreds | null {
+  const k = keyOf(providerId);
   let raw: string | null = null;
   try {
-    raw = getItem(keyOf(providerId));
+    if (typeof localStorage !== "undefined") raw = localStorage.getItem(k);
   } catch {
-    return null;
+    /* storage blocked — fall through to the kv store */
+  }
+  if (!raw) {
+    try {
+      raw = getItem(k);
+    } catch {
+      return null;
+    }
   }
   if (!raw) return null;
   try {
