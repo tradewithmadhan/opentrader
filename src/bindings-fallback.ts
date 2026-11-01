@@ -62,6 +62,18 @@ export type UpdateState = any;
 export type AppUpdateStatus = any;
 export type AppUpdateBeforeInstall = any;
 export type BuildInfo = any;
+
+// Settings → Network: the proxy (mirrors opentrader_core::net's serde enums —
+// `getProxySettings` answers direct, `setProxySettings` a Result).
+export type ProxyProtocol = "http" | "socks5";
+export type ProxySettings = {
+  enabled: boolean;
+  protocol: ProxyProtocol;
+  host: string;
+  port: string;
+  username: string;
+  password: string;
+};
 export type FieldInfo = any;
 export type SortOrder = any;
 export type SortSpec = any;
@@ -124,6 +136,8 @@ export const commands: {
   alertEngineClaim(): Promise<boolean>;
   alertEngineSet(rules: EngineRule[], grids: EngineGrid[]): Promise<unknown>;
   alertEngineInfo(): Promise<AlertEngineInfo>;
+  getProxySettings(): Promise<ProxySettings>;
+  setProxySettings(settings: ProxySettings): Promise<CommandResult<void>>;
   [key: string]: any;
 } = new Proxy(
   {},
@@ -141,6 +155,8 @@ export const commands: {
   alertEngineClaim(): Promise<boolean>;
   alertEngineSet(rules: EngineRule[], grids: EngineGrid[]): Promise<unknown>;
   alertEngineInfo(): Promise<AlertEngineInfo>;
+  getProxySettings(): Promise<ProxySettings>;
+  setProxySettings(settings: ProxySettings): Promise<CommandResult<void>>;
   [key: string]: any;
 };
 

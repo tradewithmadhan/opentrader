@@ -35,7 +35,6 @@ import {
 import * as kv from "../../data/kv";
 import { appUpdateStatus, buildInfo, checkForUpdates, installUpdate } from "../../data/app-update";
 import { commands, type BuildInfo, type ProxyProtocol, type ProxySettings } from "../../bindings";
-import { isTauri } from "../shell/window-bridge";
 import { SelectControl } from "./ChartPropertiesDialog";
 import { downloadDir } from "@tauri-apps/api/path";
 import { fundingStatus, type Funding } from "../../data/funding";
