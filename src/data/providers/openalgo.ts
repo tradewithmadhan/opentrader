@@ -387,8 +387,12 @@ export type OaQuote = {
   ltp: number;
   ask?: number;
   bid?: number;
-  /** Absent on some WS ticks — see baselineFor. */
+  /** Absent on some REST answers — see baselineFor. */
   prev_close?: number;
+  /** WS ticks carry the previous day's close under this key (Shoonya and
+   *  others: verified live — no `prev_close` field exists at all). Same
+   *  baseline as REST's `prev_close`; `ltp` is the current last price. */
+  close?: number;
   volume: number;
   oi?: number;
 };
@@ -398,7 +402,7 @@ export function shapeSnapshot(ticker: string, q: OaQuote): Snapshot {
   // in the wrong baseline for the rest of the session).
   const pc: number | undefined = q.prev_close;
   if (pc != null && Number.isFinite(pc) && pc > 0) rememberPrevClose(ticker, pc);
-  const prev = baselineFor(ticker, q.prev_close, q.open);
+  const prev = baselineFor(ticker, q.prev_close ?? q.close, q.open);
   const change =
     Number.isFinite(q.ltp) && prev != null && Number.isFinite(prev) ? q.ltp - prev : 0;
   return {
@@ -1048,7 +1052,7 @@ function onQuoteTick(symbol: string, exchange: string, q: OaQuote): void {
   const now = Math.floor(Date.now() / 1000);
   const pc: number | undefined = q.prev_close;
   if (pc != null && Number.isFinite(pc) && pc > 0) rememberPrevClose(sym, pc);
-  const prev = baselineFor(sym, q.prev_close, q.open);
+  const prev = baselineFor(sym, q.prev_close ?? q.close, q.open);
   const change =
     Number.isFinite(q.ltp) && prev != null && Number.isFinite(prev) ? q.ltp - prev : 0;
   const tick: TradeTick = {
