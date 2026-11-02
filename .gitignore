@@ -67,3 +67,6 @@ BACKLOG.md
 
 # Stale internal notes (describe the pre-gateway data layer)
 docs/PERFORMANCE.md
+
+# Indicator scripts (personal backup — paste into the OakScript editor; never ships)
+indicators/
