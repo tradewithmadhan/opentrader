@@ -70,3 +70,6 @@ docs/PERFORMANCE.md
 
 # Indicator scripts (personal backup — paste into the OakScript editor; never ships)
 indicators/
+
+# Personal agent tooling for OpenCode (skills that load the app's MCP guides)
+.opencode/
