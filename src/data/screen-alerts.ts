@@ -78,8 +78,10 @@ export function startScreenAlerts(): void {
     }
   };
 
+  // Only complete tables: one still waiting on the ticker list or the daily state would make symbols leave the
+  // screens they are in.
   void onScreenerUpdate((u) => {
-    if (!u.error) void evaluate();
+    if (!u.error && u.complete) void evaluate();
   });
 
   createRoot(() => {
@@ -90,7 +92,7 @@ export function startScreenAlerts(): void {
       for (const id of [...last.keys()]) if (!ids.has(id)) last.delete(id);
       if (rules.length && !open) {
         open = true;
-        void screenerOpen(OWNER).then(() => evaluate()).catch((e) => console.warn("[screen-alerts] open failed", e));
+        void screenerOpen(OWNER).then((st) => (st.complete ? evaluate() : undefined)).catch((e) => console.warn("[screen-alerts] open failed", e));
       } else if (!rules.length && open) {
         open = false;
         void screenerClose(OWNER).catch(() => {});
