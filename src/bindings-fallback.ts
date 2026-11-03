@@ -63,6 +63,21 @@ export type AppUpdateStatus = any;
 export type AppUpdateBeforeInstall = any;
 export type BuildInfo = any;
 
+// Settings → Coding agents (mirrors agent::AgentServerStatus): the MCP
+// endpoint an agent connects to. `agentServer*` set commands answer a
+// CommandResult, `agentServerStatus` and the two void commands direct.
+export type AgentServerStatus = {
+  enabled: boolean;
+  /** Listening now. */
+  running: boolean;
+  port: number;
+  token: string;
+  /** The endpoint an agent connects to. */
+  url: string;
+  /** Why it isn't listening (port in use.). */
+  error: string | null;
+};
+
 // Settings → Network: the proxy (mirrors opentrader_core::net's serde enums —
 // `getProxySettings` answers direct, `setProxySettings` a Result).
 export type ProxyProtocol = "http" | "socks5";
@@ -138,6 +153,12 @@ export const commands: {
   alertEngineInfo(): Promise<AlertEngineInfo>;
   getProxySettings(): Promise<ProxySettings>;
   setProxySettings(settings: ProxySettings): Promise<CommandResult<void>>;
+  agentReady(): Promise<void>;
+  agentServerStatus(): Promise<AgentServerStatus>;
+  agentServerSetEnabled(enabled: boolean): Promise<CommandResult<AgentServerStatus>>;
+  agentServerSetPort(port: number): Promise<CommandResult<AgentServerStatus>>;
+  agentServerNewToken(): Promise<CommandResult<AgentServerStatus>>;
+  agentReply(id: number, body: string): Promise<void>;
   [key: string]: any;
 } = new Proxy(
   {},
@@ -157,6 +178,12 @@ export const commands: {
   alertEngineInfo(): Promise<AlertEngineInfo>;
   getProxySettings(): Promise<ProxySettings>;
   setProxySettings(settings: ProxySettings): Promise<CommandResult<void>>;
+  agentReady(): Promise<void>;
+  agentServerStatus(): Promise<AgentServerStatus>;
+  agentServerSetEnabled(enabled: boolean): Promise<CommandResult<AgentServerStatus>>;
+  agentServerSetPort(port: number): Promise<CommandResult<AgentServerStatus>>;
+  agentServerNewToken(): Promise<CommandResult<AgentServerStatus>>;
+  agentReply(id: number, body: string): Promise<void>;
   [key: string]: any;
 };
 
