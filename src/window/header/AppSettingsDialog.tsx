@@ -544,9 +544,9 @@ function ServiceTab() {
           </div>
           <Checkbox
             label="Include my IP address"
-            checked={analyticsIpConsent() === "granted"}
+            checked={analyticsIpConsent() !== "denied"}
             disabled={!analyticsEnabled()}
-            onChange={() => setAnalyticsIpConsent(analyticsIpConsent() !== "granted")}
+            onChange={() => setAnalyticsIpConsent(analyticsIpConsent() === "denied")}
           />
           <div class="app-settings-note">
             <a
