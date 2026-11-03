@@ -9,6 +9,7 @@
  */
 import { createEffect, createRoot } from "solid-js";
 import { alertStore, isScreenRule, type AlertRule } from "./alert-store";
+import type { ScanRow } from "../bindings";
 import { deliverScreenFire } from "./alert-engine";
 import { onScreenerUpdate, screenerClose, screenerFields, screenerOpen, screenerScan } from "./screener-api";
 import { planScreen } from "./screener-query";
@@ -101,7 +102,7 @@ export function startScreenAlerts(): void {
 async function evaluateRule(rule: AlertRule, screen: Screen, has: (f: string) => boolean): Promise<void> {
   const plan = planScreen(screen, has, watchlistTickers(screen.watchlistId));
   const res = await screenerScan({ columns: ["close"], filter: plan.filter, sort: null, range: [0, 100_000], tickers: plan.tickers });
-  const tickers = new Set(res.rows.map((r) => r.s));
+  const tickers = new Set(res.rows.map((r: ScanRow) => r.s) as string[]);
   // A symbol added to the screen's watchlist enters it: only a change of the filters starts again.
   const key = JSON.stringify([rule.op, plan.filter]);
   const before = last.get(rule.id);
@@ -109,6 +110,6 @@ async function evaluateRule(rule: AlertRule, screen: Screen, has: (f: string) =>
   if (!before || before.key !== key) return;
   const { entered, left } = screenChanges(before.tickers, tickers);
   const moved = rule.op === "screen_enter" ? entered : left;
-  const close = new Map(res.rows.map((r) => [r.s, typeof r.d[0] === "number" ? r.d[0] : null]));
+  const close = new Map(res.rows.map((r: ScanRow) => [r.s, typeof r.d[0] === "number" ? r.d[0] : null]) as [string, number | null][]);
   for (const group of screenFires(moved)) deliverScreenFire(rule, group, close.get(group[0]) ?? null);
 }

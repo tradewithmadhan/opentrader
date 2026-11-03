@@ -20,7 +20,7 @@
 import type { Bar } from "oakscriptjs";
 import { MissingSymbolDataError } from "oakscriptjs/script";
 import type { IndicatorRegistryEntry } from "lightweight-charts-indicators";
-import { commands, type Candle } from "../bindings";
+import { commands, type Candle, type ScanRow } from "../bindings";
 import { getBars, isAdjusted } from "./datafeed";
 import { symbolSessions } from "./session";
 import { screenerScan } from "./screener-api";
@@ -66,7 +66,7 @@ export async function indexTickers(code: string): Promise<string[]> {
     range: [0, 10_000],
     tickers: null,
   });
-  return res.rows.map((r) => r.s);
+  return res.rows.map((r: ScanRow) => r.s);
 }
 
 /** Company names of tickers, from the live table's reference list. */
@@ -92,7 +92,7 @@ async function sessionBars(symbols: string[]): Promise<Map<string, SessionBar>> 
     tickers,
   });
   for (const r of res.rows) {
-    const [open, high, low, close, volume, time] = r.d.map((c) => (typeof c === "number" ? c : null));
+    const [open, high, low, close, volume, time] = r.d.map((c: unknown) => (typeof c === "number" ? c : null));
     if (time == null || open == null || close == null) continue;
     out.set(r.s, { time, open, high: high ?? Math.max(open, close), low: low ?? Math.min(open, close), close, volume: volume ?? 0 });
   }

@@ -131,7 +131,7 @@ async function scopeTickers(scope: unknown): Promise<string[] | null> {
     const code = s.index.toUpperCase();
     if (!INDEXES.some(([c]) => c === code)) throw new AgentError(`Index codes: ${INDEXES.map(([c, n]) => `${c} (${n})`).join(", ")}.`);
     const res = await screenerScan({ columns: [], filter: [{ left: "indexes", operation: "in_range", right: [code] }], sort: null, range: [0, 10_000], tickers: null });
-    return res.rows.map((r) => r.s);
+    return res.rows.map((r: ScanRow) => r.s);
   }
   throw new AgentError('"scope": "market", {"watchlist": "<name>"} or {"index": "SPX"}.');
 }
