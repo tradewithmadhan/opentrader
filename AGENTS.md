@@ -46,3 +46,5 @@ A new Tauri command: add it in `src-tauri/src/`, list it in `specta_builder()` (
 - Do not name market-data providers in code, docs or issues.
 - Dates shown to the user: dd/mm/yyyy.
 - Commit only the files you changed (no `git add -A`): other work may be in the tree.
+- Cherry-picking upstream commits: strip the trailing `(#NNN)` PR reference from the message
+  (`git cherry-pick -n`, then re-commit) so the push does not cross-reference and ping the upstream PR.
