@@ -73,7 +73,7 @@ jobs:
         id: refs
         shell: bash
         working-directory: opentrader
-        run: echo "drawing=$(node -p \"require('./package.json').config.drawingRef\")" >> "$GITHUB_OUTPUT"
+        run: echo "drawing=$(node -p "require('./package.json').config.drawingRef")" >> "$GITHUB_OUTPUT"
 
       - name: Checkout drawing core
         uses: actions/checkout@v4
