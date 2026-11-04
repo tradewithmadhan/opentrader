@@ -40,9 +40,11 @@ use symbol_chain::chained_aggs;
 /// The series is split-adjusted; the dividend adjustment is applied on a copy.
 static DAILY_MEM: DayMemo<(String, u32), Vec<Candle>> = OnceLock::new();
 
-/// Daily sessions the dividend factors are computed from: the window of the
-/// daily chart, so the series is the memoised one.
-const DIVIDEND_BASIS_DAYS: u32 = 7560;
+/// Daily sessions the dividend factors are computed from: deep enough for a
+/// decade of scroll-back, bounded so an ADJ pass cannot walk the source's
+/// whole retention in one read (the chart's own window is capped by the
+/// source's historyLimits).
+const DIVIDEND_BASIS_DAYS: u32 = 3650;
 
 /// Settings > Service > "Clear cache": the market-data disk cache and the
 /// in-memory series and memos.

@@ -2155,27 +2155,18 @@ impl DataProvider for OpenAlgoProvider {
         Some(entitlements::fingerprint(&format!("openalgo|{}|{}", self.base, self.key)))
     }
 
-    /// The broker has no plan system: it streams everything it serves. One
-    /// `/intervals` probe (the history half of the capabilities' timeline)
-    /// costs nothing and refreshes the served sizes. Intraday retention is
-    /// shallow (brokers keep ~30 calendar days), so the minute/second floors
-    /// cap scroll-back there; daily runs far deeper (live-probed ≥ 5 years),
-    /// so its floor is a generous bound, not a retention claim — a broker
-    /// serving less just answers empty and the chart latches "history
-    /// exhausted" there.
+    /// The broker has no plan system: it streams everything it serves — no
+    /// entitlement floor. The per-request windowing (30 days intraday, 365
+    /// daily) lives in the frontend's historyLimits, the same caps the browser
+    /// source applies; scroll-back then keeps paging as far back as the server
+    /// answers and latches "history exhausted" on the first empty page.
     async fn probe_history(&self) -> Result<HistoryProbe> {
         let _ = fetch_intervals(&self.base, &self.key).await;
-        let floor_date = |days_back: i64| {
-            Utc::now()
-                .date_naive()
-                .checked_sub_days(Days::new(days_back as u64))
-                .map(fmt_date)
-        };
         Ok(HistoryProbe {
             data_status: DataStatus::Streaming,
             raw_status: "streaming".into(),
             delay_sec: 0,
-            floor: HistoryFloor { second: floor_date(30), minute: floor_date(30), day: floor_date(3650) },
+            floor: HistoryFloor { second: None, minute: None, day: None },
         })
     }
 
