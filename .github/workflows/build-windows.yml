@@ -4,10 +4,11 @@ name: Build Windows check
 # Run manually: Actions tab -> "Build Windows check" -> Run workflow ->
 #   use the branch dropdown to pick the branch to test (e.g. sample-web-clean).
 #
-# Two modes (checkbox when running):
-#   - unchecked (default): fast compile check only (`cargo test --lib
-#     export_bindings`). Proves the Rust backend builds without error.
-#   - checked "Full Tauri build": also builds the SolidJS frontend and the
+# Two switches (checkboxes when running):
+#   - "Run full Rust test suite": default compile check plus the unit tests
+#     (`cargo test --workspace --lib`). Off by default: compile+bindings is
+#     the fast check; the full suite adds a couple of minutes.
+#   - "Full Tauri build": also builds the SolidJS frontend and the
 #     Windows installers, uploading OpenTrader_*_setup.exe (+ .msi) as a
 #     7-day artifact. No release is created — use release.yml for those.
 on:
@@ -15,6 +16,10 @@ on:
     inputs:
       build_exe:
         description: "Full Tauri build + upload installer exe"
+        type: boolean
+        default: false
+      run_tests:
+        description: "Run full Rust test suite (cargo test --workspace --lib)"
         type: boolean
         default: false
 
@@ -39,6 +44,14 @@ jobs:
       - name: Check Rust build + export bindings
         working-directory: src-tauri
         run: cargo test --lib export_bindings
+
+      # Optional (checkbox): execute the unit tests of every crate, not just
+      # compile them. ci.yml does this automatically on main; here it covers
+      # feature branches without waiting for the merge.
+      - name: Run full Rust test suite
+        if: inputs.run_tests
+        working-directory: src-tauri
+        run: cargo test --workspace --lib
 
   build-exe:
     if: inputs.build_exe
