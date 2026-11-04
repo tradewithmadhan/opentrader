@@ -18,9 +18,9 @@
 pub mod capabilities;
 pub mod entitlements;
 mod gateway;
-mod sample_provider;
+mod openalgo;
 pub use gateway::GatewayProvider;
-pub use sample_provider::SampleProvider;
+pub use openalgo::OpenAlgoProvider;
 
 use capabilities::{DataStatus, HistoryProbe, ProviderCapabilities, StreamCaps};
 use crate::data::session::SymbolSession;
@@ -198,7 +198,7 @@ pub fn build() -> Provider {
     let name = std::env::var("DATA_PROVIDER").unwrap_or_default();
     match name.trim() {
         "" | DEFAULT_PROVIDER => Arc::new(GatewayProvider),
-        "sample" => Arc::new(SampleProvider),
+        "openalgo" => Arc::new(OpenAlgoProvider::new()),
         other => {
             eprintln!("[provider] DATA_PROVIDER={other:?} is not a provider of this version; using {DEFAULT_PROVIDER}");
             Arc::new(GatewayProvider)
