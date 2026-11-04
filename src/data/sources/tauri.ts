@@ -49,15 +49,23 @@ const US_SEEDS: SourceSeeds = {
   ],
 };
 
+/** The backend History envelope of `get_daily_history` / `get_minute_history`:
+ *  bars plus the `partial` archive flag. */
+type History = { bars: Candle[]; partial: boolean };
+
 export const tauriSource: DataSource = {
   name: "massive",
 
   // ── History ────────────────────────────────────────────────────
   async dailyAggs(symbol: string, days: number, adjusted: boolean): Promise<Candle[]> {
-    return unwrap(await commands.getDailyHistory(symbol, days, adjusted));
+    // `get_daily_history` answers the History envelope { bars, partial }, not a
+    // bare array — returning it whole broke every chart (`t.filter is not a
+    // function`: the session filter ran on the envelope). The `partial` flag is
+    // not plumbed into BarsResult yet; plumb it when it is.
+    return unwrap((await commands.getDailyHistory(symbol, days, adjusted)) as { status: "ok"; data: History }).bars;
   },
   async minuteAggs(symbol: string, days: number, intervalMin: number, adjusted: boolean): Promise<Candle[]> {
-    return unwrap(await commands.getMinuteHistory(symbol, days, intervalMin, adjusted));
+    return unwrap((await commands.getMinuteHistory(symbol, days, intervalMin, adjusted)) as { status: "ok"; data: History }).bars;
   },
   async secondAggs(symbol: string, mult: number, days: number, adjusted: boolean): Promise<Candle[]> {
     return invoke<Candle[]>("get_second_history", { symbol: symbol, mult, days, adjusted });
