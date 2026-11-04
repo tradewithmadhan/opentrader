@@ -10,20 +10,20 @@
  * environment (`.env`, loaded by the host at startup):
  *
  *   OPENALGO_HOST  the server base ("http://127.0.0.1:5000")
- *   OPENALGO_WS    its live stream ("ws://127.0.0.1:5000/ws") — phase 2
+ *   OPENALGO_WS    its live stream ("ws://127.0.0.1:5000/ws") — the quote
+ *                  source when set (see below)
  *   OPENALGO_KEY   the API key
  *
  * The key is held in the struct, sent only inside the request payload's
  * `apikey` field (like the source does) and never printed or logged.
  *
- * Live data (phase 1): a REST snapshot poller, the direct sibling of
- * `quote_poll` — it polls the subscribed symbols' `/quotes` and re-emits the
- * identical `TradeTick` / `ChartAggregate` events, so the watchlist, alerts
- * and the chart's minute/day bars light up with no frontend change. The
- * broker's own WebSocket (its `mode: "Quote"` ticks with the same minute
- * buckets and synthetic second bars the source maintains) is the phase-2
- * transport; until it lands the seconds charts live off their REST tail
- * refresh and the second ceilings of `fetch_intervals` serve their history.
+ * Live data: the broker WebSocket when `OPENALGO_WS` is set — the web
+ * source's own transport (`authenticate`, `mode: "Quote"` subscribe, per-tick
+ * minute buckets and one synthetic second bar each, exponential reconnect)
+ * and the SOLE quote source while connected, like the source. Without the WS
+ * (or without the key to authenticate it), phase-1's REST poller — the direct
+ * sibling of `quote_poll` — serves the same `TradeTick` / `ChartAggregate`
+ * events on a 5 s cadence instead.
  *
  * Select with `DATA_PROVIDER=openalgo`.
  */
@@ -35,19 +35,23 @@ use super::entitlements;
 use super::{DataProvider, HistoryProvider, RealtimeProvider, ReferenceProvider};
 use crate::data::gateway::user_agent;
 use crate::data::market_rest::icon_proxy_url;
-use crate::data::market_stream::{ChartAggregate, SubscribeMsg, SubscriptionState, TradeTick, WsHandle};
+use crate::data::market_stream::{
+    ChartAggregate, SecondAggregate, SubscribeMsg, SubscriptionState, TradeTick, WsHandle,
+};
 use crate::data::session::{Subsession, SymbolSession};
 use crate::data::symbol::SymbolRef;
 use crate::data::types::{
     Candle, DividendEvent, Snapshot, SplitEvent, SymbolSearchResult, TickerInfo,
 };
 use crate::host::{Event, HostRef};
-use crate::net::SharedClient;
+use crate::net::{self, SharedClient};
 use anyhow::{anyhow, bail, Context as _, Result};
 use chrono::{Datelike, Days, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use percent_encoding::percent_decode_str;
 use serde::Deserialize;
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -1195,9 +1199,9 @@ fn shape_snapshot(symbol: &str, q: &OaQuote) -> Snapshot {
 // every watchlist and charted symbol one POST each — a local server, so
 // the cost is beside the point.
 
-/// How often to poll (a UI-freshness choice; `quote_poll` uses the same). The
-/// cadence is NOT the tick stream the source's page keeps — the WebSocket
-/// (phase 2) replaces small-grain tick shapes.
+/// How often the no-WS fallback polls (a UI-freshness choice; `quote_poll`
+/// uses the same). With `OPENALGO_WS` set, the WebSocket transport replaces
+/// this cadence with push ticks (and the poller never runs).
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Shortest wait between two immediate polls asked by subscription changes.
@@ -1257,9 +1261,17 @@ impl RealtimeProvider for OpenAlgoProvider {
         // `rt::spawn`, not `tokio::spawn`: called from the app's setup hook,
         // outside any ambient Tokio runtime context (same note as
         // `market_stream::spawn_mode`).
-        let (base, key) = (self.base.clone(), self.key.clone());
+        let (base, ws, key) = (self.base.clone(), self.ws.clone(), self.key.clone());
         crate::rt::spawn(async move {
-            run_poller(host, base, key, rx).await;
+            // With the WS configured it is the quote source (the web source
+            // runs no REST poller next to a live socket). "WS set, key empty"
+            // routes to the poller, whose per-request require_key error is
+            // loud and precise.
+            if ws.is_empty() || key.is_empty() {
+                run_poller(host, base, key, rx).await;
+            } else {
+                run_ws(host, ws, key, rx).await;
+            }
         });
         WsHandle { tx }
     }
@@ -1450,6 +1462,361 @@ impl Poller {
         }
         if let Some(e) = first_error {
             eprintln!("[openalgo] quote poll: first failure was {e}");
+        }
+    }
+}
+
+// ── WebSocket transport ──────────────────────────────────────────────────────
+// The broker's own live stream (the web source's `ensureWs`), used when
+// `OPENALGO_WS` is set: `authenticate` by key as the first frame, a whole-set
+// `mode: "Quote"` subscribe, per-tick attribution through the same identity
+// rules, minute buckets and one synthetic second bar for charted symbols,
+// exponential reconnect. While connected this is the SOLE quote source — the
+// REST poller above does not run (exactly like the source keeps no REST poll
+// next to a live socket).
+
+const WS_BACKOFF_START: Duration = Duration::from_secs(1);
+const WS_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Ping cadence: flushes the auto-queued pong and keeps quiet sessions from
+/// being dropped by middleboxes.
+const WS_PING_EVERY: Duration = Duration::from_secs(20);
+
+/// Why a WS session ended: the actor either quits (app shutting down) or
+/// reconnects (socket closed by either side, or a proxy change).
+enum WsExit {
+    ShuttingDown,
+    Reconnect,
+}
+
+async fn run_ws(host: HostRef, ws_url: String, key: String, mut rx: mpsc::Receiver<SubscribeMsg>) {
+    let mut feed = WsFeed { host, ws_url, key, state: SubscriptionState::default(), last: HashMap::new() };
+    let mut backoff = WS_BACKOFF_START;
+    let mut proxy_changes = net::proxy_changes();
+    loop {
+        // Subscription updates queued while we were down are applied by the
+        // session's first rx pass (and replayed + resubscribed there).
+        let session = match net::connect_ws(&feed.ws_url).await {
+            Ok(ws) => feed.session(ws, &mut rx, &mut proxy_changes).await,
+            Err(e) => Err(anyhow!("connect: {e:#}")),
+        };
+        match session {
+            Ok(WsExit::ShuttingDown) => return,
+            Ok(WsExit::Reconnect) => {
+                eprintln!("[openalgo] ws closed; reconnecting");
+                backoff = WS_BACKOFF_START;
+            }
+            Err(e) => {
+                eprintln!("[openalgo] ws: {e}; reconnecting in {}s", backoff.as_secs());
+                // The wait keeps draining subscription updates so the desired
+                // state is current when we connect again.
+                if ws_wait_drain(&mut rx, backoff, &mut feed.state).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(WS_BACKOFF_MAX);
+            }
+        }
+    }
+}
+
+/// The backoff wait with subscription updates still draining. `true` when the
+/// mpsc closed (app shutting down) so the caller can exit.
+async fn ws_wait_drain(
+    rx: &mut mpsc::Receiver<SubscribeMsg>,
+    wait: Duration,
+    state: &mut SubscriptionState,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => return false,
+            msg = rx.recv() => {
+                let Some(msg) = msg else { return true };
+                state.apply(msg);
+            }
+        }
+    }
+}
+
+struct WsFeed {
+    host: HostRef,
+    ws_url: String,
+    key: String,
+    /// Desired state, declared per owner by the frontend via the realtime
+    /// commands (same shapes the REST poller applies).
+    state: SubscriptionState,
+    /// Last quote per resolved symbol: what a fresh subscriber is replayed,
+    /// the day-volume chain, and the forming minute bucket.
+    last: HashMap<String, LastQuote>,
+}
+
+/// Tick identity for a broker echo: the subscribed name it belongs to, or
+/// None when no subscription matches (stale/foreign echoes are dropped). The
+/// web source's `resolveTickIdentity`, verbatim: an explicitly qualified echo
+/// wins when subscribed; the echoed exchange + ticker wins when subscribed; a
+/// lone subscribed listing for the ticker wins (the common single-venue case
+/// with bare echoes); a bare subscription wins for a bare echo. An ambiguous
+/// bare echo (two listings watched) resolves to nothing rather than
+/// attributing one listing's ticks to the other.
+fn resolve_tick_identity(
+    echo_symbol: &str,
+    echo_exchange: &str,
+    subscribed: &HashSet<String>,
+) -> Option<String> {
+    let subs: HashSet<String> = subscribed
+        .iter()
+        .map(|s| s.split(',').next().unwrap_or("").trim().to_uppercase())
+        .collect();
+    if subs.is_empty() {
+        return None;
+    }
+    let head = echo_symbol.split(',').next().unwrap_or("").trim().to_uppercase();
+    if head.contains(':') && subs.contains(&head) {
+        return Some(head);
+    }
+    let (_, bare) = split_open_algo(&head);
+    if bare.is_empty() {
+        return None;
+    }
+    let ex = echo_exchange.trim().to_uppercase();
+    if !ex.is_empty() {
+        let qualified = format!("{ex}:{bare}");
+        if subs.contains(&qualified) {
+            return Some(qualified);
+        }
+    }
+    let singles: Vec<&String> = subs.iter().filter(|s| split_open_algo(s).1 == bare).collect();
+    if singles.len() == 1 {
+        return Some(singles[0].clone());
+    }
+    if subs.contains(&bare) {
+        return Some(bare);
+    }
+    None
+}
+
+/// The quote of one text frame, attributed to its subscribed listing: only
+/// `{"type":"market_data","symbol","exchange","data":{quote}}` carries one.
+/// Every other frame (auth acks, subscribe replies, errors) is ignored.
+fn ws_frame_quote(txt: &str, subscribed: &HashSet<String>) -> Option<(String, OaQuote)> {
+    let v = serde_json::from_str::<serde_json::Value>(txt).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("market_data") {
+        return None;
+    }
+    let q: OaQuote = serde_json::from_value(v.get("data")?.clone()).ok()?;
+    let symbol = v.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+    let exchange = v.get("exchange").and_then(|s| s.as_str()).unwrap_or("");
+    Some((resolve_tick_identity(symbol, exchange, subscribed)?, q))
+}
+
+impl WsFeed {
+    /// The subscribed full names, normalized (head of a comma list,
+    /// uppercased) — tick identity resolves against this set.
+    fn subscribed(&self) -> HashSet<String> {
+        self.state
+            .all_symbols()
+            .into_iter()
+            .map(|s| s.split(',').next().unwrap_or("").trim().to_uppercase())
+            .collect()
+    }
+
+    /// One connected session: auth by key, whole-set subscribe, then the
+    /// read/write loop. `Ok(ShuttingDown)` on the app going down, `Ok(Reconnect)`
+    /// on a socket close or proxy change; an Err puts the backoff in play.
+    async fn session(
+        &mut self,
+        ws: net::WsStream,
+        rx: &mut mpsc::Receiver<SubscribeMsg>,
+        proxy_changes: &mut tokio::sync::watch::Receiver<u64>,
+    ) -> Result<WsExit> {
+        let (mut write, mut read) = ws.split();
+        // The web source's onopen: authenticate, then the subscribe set — no
+        // auth answer is awaited (a bad key shows up as a close and backs off).
+        let auth = serde_json::json!({ "action": "authenticate", "api_key": require_key(&self.key)? });
+        write.send(Message::Text(auth.to_string())).await.context("ws auth send failed")?;
+        self.resync(&mut write).await?;
+        eprintln!("[openalgo] ws connected; {} symbols subscribed", self.subscribed().len());
+
+        let mut pings = interval(WS_PING_EVERY);
+        pings.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = pings.tick() => {
+                    // Best effort: a failed ping surfaces via the read side.
+                    let _ = write.send(Message::Ping(Vec::new())).await;
+                }
+                sub = rx.recv() => {
+                    let Some(sub) = sub else { return Ok(WsExit::ShuttingDown) };
+                    // Every update already queued is part of the same change
+                    // (the burst-drain here is the web source's 300 ms
+                    // resync debounce): replay to the owner, apply, then the
+                    // whole-set resubscribe.
+                    let mut burst = vec![sub];
+                    while let Ok(m) = rx.try_recv() {
+                        burst.push(m);
+                    }
+                    for m in &burst {
+                        self.replay(m);
+                    }
+                    for m in burst {
+                        self.state.apply(m);
+                    }
+                    self.resync(&mut write).await?;
+                }
+                _ = proxy_changes.changed() => return Ok(WsExit::Reconnect),
+                frame = read.next() => {
+                    let Some(frame) = frame else { return Ok(WsExit::Reconnect) };
+                    let frame = frame.context("ws read error")?;
+                    match frame {
+                        Message::Text(txt) => {
+                            if let Some((sym, q)) = ws_frame_quote(&txt, &self.subscribed()) {
+                                self.absorb_tick(&sym, &q);
+                            }
+                        }
+                        Message::Ping(payload) => {
+                            let _ = write.send(Message::Pong(payload)).await;
+                        }
+                        Message::Close(_) => return Ok(WsExit::Reconnect),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whole-set resubscribe — the broker protocol has no incremental
+    /// add/drop: `unsubscribe_all`, then `subscribe` with the current set
+    /// (the web source's `sendSubscribe`; venue halves required).
+    async fn resync<W>(&mut self, write: &mut W) -> Result<()>
+    where
+        W: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    {
+        let unsub = serde_json::json!({ "action": "unsubscribe_all" });
+        write.send(Message::Text(unsub.to_string())).await.context("ws send failed")?;
+        let syms: Vec<serde_json::Value> = self
+            .subscribed()
+            .into_iter()
+            .map(|s| {
+                let (exchange, ticker) = split_open_algo(&s);
+                serde_json::json!({ "exchange": exchange, "symbol": ticker })
+            })
+            .collect();
+        if !syms.is_empty() {
+            let sub = serde_json::json!({ "action": "subscribe", "mode": "Quote", "symbols": syms });
+            write.send(Message::Text(sub.to_string())).await.context("ws send failed")?;
+        }
+        Ok(())
+    }
+
+    /// The last values of the symbols `msg` subscribes, to that owner only,
+    /// for the symbols already seen (the others come with the next ticks).
+    fn replay(&self, msg: &SubscribeMsg) {
+        match msg {
+            SubscribeMsg::SetChart { owner, symbol: Some(symbol) } => {
+                if let Some(st) = self.last.get(symbol) {
+                    if let Some(e) = tick_of(symbol, &st.quote) {
+                        let _ = e.emit_to(&self.host, owner);
+                    }
+                    if let Some(e) = chart_bar_of(symbol, st) {
+                        let _ = e.emit_to(&self.host, owner);
+                    }
+                }
+            }
+            SubscribeMsg::SetWatchlist { owner, symbols } => {
+                for symbol in symbols {
+                    if let Some(st) = self.last.get(symbol.as_str()) {
+                        if let Some(e) = tick_of(symbol, &st.quote) {
+                            let _ = e.emit_to(&self.host, owner);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// One live tick absorbed: the alert sample and the watchlist tick for
+    /// every subscribed symbol; the minute bucket, the day bar and a
+    /// synthetic second bar for charted symbols only. No "moved" gate here —
+    /// that was the poller's after-hours dedup; a socket push IS an event,
+    /// and the source emits every market_data message.
+    fn absorb_tick(&mut self, sym: &str, q: &OaQuote) {
+        remember_prev_close(sym, q.prev_close);
+        // The host's alert rules read every quote (the rules read the day
+        // side; there is no minute bar here). The tick broadcasts when it
+        // carries a price.
+        self.host.on_quote(sym, q.ltp.unwrap_or(0.0), None);
+        if let Some(tick) = tick_of(sym, q) {
+            let _ = tick.emit(&self.host);
+        }
+
+        // Day volume carried through volume-less ticks (the source's
+        // lastDayVol fallback).
+        let day_vol =
+            q.volume.filter(|v| v.is_finite()).or_else(|| self.last.get(sym).and_then(|st| st.day_vol));
+        let charted = self.state.is_chart_symbol(sym);
+        let st = match self.last.entry(sym.to_string()) {
+            Occupied(mut e) => {
+                e.get_mut().quote = q.clone();
+                e.into_mut()
+            }
+            Vacant(e) => e.insert(LastQuote::new(q)),
+        };
+        st.day_vol = day_vol;
+
+        // Chart-only work below: the minute bucket and synthetic second bars
+        // exist to paint chart bars. Watch-only symbols skip all of it — they
+        // only need the day-side quote numbers, never bucket volumes (the
+        // source's isCharted gate).
+        if !charted {
+            return;
+        }
+        if let Some(ltp) = q.ltp.filter(|v| v.is_finite() && *v > 0.0) {
+            let now = Utc::now().timestamp() as f64;
+            let start = (now / 60.0).floor() * 60.0;
+            let rolled = st.formed.as_ref().map_or(true, |f| f.start != start);
+            if rolled {
+                st.formed = Some(FormingBar { start, open: ltp, high: ltp, low: ltp });
+            }
+            let volume = track_bucket_volume(st, rolled, day_vol, q.volume);
+            let (open, high, low) = {
+                let f = st.formed.as_mut().unwrap();
+                f.high = f.high.max(ltp);
+                f.low = f.low.min(ltp);
+                (f.open, f.high, f.low)
+            };
+            let day = Candle {
+                time: now,
+                // 0-free day side: a missing open/high/low falls back to the
+                // bucket's extremes rather than printing a 0 on the daily axis.
+                open: q.open.filter(|v| *v > 0.0).unwrap_or(open),
+                high: q.high.filter(|v| *v > 0.0).unwrap_or(high),
+                low: q.low.filter(|v| *v > 0.0).unwrap_or(low),
+                close: ltp,
+                volume: day_vol.unwrap_or(0.0),
+            };
+            let agg = ChartAggregate {
+                symbol: sym.to_string(),
+                time: start,
+                open,
+                high,
+                low,
+                close: ltp,
+                volume,
+                day: Some(day),
+            };
+            let _ = agg.emit(&self.host);
+            // No 1s channel on this broker: one synthetic second bar per
+            // quote tick. Volume unknown per tick — 0 adds nothing downstream.
+            let sec = SecondAggregate {
+                symbol: sym.to_string(),
+                time: now,
+                open: ltp,
+                high: ltp,
+                low: ltp,
+                close: ltp,
+                volume: 0.0,
+            };
+            let _ = sec.emit(&self.host);
         }
     }
 }
@@ -1944,6 +2311,48 @@ mod tests {
         assert_eq!(map_search_rows(empty_kind, Some("EQ")).len(), 1);
         // Unknown codes pass everything.
         assert_eq!(map_search_rows(rows, Some("ZZ")).len(), 3);
+    }
+
+    #[test]
+    fn ws_tick_identity_resolves_like_the_source() {
+        let set = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<HashSet<String>>();
+        // Qualified echo: the subscribed name wins outright.
+        let two = set(&["NSE:SBIN", "BSE:SBIN"]);
+        assert_eq!(resolve_tick_identity("NSE:SBIN", "NSE", &two).as_deref(), Some("NSE:SBIN"));
+        // Bare echo with a known exchange: exchange + ticker.
+        assert_eq!(resolve_tick_identity("SBIN", "BSE", &two).as_deref(), Some("BSE:SBIN"));
+        // Lone subscribed listing: the common single-venue case with bare echoes.
+        let one = set(&["NSE:SBIN"]);
+        assert_eq!(resolve_tick_identity("SBIN", "", &one).as_deref(), Some("NSE:SBIN"));
+        // Ambiguous bare echo: nothing (no wrong attribution).
+        assert_eq!(resolve_tick_identity("SBIN", "", &two), None);
+        // Bare subscription for a bare echo.
+        let bare = set(&["SBIN"]);
+        assert_eq!(resolve_tick_identity("SBIN", "NSE", &bare).as_deref(), Some("SBIN"));
+        // Unsubscribed echoes drop; so do echoes with no subscriptions at all.
+        assert_eq!(resolve_tick_identity("NSE:TCS", "NSE", &bare), None);
+        assert_eq!(resolve_tick_identity("NSE:SBIN", "NSE", &HashSet::new()), None);
+    }
+
+    #[test]
+    fn ws_frames_read_market_data_quotes() {
+        let subs = ["NSE:SBIN".to_string()].into_iter().collect::<HashSet<String>>();
+        let txt = serde_json::json!({
+            "type": "market_data", "symbol": "SBIN", "exchange": "NSE",
+            "data": { "ltp": 800.5, "prev_close": 795.0, "open": 796.0, "high": 801.0, "low": 794.0, "volume": 12345.0 }
+        })
+        .to_string();
+        let (sym, q) = ws_frame_quote(&txt, &subs).expect("the quote is read");
+        assert_eq!(sym, "NSE:SBIN");
+        assert_eq!(q.ltp, Some(800.5));
+        assert_eq!(q.volume, Some(12345.0));
+        // Auth acks and subscribe replies are not quotes.
+        assert!(ws_frame_quote(r#"{"type":"auth","status":"ok"}"#, &subs).is_none());
+        assert!(ws_frame_quote(r#"{"type":"subscribe_status","status":"success"}"#, &subs).is_none());
+        // A tick with malformed data is dropped, not fabricated.
+        assert!(
+            ws_frame_quote(r#"{"type":"market_data","symbol":"SBIN","exchange":"NSE","data":{"ltp":"x"}}"#, &subs).is_none()
+        );
     }
 
     #[test]
