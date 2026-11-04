@@ -104,6 +104,30 @@ export type ScreenerUpdate = any;
 export type ScreenerProgress = { receivedBytes: number; totalBytes: number | null; downloading: string[] };
 export type FundingLinks = any;
 
+// AI assistant (mirrors src-tauri/src/assistant.rs): OpenAI-compatible models
+// the user adds, the one selected, and the effort. Keys live in the OS store.
+export type AssistantModel = {
+  id: string;
+  label: string;
+  description: string;
+  baseUrl: string;
+  model: string;
+  hasKey: boolean;
+};
+export type AssistantConfig = {
+  models: AssistantModel[];
+  selected: string | null;
+  effort: string | null;
+};
+export type AssistantModelInput = {
+  id: string | null;
+  label: string;
+  description: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string | null;
+};
+
 // ── Runtime stubs (reject / no-op outside the Tauri shell) ──────────────────
 
 function missing(name: string): () => Promise<never> {
@@ -160,6 +184,13 @@ export const commands: {
   agentServerSetPort(port: number): Promise<CommandResult<AgentServerStatus>>;
   agentServerNewToken(): Promise<CommandResult<AgentServerStatus>>;
   agentReply(id: number, body: string): Promise<void>;
+  assistantConfig(): Promise<AssistantConfig>;
+  assistantSaveModel(input: AssistantModelInput): Promise<CommandResult<AssistantConfig>>;
+  assistantRemoveModel(id: string): Promise<CommandResult<AssistantConfig>>;
+  assistantSelect(id: string | null, effort: string | null): Promise<CommandResult<AssistantConfig>>;
+  assistantListModels(baseUrl: string, key: string | null, id: string | null): Promise<CommandResult<string[]>>;
+  assistantChat(id: string, request: number, body: string, onEvent: any): Promise<CommandResult<void>>;
+  assistantCancel(request: number): Promise<void>;
   [key: string]: any;
 } = new Proxy(
   {},
@@ -185,6 +216,13 @@ export const commands: {
   agentServerSetPort(port: number): Promise<CommandResult<AgentServerStatus>>;
   agentServerNewToken(): Promise<CommandResult<AgentServerStatus>>;
   agentReply(id: number, body: string): Promise<void>;
+  assistantConfig(): Promise<AssistantConfig>;
+  assistantSaveModel(input: AssistantModelInput): Promise<CommandResult<AssistantConfig>>;
+  assistantRemoveModel(id: string): Promise<CommandResult<AssistantConfig>>;
+  assistantSelect(id: string | null, effort: string | null): Promise<CommandResult<AssistantConfig>>;
+  assistantListModels(baseUrl: string, key: string | null, id: string | null): Promise<CommandResult<string[]>>;
+  assistantChat(id: string, request: number, body: string, onEvent: any): Promise<CommandResult<void>>;
+  assistantCancel(request: number): Promise<void>;
   [key: string]: any;
 };
 
