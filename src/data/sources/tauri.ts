@@ -163,8 +163,12 @@ export const tauriSource: DataSource = {
     return US_SEEDS;
   },
   historyLimits(): HistoryLimits | null {
-    // Unbounded: the backend clamps to its entitlement floor itself.
-    return null;
+    // The same caps as the browser OpenAlgo source: initial loads and
+    // scroll-back page spans stay inside the source's shallow windows. A
+    // non-null day limit also keeps daily scroll-back paging alive (an
+    // unbounded one latches "exhausted" after the initial load); total depth
+    // is still bounded by the backend's floor.
+    return { second: 30, minute: 30, day: 365 };
   },
 };
 

@@ -2157,12 +2157,12 @@ impl DataProvider for OpenAlgoProvider {
 
     /// The broker has no plan system: it streams everything it serves. One
     /// `/intervals` probe (the history half of the capabilities' timeline)
-    /// costs nothing and refreshes the served sizes. The floors only cap the
-    /// app's scroll-back, they are not a retention claim: this source serves
-    /// well past them (live-probed: daily ≥ 5 years, minutes ≥ 100 days), so
-    /// they are generous upper bounds — a broker serving less just answers
-    /// empty and the chart latches "history exhausted" there. Seconds stay
-    /// shallow (30 days): brokers do not retain second bars.
+    /// costs nothing and refreshes the served sizes. Intraday retention is
+    /// shallow (brokers keep ~30 calendar days), so the minute/second floors
+    /// cap scroll-back there; daily runs far deeper (live-probed ≥ 5 years),
+    /// so its floor is a generous bound, not a retention claim — a broker
+    /// serving less just answers empty and the chart latches "history
+    /// exhausted" there.
     async fn probe_history(&self) -> Result<HistoryProbe> {
         let _ = fetch_intervals(&self.base, &self.key).await;
         let floor_date = |days_back: i64| {
@@ -2175,7 +2175,7 @@ impl DataProvider for OpenAlgoProvider {
             data_status: DataStatus::Streaming,
             raw_status: "streaming".into(),
             delay_sec: 0,
-            floor: HistoryFloor { second: floor_date(30), minute: floor_date(365), day: floor_date(3650) },
+            floor: HistoryFloor { second: floor_date(30), minute: floor_date(30), day: floor_date(3650) },
         })
     }
 
