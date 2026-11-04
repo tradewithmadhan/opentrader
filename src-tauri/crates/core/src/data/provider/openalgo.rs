@@ -50,6 +50,8 @@ use percent_encoding::percent_decode_str;
 use serde::Deserialize;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -475,39 +477,43 @@ async fn history_chunk(
 /// ranges) narrows the window in halves until it serves. A persistently
 /// failing range leaves a gap with a warning instead of failing the page —
 /// partial data beats an empty chart. Auth/4xx/rate-limiting never enter here.
-async fn history_window(
-    base: &str,
-    key: &str,
-    ticker: &str,
-    exchange: &str,
-    oa_interval: &str,
+fn history_window<'a>(
+    base: &'a str,
+    key: &'a str,
+    ticker: &'a str,
+    exchange: &'a str,
+    oa_interval: &'a str,
     from: NaiveDate,
     to: NaiveDate,
     depth: u32,
-) -> Result<Vec<OaBar>> {
-    let (from_s, to_s) = (fmt_date(from), fmt_date(to));
-    if depth == 0 {
-        eprintln!("[openalgo] history {exchange}:{ticker} {oa_interval} {from_s}..{to_s}");
-    }
-    match history_chunk(base, key, ticker, exchange, oa_interval, &from_s, &to_s).await {
-        Ok(bars) => Ok(bars),
-        Err(e) if is_http_5xx(&e) => {
-            if from >= to || depth >= 5 {
-                eprintln!("[openalgo] history {from_s}..{to_s} failing (HTTP 5xx); leaving a gap");
-                return Ok(Vec::new());
-            }
-            let mid = from + chrono::Duration::days((to - from).num_days() / 2);
-            let next = mid.checked_add_days(Days::new(1)).unwrap_or(to);
-            let (left, right) = tokio::join!(
-                history_window(base, key, ticker, exchange, oa_interval, from, mid, depth + 1),
-                history_window(base, key, ticker, exchange, oa_interval, next, to, depth + 1)
-            );
-            let mut out = left?;
-            out.extend(right?);
-            Ok(out)
+) -> Pin<Box<dyn Future<Output = Result<Vec<OaBar>>> + Send + 'a>> {
+    // The half-split is naturally recursive and a plain recursive async fn has
+    // an infinitely-sized future (E0733); the dyn box is the indirection.
+    Box::pin(async move {
+        let (from_s, to_s) = (fmt_date(from), fmt_date(to));
+        if depth == 0 {
+            eprintln!("[openalgo] history {exchange}:{ticker} {oa_interval} {from_s}..{to_s}");
         }
-        Err(e) => Err(e),
-    }
+        match history_chunk(base, key, ticker, exchange, oa_interval, &from_s, &to_s).await {
+            Ok(bars) => Ok(bars),
+            Err(e) if is_http_5xx(&e) => {
+                if from >= to || depth >= 5 {
+                    eprintln!("[openalgo] history {from_s}..{to_s} failing (HTTP 5xx); leaving a gap");
+                    return Ok(Vec::new());
+                }
+                let mid = from + chrono::Duration::days((to - from).num_days() / 2);
+                let next = mid.checked_add_days(Days::new(1)).unwrap_or(to);
+                let (left, right) = tokio::join!(
+                    history_window(base, key, ticker, exchange, oa_interval, from, mid, depth + 1),
+                    history_window(base, key, ticker, exchange, oa_interval, next, to, depth + 1)
+                );
+                let mut out = left?;
+                out.extend(right?);
+                Ok(out)
+            }
+            Err(e) => Err(e),
+        }
+    })
 }
 
 /// History of one interval over a date range, chunked and sorted. Range caps
@@ -905,7 +911,9 @@ fn build_exchange_session(
     }
     let corrections = specials
         .iter()
-        .map(|(spec, days)| format!("{spec}:{}", days.join(",")))
+        .map(|(spec, days)| {
+            format!("{spec}:{}", days.iter().map(String::as_str).collect::<Vec<_>>().join(","))
+        })
         .collect::<Vec<_>>()
         .join(";");
     let mut subsessions = vec![Subsession::new("regular", "Regular Trading Hours", &rth)];
