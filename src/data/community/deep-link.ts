@@ -26,7 +26,7 @@ export async function startDeepLinks(openPanel: () => void): Promise<() => void>
       requestOpenPost(id, { openChart: true });
     }
   };
-  const stop = await events.deepLinkOpened.listen((e) => {
+  const stop = await events.deepLinkOpened.listen((e: { payload: { window: string } }) => {
     if (e.payload.window === label) void take();
   });
   if (label === "main") void take();

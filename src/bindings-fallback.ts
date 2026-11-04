@@ -101,6 +101,7 @@ export type ScanRow = any;
 export type ScanResult = any;
 export type ScreenerStatus = any;
 export type ScreenerUpdate = any;
+export type ScreenerProgress = { receivedBytes: number; totalBytes: number | null; downloading: string[] };
 export type FundingLinks = any;
 
 // ── Runtime stubs (reject / no-op outside the Tauri shell) ──────────────────
