@@ -410,7 +410,7 @@ export function createScreenerTools(): AgentTool[] {
         const known = new Set(cat.filter((f) => f.available).map((f) => f.id));
         const plan = planScreen(screen, (f) => known.has(f), await scopeTickers(watchlistId ? { watchlist: scope!.watchlist } : null));
         const res = await screenerScan({ columns: plan.fields, filter: plan.filter, sort: plan.sort, range: [0, 10], tickers: plan.tickers });
-        return { saved: name, replaced: !!same, total: res.totalCount, first: res.rows.map((r) => r.s) };
+        return { saved: name, replaced: !!same, total: res.totalCount, first: res.rows.map((r: ScanRow) => r.s) };
       },
     },
     {
