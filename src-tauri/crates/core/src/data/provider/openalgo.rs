@@ -44,7 +44,7 @@ use crate::data::types::{
 use crate::host::{Event, HostRef};
 use crate::net::SharedClient;
 use anyhow::{anyhow, bail, Context as _, Result};
-use chrono::{Days, NaiveDate, TimeZone, Utc};
+use chrono::{Datelike, Days, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use percent_encoding::percent_decode_str;
 use serde::Deserialize;
@@ -110,7 +110,8 @@ struct OaAnswer<T> {
     status: Option<String>,
     #[serde(default)]
     message: Option<String>,
-    #[serde(default)]
+    // No `pid` here: `Option<T>` with an explicit `default` would make the
+    // derive demand `T: Default` (the imperfect-derive bound); absent is None.
     data: Option<T>,
     #[serde(flatten)]
     extra: HashMap<String, serde_json::Value>,
@@ -904,7 +905,7 @@ fn build_exchange_session(
     }
     let corrections = specials
         .iter()
-        .map(|(spec, days)| format!("{spec}:{}", days.iter().clone().collect::<Vec<_>>().join(",")))
+        .map(|(spec, days)| format!("{spec}:{}", days.join(",")))
         .collect::<Vec<_>>()
         .join(";");
     let mut subsessions = vec![Subsession::new("regular", "Regular Trading Hours", &rth)];
@@ -1065,8 +1066,11 @@ async fn symbol_session_of(prefix: &str, base: &str, key: &str) -> SymbolSession
     let map = SESSIONS.get_or_init(|| Mutex::new(HashMap::new()));
     let key_upper = prefix.trim().to_uppercase();
     let cached = map.lock().unwrap().get(&key_upper).cloned();
-    if let Some(session) = cached.filter(|(at, _)| at.elapsed() < CACHE_TTL) {
-        return session;
+    if let Some((at, session)) = &cached {
+        // `filter` would consume `cached` (the fallback below still wants it).
+        if at.elapsed() < CACHE_TTL {
+            return session.clone();
+        }
     }
     match build_fresh_session(base, key, &key_upper).await {
         Ok(session) => {
