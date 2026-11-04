@@ -1859,11 +1859,13 @@ mod tests {
     fn history_windows_chunk_to_the_broker_caps() {
         let from = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
         let to = NaiveDate::from_ymd_opt(2026, 12, 31).unwrap();
-        // Intraday: 30-date windows.
+        // Intraday: 30-date windows. 92 calendar days → 30/30/30/2 (4 windows).
         let chunks = chunk_ranges(from, to, 30);
-        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks.len(), 4);
         assert_eq!(chunks[0], (from, NaiveDate::from_ymd_opt(2026, 10, 30).unwrap()));
-        assert_eq!(*chunks.last().unwrap(), (NaiveDate::from_ymd_opt(2026, 12, 22).unwrap(), to));
+        assert_eq!(chunks[1], (NaiveDate::from_ymd_opt(2026, 10, 31).unwrap(), NaiveDate::from_ymd_opt(2026, 11, 29).unwrap()));
+        assert_eq!(chunks[2], (NaiveDate::from_ymd_opt(2026, 11, 30).unwrap(), NaiveDate::from_ymd_opt(2026, 12, 29).unwrap()));
+        assert_eq!(*chunks.last().unwrap(), (NaiveDate::from_ymd_opt(2026, 12, 30).unwrap(), to));
         // Daily: 365-date windows — the range stays one.
         let chunks = chunk_ranges(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(), to, 365);
         assert_eq!(chunks.len(), 2);
