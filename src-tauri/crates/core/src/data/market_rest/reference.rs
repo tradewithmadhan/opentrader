@@ -214,7 +214,9 @@ pub fn set_icon_proxy_base(base: String) {
 /// Windows/Android serve custom schemes over `http://<scheme>.localhost`; every
 /// other platform uses the real `<scheme>://` form. We build whichever matches
 /// the host this backend runs on, so the frontend can use the value verbatim.
-fn icon_proxy_url(bare_url: &str) -> String {
+/// (Also serve the OpenAlgo provider's logos: its `icon` fetches only the
+/// logos host, so it stays restricted the same way.)
+pub(crate) fn icon_proxy_url(bare_url: &str) -> String {
     let encoded = utf8_percent_encode(bare_url, NON_ALPHANUMERIC).to_string();
     if let Some(base) = ICON_PROXY_BASE.get() {
         format!("{base}{encoded}")

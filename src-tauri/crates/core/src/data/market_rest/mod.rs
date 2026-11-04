@@ -52,6 +52,7 @@ pub use quotes::{fetch_snapshots, LiveTick};
 pub use reference::{
     fetch_icon, fetch_reference_tickers, fetch_reference_tickers_counted, fetch_ticker_info, listing_date, set_icon_proxy_base, ticker_changes, RefTicker, TickerInfo,
 };
+pub(crate) use reference::icon_proxy_url;
 pub use search::{search_tickers, SymbolSearchResult};
 pub use snapshot::{fetch_ticker_snapshot, Snapshot};
 
