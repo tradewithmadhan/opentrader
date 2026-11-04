@@ -68,11 +68,18 @@ jobs:
         with:
           path: opentrader
 
+      # Drawing core ref tracked in package.json (release.yml reads it the same way).
+      - name: Read drawing core ref
+        id: refs
+        shell: bash
+        working-directory: opentrader
+        run: echo "drawing=$(node -p \"require('./package.json').config.drawingRef\")" >> "$GITHUB_OUTPUT"
+
       - name: Checkout drawing core
         uses: actions/checkout@v4
         with:
           repository: deepentropy/lightweight-charts-drawing
-          ref: v0.2.2
+          ref: ${{ steps.refs.outputs.drawing }}
           path: lightweight-charts-drawing
 
       - name: Warn on missing gateway token
