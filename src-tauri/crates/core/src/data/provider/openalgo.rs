@@ -541,10 +541,40 @@ async fn fetch_history(
     };
     let mut out = Vec::new();
     for (a, b) in chunk_ranges(from, to, max_days) {
-        for bar in history_window(base, key, ticker, exchange, oa_interval, a, b, 0).await? {
+        let bars = match history_window(base, key, ticker, exchange, oa_interval, a, b, 0).await {
+            Ok(bars) => bars,
+            Err(e) => {
+                // A failed window fails the whole fetch and the chart shows
+                // nothing — say what the server answered (its own message;
+                // the payload carries the key and is never printed).
+                eprintln!(
+                    "[openalgo] history {}:{} {} {}..{} failed: {e:#}",
+                    exchange, ticker, oa_interval, fmt_date(a), fmt_date(b)
+                );
+                return Err(e);
+            }
+        };
+        let raw = bars.len();
+        let mut kept = 0usize;
+        for bar in bars {
             if let Some(c) = to_candle(bar) {
                 out.push(c);
+                kept += 1;
             }
+        }
+        // A silent empty chart: the request succeeded but nothing became
+        // candles. One line, only when it matters.
+        if raw == 0 {
+            eprintln!(
+                "[openalgo] history {}:{} {} {}..{}: empty (no data)",
+                exchange, ticker, oa_interval, fmt_date(a), fmt_date(b)
+            );
+        } else if kept < raw {
+            eprintln!(
+                "[openalgo] history {}:{} {} {}..{}: {} rows, {} usable",
+                exchange, ticker, oa_interval, fmt_date(a), fmt_date(b),
+                raw, kept
+            );
         }
     }
     out.sort_by(|a, b| a.time.total_cmp(&b.time));
