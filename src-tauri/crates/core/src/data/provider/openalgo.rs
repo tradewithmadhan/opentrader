@@ -743,7 +743,7 @@ fn type_allows(filter: &str, kind: Option<&str>) -> bool {
     }
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 struct OaSearchRow {
     symbol: Option<String>,
@@ -871,7 +871,7 @@ fn build_exchange_session(
     };
     let mut closed: Vec<String> = Vec::new();
     let mut specials: HashMap<String, BTreeSet<String>> = HashMap::new();
-    let mut add_special = |spec: String, day: String, specials: &mut HashMap<String, BTreeSet<String>>| {
+    let add_special = |spec: String, day: String, specials: &mut HashMap<String, BTreeSet<String>>| {
         specials.entry(spec).or_default().insert(day);
     };
     for h in rows {
@@ -1901,18 +1901,25 @@ mod tests {
 
     #[test]
     fn display_names_read_the_contract_parts() {
-        let mk = |instrumenttype: Option<&str>, strike: Option<f64>, expiry: &str| Descriptor {
-            instrumenttype,
-            strike,
-            expiry,
-        };
         // Stock: the plain name.
-        assert_eq!(display_name("Reliance Industries Ltd.", &mk(Some("EQ"), None, "")), "Reliance Industries Ltd.");
+        assert_eq!(
+            display_name("Reliance Industries Ltd.", &Descriptor { instrumenttype: Some("EQ"), strike: None, expiry: "" }),
+            "Reliance Industries Ltd."
+        );
         // Contract: Name Strike Type Expiry.
-        assert_eq!(display_name("NIFTY", &mk(Some("CE"), Some(26100.0), "30-Oct-26")), "NIFTY 26100 CE 30-Oct-26");
+        assert_eq!(
+            display_name("NIFTY", &Descriptor { instrumenttype: Some("CE"), strike: Some(26100.0), expiry: "30-Oct-26" }),
+            "NIFTY 26100 CE 30-Oct-26"
+        );
         // Missing parts skipped; negative strikes read absent.
-        assert_eq!(display_name("NIFTY", &mk(Some("FUT"), Some(-1.0), "30-Oct-26")), "NIFTY FUT 30-Oct-26");
-        assert_eq!(display_name("NIFTY", &mk(None, None, "01-Jan-27")), "NIFTY 01-Jan-27");
+        assert_eq!(
+            display_name("NIFTY", &Descriptor { instrumenttype: Some("FUT"), strike: Some(-1.0), expiry: "30-Oct-26" }),
+            "NIFTY FUT 30-Oct-26"
+        );
+        assert_eq!(
+            display_name("NIFTY", &Descriptor { instrumenttype: None, strike: None, expiry: "01-Jan-27" }),
+            "NIFTY 01-Jan-27"
+        );
     }
 
     #[test]
