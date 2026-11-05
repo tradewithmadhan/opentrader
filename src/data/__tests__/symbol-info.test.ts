@@ -7,7 +7,18 @@ describe("symbol info", () => {
     expect(securityTypeLabel("stock")).toBe("Stock");
     expect(securityTypeLabel("preferred")).toBe("Stock");
     expect(securityTypeLabel("adr")).toBe("DR");
+    expect(securityTypeLabel("futures")).toBe("Futures");
+    expect(securityTypeLabel("option")).toBe("Option");
+    expect(securityTypeLabel("index")).toBe("Index");
     expect(securityTypeLabel("other")).toBeNull();
+  });
+
+  it("shows a Type row for futures, options and indices", () => {
+    expect(symbolInfoGroups({ symbol: "NFO:NIFTY", securityType: "futures", pointValue: 75 })[1].find((f) => f.title === "Type")).toMatchObject({ value: "Futures" });
+    expect(symbolInfoGroups({ symbol: "NFO:NIFTY", securityType: "option" })[1].find((f) => f.title === "Type")).toMatchObject({ value: "Option" });
+    const index = symbolInfoGroups({ symbol: "NSE_INDEX:NIFTY", securityType: "index", pointValue: 1 });
+    expect(index[1].find((f) => f.title === "Type")).toMatchObject({ value: "Index" });
+    expect(index[1].map((f) => f.title)).not.toContain("Website");
   });
 
   it("lists the fields with a value, Website for a stock and Home page for a fund", () => {

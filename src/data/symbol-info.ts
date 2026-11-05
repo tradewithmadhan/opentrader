@@ -6,7 +6,7 @@
  *    size. The data served has no ISIN, CUSIP, CFI code nor sector, and no
  *    traded-exchange name: those rows do not show;
  *  - Type: the security type and its visible sub-type ("Fund ETF", "Stock",
- *    "DR"), first letter capitalised.
+ *    "DR", "Futures", "Option", "Index"), first letter capitalised.
  * The session bar is the legend status popup's (window/chart/legend-status.ts).
  */
 
@@ -25,6 +25,12 @@ export function securityTypeLabel(kind: string | null | undefined): string | nul
       return "Fund";
     case "adr":
       return "DR";
+    case "futures":
+      return "Futures";
+    case "option":
+      return "Option";
+    case "index":
+      return "Index";
     case "warrant":
       return "Warrant";
     case "right":

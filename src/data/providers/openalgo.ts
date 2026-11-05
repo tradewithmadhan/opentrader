@@ -522,11 +522,12 @@ export function shapeTickerInfo(
     figi: null,
     // India uses ISIN (no FIGI): the company profile's code, if known.
     isin: profile?.isin ?? null,
-    // Script symbol type (syminfo.type): broker equities are stocks; other
-    // instrument types have no measured equivalent (mirrors the backend map).
-    symbolType: d.instrumenttype === "EQ" ? "stock" : null,
-    // Security type as served.
-    securityType: d.instrumenttype === "EQ" ? "stock" : null,
+    // Script symbol type (syminfo.type) and the security type as served: the
+    // broker's instrumenttype mapped onto the app's vocabulary (equities are
+    // stocks; futures, options and indices map too — search's Type filter uses
+    // the same codes; the index venues back up an unknown instrumenttype).
+    symbolType: oaType(d.instrumenttype, exchange),
+    securityType: oaType(d.instrumenttype, exchange),
     // Contract multiplier: one point of price moves pointValue currency
     // units (equities stay 1).
     pointValue: lotsize,
@@ -545,6 +546,20 @@ const TYPE_MAP: Record<string, Set<string>> = {
   OPT: new Set(["CE", "PE"]),
   IX: new Set(["IX", "INDEX"]),
 };
+
+/** OpenAlgo instrumenttype → the app's symbol/security type ("stock",
+ *  "futures", "option", "index") — the same vocabulary the search dialog's
+ *  Type filter speaks. The exchange venue backs it up ("NSE_INDEX" = index).
+ *  Null when neither says (unknown types show no Type row). Exported for tests. */
+export function oaType(instrumenttype: string | null | undefined, exchange: string): string | null {
+  switch ((instrumenttype ?? "").trim().toUpperCase()) {
+    case "EQ": return "stock";
+    case "FUT": return "futures";
+    case "CE": case "PE": return "option";
+    case "IX": case "INDEX": return "index";
+    default: return exchange.toUpperCase().endsWith("_INDEX") ? "index" : null;
+  }
+}
 
 export type OaSearchRow = {
   symbol: string;

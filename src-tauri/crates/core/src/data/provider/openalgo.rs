@@ -750,11 +750,12 @@ fn shape_ticker_info(
         total_employees: None,
         market_cap: None,
         figi: None,
-        // Script symbol type (`syminfo.type`): broker equities are stocks; the
-        // other instrument types have no measured equivalent.
-        symbol_type: is_eq.then(|| "stock".to_string()),
-        // Security type as served.
-        security_type: is_eq.then(|| "stock".to_string()),
+        // Script symbol type (`syminfo.type`) and the security type as served:
+        // the broker's instrumenttype mapped onto the app's vocabulary
+        // (equities are stocks; futures, options and indices map too — the
+        // search dialog's Type filter uses the same codes).
+        symbol_type: symbol_type_of(d.instrumenttype.as_deref(), exchange),
+        security_type: symbol_type_of(d.instrumenttype.as_deref(), exchange),
         // The logo rides the ticker-icon proxy so the webview never needs the
         // key to fetch it; None for indices/derivatives (letter fallback).
         icon_url: is_eq.then(|| icon_proxy_url(&logo_url(ticker))),
@@ -774,6 +775,22 @@ fn type_allows(filter: &str, kind: Option<&str>) -> bool {
         "IX" => kind == "IX" || kind == "INDEX",
         // Unlisted filter codes pass every row through, like the source.
         _ => true,
+    }
+}
+
+/// OpenAlgo instrumenttype → the app's symbol/security type ("stock",
+/// "futures", "option", "index") — the same vocabulary the search dialog's
+/// Type filter speaks. The exchange venue backs it up ("NSE_INDEX" = index).
+/// None when neither says (unknown types show no Type row).
+fn symbol_type_of(kind: Option<&str>, exchange: &str) -> Option<&'static str> {
+    let upper = kind.map(|k| k.trim().to_ascii_uppercase());
+    match upper.as_deref() {
+        Some("EQ") => Some("stock"),
+        Some("FUT") => Some("futures"),
+        Some("CE") | Some("PE") => Some("option"),
+        Some("IX") | Some("INDEX") => Some("index"),
+        _ if exchange.to_ascii_uppercase().ends_with("_INDEX") => Some("index"),
+        _ => None,
     }
 }
 
@@ -2335,6 +2352,24 @@ mod tests {
         assert_eq!(map_search_rows(empty_kind, Some("EQ")).len(), 1);
         // Unknown codes pass everything.
         assert_eq!(map_search_rows(rows, Some("ZZ")).len(), 3);
+    }
+
+    #[test]
+    fn instrument_types_map_to_symbol_types() {
+        // The app's vocabulary (Pine's syminfo.type): stock, futures, option, index.
+        assert_eq!(symbol_type_of(Some("EQ"), "NSE"), Some("stock"));
+        assert_eq!(symbol_type_of(Some("FUT"), "NFO"), Some("futures"));
+        assert_eq!(symbol_type_of(Some("CE"), "NFO"), Some("option"));
+        assert_eq!(symbol_type_of(Some("PE"), "NFO"), Some("option"));
+        assert_eq!(symbol_type_of(Some("INDEX"), "NSE"), Some("index"));
+        // Case and padding ride along (the broker answers upper-case, but be sure).
+        assert_eq!(symbol_type_of(Some(" fut "), "NFO"), Some("futures"));
+        // The index venues back up an unknown or missing instrumenttype.
+        assert_eq!(symbol_type_of(None, "NSE_INDEX"), Some("index"));
+        assert_eq!(symbol_type_of(Some(""), "BSE_INDEX"), Some("index"));
+        // Neither says: no type (the dialog hides the row).
+        assert_eq!(symbol_type_of(None, "NSE"), None);
+        assert_eq!(symbol_type_of(Some("ZZ"), "MCX"), None);
     }
 
     #[test]
