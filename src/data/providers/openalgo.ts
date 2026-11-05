@@ -531,8 +531,10 @@ export function shapeTickerInfo(
     // Contract multiplier: one point of price moves pointValue currency
     // units (equities stay 1).
     pointValue: lotsize,
-    // Company logo for stocks; indices/derivatives 404 (letter fallback).
-    iconUrl: d.instrumenttype === "EQ" ? logoUrl(ticker) : null,
+    // Company logo for stocks; indices/derivatives 404 (letter fallback) —
+    // and index venues file their rows "EQ", so the venue decides, not just
+    // the instrumenttype.
+    iconUrl: d.instrumenttype === "EQ" && !exchange.toUpperCase().endsWith("_INDEX") ? logoUrl(ticker) : null,
   };
 }
 
@@ -549,15 +551,17 @@ const TYPE_MAP: Record<string, Set<string>> = {
 
 /** OpenAlgo instrumenttype → the app's symbol/security type ("stock",
  *  "futures", "option", "index") — the same vocabulary the search dialog's
- *  Type filter speaks. The exchange venue backs it up ("NSE_INDEX" = index).
- *  Null when neither says (unknown types show no Type row). Exported for tests. */
+ *  Type filter speaks. An index venue's instrument is an index whatever the
+ *  row was filed as (/symbol answers instrumenttype "EQ" for NSE_INDEX:NIFTY,
+ *  where search reports INDEX). Null when nothing says (no Type row). Exported for tests. */
 export function oaType(instrumenttype: string | null | undefined, exchange: string): string | null {
+  if (exchange.toUpperCase().endsWith("_INDEX")) return "index";
   switch ((instrumenttype ?? "").trim().toUpperCase()) {
     case "EQ": return "stock";
     case "FUT": return "futures";
     case "CE": case "PE": return "option";
     case "IX": case "INDEX": return "index";
-    default: return exchange.toUpperCase().endsWith("_INDEX") ? "index" : null;
+    default: return null;
   }
 }
 

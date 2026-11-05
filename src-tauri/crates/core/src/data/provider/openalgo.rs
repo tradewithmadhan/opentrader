@@ -757,8 +757,10 @@ fn shape_ticker_info(
         symbol_type: symbol_type_of(d.instrumenttype.as_deref(), exchange),
         security_type: symbol_type_of(d.instrumenttype.as_deref(), exchange),
         // The logo rides the ticker-icon proxy so the webview never needs the
-        // key to fetch it; None for indices/derivatives (letter fallback).
-        icon_url: is_eq.then(|| icon_proxy_url(&logo_url(ticker))),
+        // key to fetch it; None for indices/derivatives (letter fallback) —
+        // and index venues file their rows "EQ", so the venue decides.
+        icon_url: (is_eq && !exchange.to_ascii_uppercase().ends_with("_INDEX"))
+            .then(|| icon_proxy_url(&logo_url(ticker))),
     }
 }
 
@@ -780,16 +782,19 @@ fn type_allows(filter: &str, kind: Option<&str>) -> bool {
 
 /// OpenAlgo instrumenttype → the app's symbol/security type ("stock",
 /// "futures", "option", "index") — the same vocabulary the search dialog's
-/// Type filter speaks. The exchange venue backs it up ("NSE_INDEX" = index).
-/// None when neither says (unknown types show no Type row).
+/// Type filter speaks. An index venue's instrument is an index whatever the
+/// row was filed as (/symbol answers instrumenttype "EQ" for NSE_INDEX:NIFTY,
+/// where search reports INDEX). None when nothing says (no Type row).
 fn symbol_type_of(kind: Option<&str>, exchange: &str) -> Option<&'static str> {
+    if exchange.to_ascii_uppercase().ends_with("_INDEX") {
+        return Some("index");
+    }
     let upper = kind.map(|k| k.trim().to_ascii_uppercase());
     match upper.as_deref() {
         Some("EQ") => Some("stock"),
         Some("FUT") => Some("futures"),
         Some("CE") | Some("PE") => Some("option"),
         Some("IX") | Some("INDEX") => Some("index"),
-        _ if exchange.to_ascii_uppercase().ends_with("_INDEX") => Some("index"),
         _ => None,
     }
 }
@@ -2364,7 +2369,9 @@ mod tests {
         assert_eq!(symbol_type_of(Some("INDEX"), "NSE"), Some("index"));
         // Case and padding ride along (the broker answers upper-case, but be sure).
         assert_eq!(symbol_type_of(Some(" fut "), "NFO"), Some("futures"));
-        // The index venues back up an unknown or missing instrumenttype.
+        // An index venue's instrument is an index whatever the row was filed as
+        // (/symbol answers instrumenttype "EQ" for NSE_INDEX:NIFTY).
+        assert_eq!(symbol_type_of(Some("EQ"), "NSE_INDEX"), Some("index"));
         assert_eq!(symbol_type_of(None, "NSE_INDEX"), Some("index"));
         assert_eq!(symbol_type_of(Some(""), "BSE_INDEX"), Some("index"));
         // Neither says: no type (the dialog hides the row).

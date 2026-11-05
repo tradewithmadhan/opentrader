@@ -15,7 +15,9 @@ describe("openalgo ticker info types", () => {
     expect(oaType("INDEX", "NSE")).toBe("index");
     // Case and padding ride along.
     expect(oaType(" fut ", "NFO")).toBe("futures");
-    // The index venues back up an unknown or missing instrumenttype.
+    // An index venue's instrument is an index whatever the row was filed as
+    // (/symbol answers instrumenttype "EQ" for NSE_INDEX:NIFTY).
+    expect(oaType("EQ", "NSE_INDEX")).toBe("index");
     expect(oaType(undefined, "NSE_INDEX")).toBe("index");
     expect(oaType("", "BSE_INDEX")).toBe("index");
     // Neither says: no type (the dialog hides the row).
@@ -35,8 +37,10 @@ describe("openalgo ticker info types", () => {
     expect(fut.pointValue).toBe(75);
     expect(fut.iconUrl).toBeNull();
 
-    const index = shapeTickerInfo("NIFTY", "NSE_INDEX", { instrumenttype: "", lotsize: 1 });
+    // The index venue wins over the EQ the /symbol endpoint files the row as.
+    const index = shapeTickerInfo("NIFTY", "NSE_INDEX", { instrumenttype: "EQ", lotsize: 1 });
     expect(index.securityType).toBe("index");
     expect(index.currency).toBe("INR");
+    expect(index.iconUrl).toBeNull();
   });
 });
