@@ -146,6 +146,11 @@ export type LocalProgress = {
   total: number;
 };
 
+// Paid tier (#252): the market data tier ("realtime" | "delayed") and why
+// real-time ended ("expired", "renewal_refused", "invalid", "revoked",
+// "signed_in_elsewhere", "not_allowed"). Mirrors market_stream/events.rs.
+export type MarketTier = { tier: string; reason: string | null };
+
 // ── Runtime stubs (reject / no-op outside the Tauri shell) ──────────────────
 
 function missing(name: string): () => Promise<never> {
@@ -213,6 +218,8 @@ export const commands: {
   localModelInstall(onProgress: any): Promise<CommandResult<void>>;
   localModelCancel(): Promise<void>;
   localModelRemove(): Promise<CommandResult<void>>;
+  marketPassSet(pass: string | null, exp: number | null): void;
+  marketPassResume(): void;
   [key: string]: any;
 } = new Proxy(
   {},
@@ -249,6 +256,8 @@ export const commands: {
   localModelInstall(onProgress: any): Promise<CommandResult<void>>;
   localModelCancel(): Promise<void>;
   localModelRemove(): Promise<CommandResult<void>>;
+  marketPassSet(pass: string | null, exp: number | null): void;
+  marketPassResume(): void;
   [key: string]: any;
 };
 

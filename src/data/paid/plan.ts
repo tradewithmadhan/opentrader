@@ -18,7 +18,7 @@
  */
 import { createEffect, createRoot, createSignal, on } from "solid-js";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { commands, events } from "../../bindings";
+import { commands, events, type MarketTier } from "../../bindings";
 import { isTauri } from "../../window/shell/window-bridge";
 import { CommunityError, request } from "../community/api";
 import { initSession, me } from "../community/session";
@@ -110,7 +110,8 @@ export function initPaid(): void {
   createRoot(() => {
     createEffect(on(() => me()?.user.name ?? null, () => void refreshPass()));
   });
-  void events.marketTier.listen(({ payload }) => {
+  void events.marketTier.listen((e: { payload: MarketTier }) => {
+    const { payload } = e;
     if (payload.tier === "realtime") {
       setElsewhere(false);
       return;
