@@ -128,6 +128,24 @@ export type AssistantModelInput = {
   apiKey: string | null;
 };
 
+// Local model (mirrors src-tauri/src/local_model.rs): OpenTrader's own model on this computer.
+export type LocalModelInfo = {
+  available: boolean;
+  installed: boolean;
+  running: boolean;
+  downloadBytes: number;
+  diskBytes: number;
+  ramBytes: number;
+  ramNeededBytes: number;
+  freeDiskBytes: number;
+  installing: boolean;
+};
+export type LocalProgress = {
+  file: string;
+  done: number;
+  total: number;
+};
+
 // ── Runtime stubs (reject / no-op outside the Tauri shell) ──────────────────
 
 function missing(name: string): () => Promise<never> {
@@ -189,8 +207,12 @@ export const commands: {
   assistantRemoveModel(id: string): Promise<CommandResult<AssistantConfig>>;
   assistantSelect(id: string | null, effort: string | null): Promise<CommandResult<AssistantConfig>>;
   assistantListModels(baseUrl: string, key: string | null, id: string | null): Promise<CommandResult<string[]>>;
-  assistantChat(id: string, request: number, body: string, onEvent: any): Promise<CommandResult<void>>;
+  assistantChat(request: number, body: string, onEvent: any): Promise<CommandResult<void>>;
   assistantCancel(request: number): Promise<void>;
+  localModelInfo(): Promise<CommandResult<LocalModelInfo>>;
+  localModelInstall(onProgress: any): Promise<CommandResult<void>>;
+  localModelCancel(): Promise<void>;
+  localModelRemove(): Promise<CommandResult<void>>;
   [key: string]: any;
 } = new Proxy(
   {},
@@ -221,8 +243,12 @@ export const commands: {
   assistantRemoveModel(id: string): Promise<CommandResult<AssistantConfig>>;
   assistantSelect(id: string | null, effort: string | null): Promise<CommandResult<AssistantConfig>>;
   assistantListModels(baseUrl: string, key: string | null, id: string | null): Promise<CommandResult<string[]>>;
-  assistantChat(id: string, request: number, body: string, onEvent: any): Promise<CommandResult<void>>;
+  assistantChat(request: number, body: string, onEvent: any): Promise<CommandResult<void>>;
   assistantCancel(request: number): Promise<void>;
+  localModelInfo(): Promise<CommandResult<LocalModelInfo>>;
+  localModelInstall(onProgress: any): Promise<CommandResult<void>>;
+  localModelCancel(): Promise<void>;
+  localModelRemove(): Promise<CommandResult<void>>;
   [key: string]: any;
 };
 
