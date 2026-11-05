@@ -1000,6 +1000,7 @@ function App() {
             (id === "assistant-button" && assistantPanel.open())
           }
           collapsedTab={(id) => (id === "screener-dialog-button" && screenerPanel.collapsed()) || (id === "assistant-button" && assistantPanel.collapsed())}
+          onOpenAlertSettings={() => setAppSettingsTab("alerts")}
         />
       </div>
       </div>
