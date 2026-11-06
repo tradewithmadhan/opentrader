@@ -151,6 +151,26 @@ export type LocalProgress = {
 // "signed_in_elsewhere", "not_allowed"). Mirrors market_stream/events.rs.
 export type MarketTier = { tier: string; reason: string | null };
 
+// Fundamentals (mirrors market_rest/fundamentals.rs): the SEC company profile,
+// its filing events and the projected next earnings.
+export type Headquarters = { city: string | null; region: string | null; country: string | null };
+export type Listing = { ticker: string; exchange: string | null };
+export type FormerName = { name: string; from: string | null; to: string | null };
+export type CompanyProfile = {
+  sic: string | null;
+  industry: string | null;
+  sector: string | null;
+  filerCategory: string | null;
+  smallerReporting: boolean;
+  emergingGrowth: boolean;
+  incorporation: string | null;
+  headquarters: Headquarters | null;
+  listings: Listing[];
+  formerNames: FormerName[];
+};
+export type FilingEvent = { date: string; time: string | null; kind: string; amended: boolean };
+export type NextEarnings = { date: string; time: string | null; fy: number | null; fp: string | null; estimated: boolean };
+
 // ── Runtime stubs (reject / no-op outside the Tauri shell) ──────────────────
 
 function missing(name: string): () => Promise<never> {
