@@ -754,8 +754,8 @@ fn shape_ticker_info(
         // the broker's instrumenttype mapped onto the app's vocabulary
         // (equities are stocks; futures, options and indices map too — the
         // search dialog's Type filter uses the same codes).
-        symbol_type: symbol_type_of(d.instrumenttype.as_deref(), exchange),
-        security_type: symbol_type_of(d.instrumenttype.as_deref(), exchange),
+        symbol_type: symbol_type_of(d.instrumenttype.as_deref(), exchange).map(str::to_string),
+        security_type: symbol_type_of(d.instrumenttype.as_deref(), exchange).map(str::to_string),
         // The logo rides the ticker-icon proxy so the webview never needs the
         // key to fetch it; None for indices/derivatives (letter fallback) —
         // and index venues file their rows "EQ", so the venue decides.
