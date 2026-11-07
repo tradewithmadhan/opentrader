@@ -2792,9 +2792,11 @@ mod tests {
         assert_eq!(entry.by_symbol.get("NIFTY").and_then(|r| r.lotsize), Some(1.0));
         assert_eq!(entry.by_symbol.get("NIFTY26NOV2624700CE").and_then(|r| r.lotsize), Some(65.0));
         // Search scoring: a symbol prefix beats a symbol hit, a name/broker
-        // hit trails, and no match is None.
+        // hit trails, and no match is None. (The option's symbol also starts
+        // with NIFTY — a non-prefix query shows the symbol-contains rank.)
         assert_eq!(instrument_match_score(&entry.rows[0], "NIFTY"), Some(0));
-        assert_eq!(instrument_match_score(&entry.rows[1], "NIFTY"), Some(1));
+        assert_eq!(instrument_match_score(&entry.rows[1], "NIFTY"), Some(0));
+        assert_eq!(instrument_match_score(&entry.rows[1], "26NOV"), Some(1));
         assert_eq!(instrument_match_score(&entry.rows[1], "NOV 26"), Some(2));
         assert_eq!(instrument_match_score(&entry.rows[0], "BANKNIFTY"), None);
         // A master row maps onto the /search row the shared mapper consumes.
