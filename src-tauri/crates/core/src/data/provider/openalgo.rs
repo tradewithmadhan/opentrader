@@ -49,14 +49,14 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use chrono::{Datelike, Days, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use percent_encoding::percent_decode_str;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;
@@ -829,6 +829,293 @@ fn map_search_rows(rows: Vec<OaSearchRow>, type_filter: Option<&str>) -> Vec<Sym
             r#type: Some(r.instrumenttype.unwrap_or_default()),
         })
         .collect()
+}
+
+// ── Day-cached instrument master (GET /api/v1/instruments per exchange) ──────
+// One pull per exchange per day replaces the per-query /search round trip and
+// the per-symbol /symbol one: the master carries every field both consume.
+// The pull runs in the background off the first search or ticker-info of the
+// day; read paths only ever consult what has landed and fall back to the live
+// calls until their exchange is in. (The endpoint answers GET with query
+// params — verified live; the POST form 404s.)
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+struct OaInstrumentRow {
+    symbol: Option<String>,
+    brsymbol: Option<String>,
+    name: Option<String>,
+    exchange: Option<String>,
+    instrumenttype: Option<String>,
+    expiry: Option<String>,
+    strike: Option<f64>,
+    lotsize: Option<f64>,
+    tick_size: Option<f64>,
+}
+
+/// The venues the master serves (verified live: the six without rows still
+/// answer success, so they cache as empty rather than re-fetching all day).
+const INSTRUMENT_EXCHANGES: [&str; 14] = [
+    "NSE", "NFO", "CDS", "BSE", "BFO", "BCD", "MCX", "NCDEX", "NCO", "NSE_INDEX", "BSE_INDEX",
+    "MCX_INDEX", "GLOBAL_INDEX", "CRYPTO",
+];
+
+/// The live /search caps at 500 rows (verified) — the local matcher caps at
+/// the same so the dialog's ranking sees a like-sized list.
+const INSTRUMENT_SEARCH_CAP: usize = 500;
+
+#[derive(Clone)]
+struct InstrumentEntry {
+    /// IST date the rows were pulled — the master rolls daily.
+    date: String,
+    rows: Arc<Vec<Arc<OaInstrumentRow>>>,
+    by_symbol: HashMap<String, Arc<OaInstrumentRow>>,
+}
+
+static INSTRUMENTS: OnceLock<Mutex<HashMap<String, InstrumentEntry>>> = OnceLock::new();
+/// Held across the fetch, so it is the async mutex (a std guard held over
+/// `.await` would make the whole task non-`Send`).
+static INSTRUMENTS_GATE: OnceLock<TokioMutex<()>> = OnceLock::new();
+/// The day the background refresh last started: a process loads the master at
+/// most once per day; a partial landing clears it so a later search tops up
+/// the missing exchanges.
+static INSTRUMENT_REFRESH_DAY: Mutex<Option<String>> = Mutex::new(None);
+
+/// Today's date in IST — the master's roll-over clock.
+fn ist_today() -> String {
+    chrono::DateTime::from_timestamp(Utc::now().timestamp() + IST_OFFSET_SEC, 0)
+        .map_or_else(String::new, |d| d.date_naive().to_string())
+}
+
+/// `GET {base}/api/v1/instruments?…` — the endpoint reads query params, unlike
+/// the JSON-body POSTs. Errors never quote the URL (it carries the key).
+async fn get_instruments<T: for<'de> Deserialize<'de>>(
+    base: &str,
+    key: &str,
+    exchange: &str,
+) -> Result<OaAnswer<T>> {
+    let url =
+        format!("{base}/api/v1/instruments?apikey={}&exchange={}&format=json", require_key(key)?, exchange);
+    let resp = REST
+        .get()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| anyhow!("OpenAlgo /api/v1/instruments: network unreachable ({})", e.without_url()))?;
+    let status = resp.status().as_u16();
+    if !resp.status().is_success() {
+        bail!("OpenAlgo /api/v1/instruments: HTTP {status}");
+    }
+    let json = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| anyhow!("OpenAlgo /api/v1/instruments: bad answer ({})", e.without_url()))?;
+    let answer: OaAnswer<T> =
+        serde_json::from_value(json).map_err(|e| anyhow!("OpenAlgo /api/v1/instruments: bad answer ({e})"))?;
+    if answer.status.as_deref() == Some("error") {
+        // The server's own message, never the request (it carries the key).
+        bail!("OpenAlgo /api/v1/instruments: {}", answer.message.clone().unwrap_or_else(|| "request failed".into()));
+    }
+    Ok(answer)
+}
+
+fn build_entry(date: String, rows: Vec<OaInstrumentRow>) -> InstrumentEntry {
+    let mut by_symbol = HashMap::with_capacity(rows.len());
+    let mut arcs = Vec::with_capacity(rows.len());
+    for row in rows {
+        let arc = Arc::new(row);
+        if let Some(sym) = arc.symbol.as_deref().filter(|s| !s.is_empty()) {
+            by_symbol.insert(sym.to_uppercase(), arc.clone());
+        }
+        arcs.push(arc);
+    }
+    InstrumentEntry { date, rows: Arc::new(arcs), by_symbol }
+}
+
+#[derive(Deserialize, Serialize)]
+struct InstrumentFile {
+    date: String,
+    #[serde(default)]
+    rows: Vec<OaInstrumentRow>,
+}
+
+async fn read_instrument_file(exchange: &str) -> Option<InstrumentEntry> {
+    let path = crate::data::cache_root().join("openalgo-instruments").join(format!("{exchange}.json"));
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    let file: InstrumentFile = serde_json::from_str(&text).ok()?;
+    Some(build_entry(file.date, file.rows))
+}
+
+async fn write_instrument_file(exchange: &str, entry: &InstrumentEntry) {
+    let dir = crate::data::cache_root().join("openalgo-instruments");
+    let file = InstrumentFile {
+        date: entry.date.clone(),
+        rows: entry.rows.iter().map(|r| (**r).clone()).collect(),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&file) {
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let _ = tokio::fs::write(dir.join(format!("{exchange}.json")), bytes).await;
+    }
+}
+
+/// The exchange's day-cached master: memory, else today's disk copy, else a
+/// fetch (single flight). `None` only when the fetch fails — the refresh loop
+/// counts that; an empty answer is valid (several venues serve none) and
+/// caches like any other.
+async fn instrument_exchange_rows(base: &str, key: &str, exchange: &str) -> Option<InstrumentEntry> {
+    let exch = exchange.trim().to_uppercase();
+    if exch.is_empty() {
+        return None;
+    }
+    let today = ist_today();
+    let map = INSTRUMENTS.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let m = map.lock().unwrap();
+        if let Some(hit) = m.get(&exch) {
+            if hit.date == today {
+                return Some(hit.clone());
+            }
+        }
+    }
+    let gate = INSTRUMENTS_GATE.get_or_init(|| TokioMutex::new(()));
+    let _guard = gate.lock().await;
+    // Another caller may have landed the exchange while we waited.
+    {
+        let m = map.lock().unwrap();
+        if let Some(hit) = m.get(&exch) {
+            if hit.date == today {
+                return Some(hit.clone());
+            }
+        }
+    }
+    // Today's disk copy: an app restart inside a day re-reads, no network.
+    if let Some(entry) = read_instrument_file(&exch).await {
+        if entry.date == today {
+            map.lock().unwrap().insert(exch.clone(), entry.clone());
+            return Some(entry);
+        }
+    }
+    let answer = get_instruments::<Vec<OaInstrumentRow>>(base, key, &exch).await.ok()?;
+    let entry = build_entry(today, answer.data.unwrap_or_default());
+    write_instrument_file(&exch, &entry).await;
+    map.lock().unwrap().insert(exch.clone(), entry.clone());
+    Some(entry)
+}
+
+/// Kick off the day's background load of the master (every exchange of the
+/// list, sequential). The first search or ticker-info of the day starts it;
+/// read paths never wait on it — they use the live calls until an exchange
+/// has landed.
+fn ensure_instrument_refresh(base: &str, key: &str) {
+    let today = ist_today();
+    {
+        let mut day = INSTRUMENT_REFRESH_DAY.lock().unwrap();
+        if day.as_deref() == Some(today.as_str()) {
+            return;
+        }
+        *day = Some(today);
+    }
+    tokio::spawn(refresh_instruments(base.to_string(), key.to_string()));
+}
+
+async fn refresh_instruments(base: String, key: String) {
+    let mut landed = 0;
+    for exch in INSTRUMENT_EXCHANGES {
+        if instrument_exchange_rows(&base, &key, exch).await.is_some() {
+            landed += 1;
+        }
+    }
+    // A partial landing clears the day guard so the next search tops up the
+    // missing exchanges (landed ones short-circuit on their date). Nothing
+    // landing reads as the server being down — the guard stays, the live
+    // paths already cover, and tomorrow (or a restart) tries again.
+    if landed > 0 && landed < INSTRUMENT_EXCHANGES.len() {
+        *INSTRUMENT_REFRESH_DAY.lock().unwrap() = None;
+    }
+}
+
+/// Today's cached row of one instrument — memory, else the day's disk copy.
+/// Never fetches (the background refresh owns the network), so a cold cache
+/// reads `None` and the caller uses the live call.
+async fn instrument_row_of(base: &str, key: &str, exchange: &str, symbol: &str) -> Option<Arc<OaInstrumentRow>> {
+    ensure_instrument_refresh(base, key);
+    let exch = exchange.trim().to_uppercase();
+    let sym = symbol.trim().to_uppercase();
+    let today = ist_today();
+    let map = INSTRUMENTS.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let m = map.lock().unwrap();
+        if let Some(hit) = m.get(&exch) {
+            if hit.date == today {
+                return hit.by_symbol.get(&sym).cloned();
+            }
+        }
+    }
+    let entry = read_instrument_file(&exch).await?;
+    if entry.date != today {
+        return None;
+    }
+    let row = entry.by_symbol.get(&sym).cloned();
+    map.lock().unwrap().insert(exch, entry);
+    row
+}
+
+/// Local search over today's cached master. `None` until the day's refresh
+/// has landed every exchange — the caller then uses the live /search, which
+/// is also the path during a session's first minute (unchanged behaviour).
+async fn instrument_search(base: &str, key: &str, query: &str) -> Option<Vec<OaSearchRow>> {
+    ensure_instrument_refresh(base, key);
+    let q = query.trim().to_uppercase();
+    if q.is_empty() {
+        return None;
+    }
+    let today = ist_today();
+    let map = INSTRUMENTS.get()?;
+    let m = map.lock().unwrap();
+    if m.len() < INSTRUMENT_EXCHANGES.len() {
+        return None;
+    }
+    let mut scored: Vec<(u8, OaSearchRow)> = Vec::new();
+    for entry in m.values() {
+        if entry.date != today {
+            return None;
+        }
+        for row in entry.rows.iter() {
+            if let Some(score) = instrument_match_score(row, &q) {
+                scored.push((score, row_to_search_row(row)));
+            }
+        }
+    }
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.symbol.cmp(&b.1.symbol)));
+    scored.truncate(INSTRUMENT_SEARCH_CAP);
+    Some(scored.into_iter().map(|(_, row)| row).collect())
+}
+
+/// How a query meets a master row, smaller the better: a symbol prefix, then
+/// the symbol anywhere, then the display/broker name. `None` = no match.
+fn instrument_match_score(row: &OaInstrumentRow, q: &str) -> Option<u8> {
+    let sym = row.symbol.as_deref()?.to_uppercase();
+    if sym.starts_with(q) {
+        return Some(0);
+    }
+    if sym.contains(q) {
+        return Some(1);
+    }
+    (row.name.as_deref().map_or(false, |n| n.to_uppercase().contains(q))
+        || row.brsymbol.as_deref().map_or(false, |b| b.to_uppercase().contains(q)))
+    .then_some(2)
+}
+
+/// A master row as a /search answer row — the downstream mapper is shared.
+fn row_to_search_row(row: &OaInstrumentRow) -> OaSearchRow {
+    OaSearchRow {
+        symbol: row.symbol.clone(),
+        name: row.name.clone(),
+        exchange: row.exchange.clone(),
+        instrumenttype: row.instrumenttype.clone(),
+        expiry: row.expiry.clone(),
+        strike: row.strike,
+    }
 }
 
 // ── Market calendar (timings + holidays → per-exchange sessions) ─────────────
@@ -2040,19 +2327,34 @@ impl ReferenceProvider for OpenAlgoProvider {
     async fn ticker_info(&self, sym: &SymbolRef) -> Result<TickerInfo> {
         let (exchange, ticker) = split_open_algo(&sym.full());
         // The profile (sector/industry) comes from a separate public API;
-        // both requests fire together (the source's Promise.all).
-        let (answer, profile) = tokio::join!(
-            post::<OaSymbolInfo>(
-                &self.base,
-                &self.key,
-                "/api/v1/symbol",
-                serde_json::json!({"symbol": ticker, "exchange": exchange}),
-            ),
-            fetch_company_profile(&ticker),
-        );
-        let d = answer?
-            .data
-            .ok_or_else(|| anyhow!("OpenAlgo /api/v1/symbol: no data for {ticker}"))?;
+        // fired alongside whatever answers the instrument half.
+        let profile = fetch_company_profile(&ticker);
+        // The day-cached master first (one /instruments pull per exchange per
+        // day replaces this per-symbol round trip); the live /symbol answers
+        // a miss — a cold cache, or a symbol the master doesn't list.
+        let d = match instrument_row_of(&self.base, &self.key, &exchange, &ticker).await {
+            Some(row) => OaSymbolInfo {
+                name: row.name.clone(),
+                brsymbol: row.brsymbol.clone(),
+                instrumenttype: row.instrumenttype.clone(),
+                expiry: row.expiry.clone(),
+                strike: row.strike,
+                lotsize: row.lotsize,
+            },
+            None => {
+                let answer = post::<OaSymbolInfo>(
+                    &self.base,
+                    &self.key,
+                    "/api/v1/symbol",
+                    serde_json::json!({"symbol": ticker.clone(), "exchange": exchange.clone()}),
+                )
+                .await?;
+                answer
+                    .data
+                    .ok_or_else(|| anyhow!("OpenAlgo /api/v1/symbol: no data for {ticker}"))?
+            }
+        };
+        let profile = profile.await;
         Ok(shape_ticker_info(&ticker, &exchange, &d, profile.as_ref()))
     }
 
@@ -2079,6 +2381,12 @@ impl ReferenceProvider for OpenAlgoProvider {
         let q = query.trim();
         if q.is_empty() {
             return Ok(Vec::new());
+        }
+        // The day-cached master serves the query locally once its refresh has
+        // landed; the live /search covers the cold window (same row shape,
+        // same shared mapper).
+        if let Some(rows) = instrument_search(&self.base, &self.key, q).await {
+            return Ok(map_search_rows(rows, type_filter));
         }
         let answer = post::<Vec<OaSearchRow>>(&self.base, &self.key, "/api/v1/search", serde_json::json!({ "query": q })).await?;
         Ok(map_search_rows(answer.data.unwrap_or_default(), type_filter))
@@ -2395,6 +2703,47 @@ mod tests {
 
         let eq = OaSymbolInfo { instrumenttype: Some("EQ".into()), lotsize: Some(1.0), ..Default::default() };
         assert_eq!(shape_ticker_info("SBIN", "NSE", &eq, None).point_value, Some(1.0));
+    }
+
+    #[test]
+    fn instrument_master_indexes_and_scores() {
+        let entry = build_entry(
+            "2026-11-07".into(),
+            vec![
+                OaInstrumentRow {
+                    symbol: Some("NIFTY".into()),
+                    name: Some("Nifty 50".into()),
+                    instrumenttype: Some("INDEX".into()),
+                    lotsize: Some(1.0),
+                    ..Default::default()
+                },
+                OaInstrumentRow {
+                    symbol: Some("NIFTY26NOV2624700CE".into()),
+                    name: Some("NIFTY".into()),
+                    brsymbol: Some("NIFTY NOV 26 24700 CE".into()),
+                    instrumenttype: Some("CE".into()),
+                    expiry: Some("27-NOV-26".into()),
+                    strike: Some(24700.0),
+                    lotsize: Some(65.0),
+                    ..Default::default()
+                },
+            ],
+        );
+        // The lookup index keys on the upper-cased symbol.
+        assert_eq!(entry.by_symbol.get("NIFTY").and_then(|r| r.lotsize), Some(1.0));
+        assert_eq!(entry.by_symbol.get("NIFTY26NOV2624700CE").and_then(|r| r.lotsize), Some(65.0));
+        // Search scoring: a symbol prefix beats a symbol hit, a name/broker
+        // hit trails, and no match is None.
+        assert_eq!(instrument_match_score(&entry.rows[0], "NIFTY"), Some(0));
+        assert_eq!(instrument_match_score(&entry.rows[1], "NIFTY"), Some(1));
+        assert_eq!(instrument_match_score(&entry.rows[1], "NOV 26"), Some(2));
+        assert_eq!(instrument_match_score(&entry.rows[0], "BANKNIFTY"), None);
+        // A master row maps onto the /search row the shared mapper consumes.
+        let sr = row_to_search_row(&entry.rows[1]);
+        assert_eq!(sr.symbol.as_deref(), Some("NIFTY26NOV2624700CE"));
+        assert_eq!(sr.instrumenttype.as_deref(), Some("CE"));
+        assert_eq!(sr.expiry.as_deref(), Some("27-NOV-26"));
+        assert_eq!(sr.strike, Some(24700.0));
     }
 
     #[test]
