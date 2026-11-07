@@ -852,7 +852,7 @@ fn map_search_rows(rows: Vec<OaSearchRow>, type_filter: Option<&str>) -> Vec<Sym
 // calls until their exchange is in. (The endpoint answers GET with query
 // params — verified live; the POST form 404s.)
 
-#[derive(Deserialize, Default, Clone)]
+#[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 struct OaInstrumentRow {
     symbol: Option<String>,
