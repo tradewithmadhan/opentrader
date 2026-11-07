@@ -204,7 +204,7 @@ fn split_token(token: &str) -> Option<(u32, &str)> {
 /// A broker `/intervals` payload. List fields arrive one at a time and may be
 /// shapes we don't expect — read defensively like the source's `strings()`:
 /// the strings of an array, everything else skipped.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Serialize, Default)]
 struct OaIntervals {
     #[serde(default)]
     months: serde_json::Value,
@@ -305,6 +305,18 @@ async fn fetch_intervals(base: &str, key: &str) -> Option<NormalizedIntervals> {
             return Some(hit.normalized.clone());
         }
     }
+    // Today's disk copy: a restart inside a day re-reads, no network. The
+    // degenerate-payload guard applies to a stale or absent file the same way.
+    if let Some((date, data)) = read_daily::<OaIntervals>("intervals").await {
+        if date == ist_today() {
+            let normalized = normalize_intervals(&data);
+            if !normalized.minutes.is_empty() {
+                let hit = IntervalEntry { at: Instant::now(), normalized: normalized.clone() };
+                *INTERVALS.write().unwrap() = Some(hit);
+                return Some(normalized);
+            }
+        }
+    }
     let Ok(answer) = post::<OaIntervals>(base, key, "/api/v1/intervals", serde_json::json!({})).await else {
         return None;
     };
@@ -317,6 +329,7 @@ async fn fetch_intervals(base: &str, key: &str) -> Option<NormalizedIntervals> {
     if normalized.minutes.is_empty() {
         return None;
     }
+    write_daily("intervals", &ist_today(), &data).await;
     *INTERVALS.write().unwrap() = Some(IntervalEntry { at: Instant::now(), normalized: normalized.clone() });
     Some(normalized)
 }
@@ -1118,6 +1131,34 @@ fn row_to_search_row(row: &OaInstrumentRow) -> OaSearchRow {
     }
 }
 
+// ── Daily disk cache (the small reference answers survive a restart) ─────────
+// The interval table, the year's holidays and a date's timings change at most
+// once a day. Each sits behind its in-memory cache and reads back from a
+// date-stamped file under the cache root, so an app restart inside a day
+// makes no network call for them.
+
+#[derive(Serialize, Deserialize)]
+struct DailyFile<T> {
+    /// IST date the payload was pulled.
+    date: String,
+    data: T,
+}
+
+async fn read_daily<T: for<'de> Deserialize<'de>>(name: &str) -> Option<(String, T)> {
+    let path = crate::data::cache_root().join("openalgo-daily").join(format!("{name}.json"));
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    let file: DailyFile<T> = serde_json::from_str(&text).ok()?;
+    Some((file.date, file.data))
+}
+
+async fn write_daily<T: Serialize>(name: &str, date: &str, data: &T) {
+    let dir = crate::data::cache_root().join("openalgo-daily");
+    if let Ok(bytes) = serde_json::to_vec(&DailyFile { date: date.to_string(), data }) {
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let _ = tokio::fs::write(dir.join(format!("{name}.json")), bytes).await;
+    }
+}
+
 // ── Market calendar (timings + holidays → per-exchange sessions) ─────────────
 // The broker publishes real trading calendars:
 //   POST /api/v1/market/timings  { date } → per-exchange open/close (epoch ms;
@@ -1127,7 +1168,7 @@ fn row_to_search_row(row: &OaInstrumentRow) -> OaSearchRow {
 // mapped onto the session grammar (session/subsessions/holidays/corrections;
 // corrections win over holidays, so special timings ride as corrections).
 
-#[derive(Deserialize, Default, Clone)]
+#[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 struct OaTiming {
     exchange: Option<String>,
@@ -1136,7 +1177,7 @@ struct OaTiming {
     end_time: Option<f64>,
 }
 
-#[derive(Deserialize, Default, Clone)]
+#[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 struct OaHoliday {
     date: Option<String>,
@@ -1316,12 +1357,21 @@ async fn fetch_holidays(base: &str, key: &str, year: i32) -> Result<(String, Vec
             }
         }
     }
+    // Today's disk copy (a restart inside a day re-reads, no network).
+    let holidays_file = format!("holidays-{year}");
+    if let Some((date, (tz, rows))) = read_daily::<(String, Vec<OaHoliday>)>(&holidays_file).await {
+        if date == ist_today() {
+            map.lock().unwrap().insert(year, (Instant::now(), tz.clone(), rows.clone()));
+            return Ok((tz, rows));
+        }
+    }
     let answer = post::<Vec<OaHoliday>>(base, key, "/api/v1/market/holidays", serde_json::json!({ "year": year })).await?;
     let timezone = match answer.extra.get("timezone").and_then(|v| v.as_str()) {
         Some(tz) if !tz.is_empty() => tz.to_string(),
         _ => "Asia/Kolkata".into(),
     };
     let rows = answer.data.unwrap_or_default();
+    write_daily(&holidays_file, &ist_today(), &(&timezone, &rows)).await;
     map.lock().unwrap().insert(year, (Instant::now(), timezone.clone(), rows.clone()));
     Ok((timezone, rows))
 }
@@ -1347,8 +1397,17 @@ async fn fetch_timings(base: &str, key: &str, date: &str) -> Result<Vec<OaTiming
             }
         }
     }
+    // Today's disk copy (a restart inside a day re-reads, no network).
+    let timings_file = format!("timings-{date}");
+    if let Some((day, rows)) = read_daily::<Vec<OaTiming>>(&timings_file).await {
+        if day == ist_today() {
+            map.lock().unwrap().insert(date.to_string(), (Instant::now(), rows.clone()));
+            return Ok(rows);
+        }
+    }
     let answer = post::<Vec<OaTiming>>(base, key, "/api/v1/market/timings", serde_json::json!({ "date": date })).await?;
     let rows = answer.data.unwrap_or_default();
+    write_daily(&timings_file, &ist_today(), &rows).await;
     map.lock().unwrap().insert(date.to_string(), (Instant::now(), rows.clone()));
     Ok(rows)
 }
