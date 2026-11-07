@@ -756,6 +756,10 @@ fn shape_ticker_info(
         // search dialog's Type filter uses the same codes).
         symbol_type: symbol_type_of(d.instrumenttype.as_deref(), exchange).map(str::to_string),
         security_type: symbol_type_of(d.instrumenttype.as_deref(), exchange).map(str::to_string),
+        // The contract multiplier: the /symbol API's lot size — one point of
+        // price moves lot × currency (equities file 1, derivatives their lot;
+        // the Symbol info dialog shows it as Point value).
+        point_value: Some(lotsize),
         // The logo rides the ticker-icon proxy so the webview never needs the
         // key to fetch it; None for indices/derivatives (letter fallback) —
         // and index venues file their rows "EQ", so the venue decides.
@@ -2377,6 +2381,20 @@ mod tests {
         // Neither says: no type (the dialog hides the row).
         assert_eq!(symbol_type_of(None, "NSE"), None);
         assert_eq!(symbol_type_of(Some("ZZ"), "MCX"), None);
+    }
+
+    #[test]
+    fn ticker_info_maps_the_lot_size_to_the_point_value() {
+        // A derivative's Point value is its contract lot (the /symbol API's
+        // lotsize); an equity files 1 — one share per point.
+        let fut = OaSymbolInfo { instrumenttype: Some("FUT".into()), lotsize: Some(75.0), ..Default::default() };
+        assert_eq!(shape_ticker_info("NIFTY", "NFO", &fut, None).point_value, Some(75.0));
+
+        let opt = OaSymbolInfo { instrumenttype: Some("CE".into()), lotsize: Some(65.0), ..Default::default() };
+        assert_eq!(shape_ticker_info("NIFTY", "NFO", &opt, None).point_value, Some(65.0));
+
+        let eq = OaSymbolInfo { instrumenttype: Some("EQ".into()), lotsize: Some(1.0), ..Default::default() };
+        assert_eq!(shape_ticker_info("SBIN", "NSE", &eq, None).point_value, Some(1.0));
     }
 
     #[test]

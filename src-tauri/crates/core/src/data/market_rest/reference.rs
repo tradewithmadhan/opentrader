@@ -35,6 +35,10 @@ pub struct TickerInfo {
     /// Security type as served ("stock", "preferred", "etf", "adr", …), for the
     /// Symbol info dialog's Type ("Fund ETF").
     pub security_type: Option<String>,
+    /// Contract multiplier: one point of price moves point_value currency —
+    /// the instrument's lot size on OpenAlgo sources, None elsewhere (those
+    /// sources have no lot concept; the dialog shows 1).
+    pub point_value: Option<f64>,
     /// Ticker logo (square icon), wrapped in the `ticker-icon` custom scheme
     /// so the webview can use it as an <img src> without ever seeing the
     /// gateway token — the backend attaches the token when it serves the bytes.
@@ -194,6 +198,7 @@ pub async fn fetch_ticker_info(ticker: &str) -> Result<TickerInfo> {
         figi: r.figi,
         symbol_type: r.kind.as_deref().and_then(script_symbol_type).map(str::to_string),
         security_type: r.kind.clone(),
+        point_value: None,
         icon_url: r.logo.map(|u| icon_proxy_url(&u)),
     })
 }
