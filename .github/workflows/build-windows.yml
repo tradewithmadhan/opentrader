@@ -28,7 +28,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -64,7 +64,7 @@ jobs:
     steps:
       # Two checkouts side by side, the layout vite.config.ts expects.
       - name: Checkout OpenTrader
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: opentrader
 
@@ -76,7 +76,7 @@ jobs:
         run: echo "drawing=$(node -p "require('./package.json').config.drawingRef")" >> "$GITHUB_OUTPUT"
 
       - name: Checkout drawing core
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: deepentropy/lightweight-charts-drawing
           ref: ${{ steps.refs.outputs.drawing }}
@@ -98,7 +98,7 @@ jobs:
           workspaces: 'opentrader/src-tauri -> target'
 
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: 'npm'
@@ -124,7 +124,7 @@ jobs:
           args: '--no-sign'
 
       - name: Upload installers
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           retention-days: 7
           name: opentrader-windows-exe
