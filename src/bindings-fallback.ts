@@ -34,9 +34,20 @@ export type EngineGrid = any;
 export type AlertFired = any;
 export type AlertLeader = any;
 export type AlertEngineInfo = any;
-export type Fundamentals = any;
-export type EarningsEvent = any;
-export type FundamentalPeriods = any;
+export type Fundamentals = {
+  ticker: string;
+  name?: string | null;
+  currency?: string;
+  fiscalYearEnd?: string | null;
+  quarterly?: FundamentalPeriods;
+  annual?: FundamentalPeriods;
+  earnings?: EarningsEvent[];
+  profile?: CompanyProfile;
+  events?: FilingEvent[];
+  nextEarnings?: NextEarnings | null;
+};
+export type EarningsEvent = { date: string; time?: string | null; released?: boolean; end: string; fy?: number | null; fp?: string | null; eps?: number | null; revenue?: number | null };
+export type FundamentalPeriods = { end?: string[]; fy?: (number | null)[]; fp?: (string | null)[]; date?: string[]; items?: Record<string, (number | null)[]> };
 export type FundamentalMetric = any;
 export type EconomicSeries = any;
 export type EconomicPoint = any;
@@ -171,6 +182,49 @@ export type CompanyProfile = {
 export type FilingEvent = { date: string; time: string | null; kind: string; amended: boolean };
 export type NextEarnings = { date: string; time: string | null; fy: number | null; fp: string | null; estimated: boolean };
 
+// Filings (mirrors market_rest/filings.rs): a company's filings and a filing's text by section.
+export type FilingQuery = {
+  forms?: string[] | null;
+  events?: string[] | null;
+  since?: string | null;
+  until?: string | null;
+  limit?: number | null;
+  before?: string | null;
+};
+export type Filing = {
+  accn: string;
+  form: string;
+  title: string | null;
+  date: string | null;
+  time: string | null;
+  report: string | null;
+  items: string[];
+  events: string[];
+  amended: boolean;
+  url: string;
+};
+export type FilingList = {
+  ticker: string;
+  name: string | null;
+  filings: Filing[];
+  more: boolean;
+  next: string | null;
+};
+export type FilingSection = { id: string; title: string | null; chars: number };
+export type FilingText = {
+  ticker: string;
+  accn: string;
+  form: string | null;
+  date: string | null;
+  time: string | null;
+  sections: FilingSection[] | null;
+  section: string | null;
+  title: string | null;
+  text: string | null;
+  offset: number | null;
+  next: number | null;
+};
+
 // Imported series (mirrors core/local_series.rs): an imported CSV file's meta,
 // and the file of a synced folder a series comes from (#267).
 export type LocalSource = { folder: string; file: string; mtime: number; size: number };
@@ -267,6 +321,9 @@ export const commands: {
   localSeriesRename(from: string, target: string): Promise<CommandResult<void>>;
   localFolderScan(folder: string): Promise<CommandResult<FolderFile[]>>;
   localFolderRead(folder: string, file: string): Promise<CommandResult<string>>;
+  getFundamentals(symbol: string): Promise<CommandResult<Fundamentals>>;
+  getFilings(symbol: string, query: FilingQuery): Promise<CommandResult<FilingList>>;
+  readFiling(symbol: string, accn: string, section: string | null, offset: number | null): Promise<CommandResult<FilingText>>;
   marketPassSet(pass: string | null, exp: number | null): void;
   marketPassResume(): void;
   [key: string]: any;
@@ -312,6 +369,9 @@ export const commands: {
   localSeriesRename(from: string, target: string): Promise<CommandResult<void>>;
   localFolderScan(folder: string): Promise<CommandResult<FolderFile[]>>;
   localFolderRead(folder: string, file: string): Promise<CommandResult<string>>;
+  getFundamentals(symbol: string): Promise<CommandResult<Fundamentals>>;
+  getFilings(symbol: string, query: FilingQuery): Promise<CommandResult<FilingList>>;
+  readFiling(symbol: string, accn: string, section: string | null, offset: number | null): Promise<CommandResult<FilingText>>;
   marketPassSet(pass: string | null, exp: number | null): void;
   marketPassResume(): void;
   [key: string]: any;
