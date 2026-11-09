@@ -33,7 +33,6 @@ import {
 import * as kv from "../../data/kv";
 import { appUpdateStatus, buildInfo, checkForUpdates, installUpdate } from "../../data/app-update";
 import { commands, type AgentServerStatus, type BuildInfo, type ProxyProtocol, type ProxySettings } from "../../bindings";
-import { isTauri } from "../shell/window-bridge";
 import {
   addLocalFolder,
   localFolderProgress,

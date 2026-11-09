@@ -171,7 +171,12 @@ export type CompanyProfile = {
 export type FilingEvent = { date: string; time: string | null; kind: string; amended: boolean };
 export type NextEarnings = { date: string; time: string | null; fy: number | null; fp: string | null; estimated: boolean };
 
-// Imported series (mirrors core/local_series.rs): an imported CSV file's meta.
+// Imported series (mirrors core/local_series.rs): an imported CSV file's meta,
+// and the file of a synced folder a series comes from (#267).
+export type LocalSource = { folder: string; file: string; mtime: number; size: number };
+export type LocalSeriesSource = LocalSource;
+/** A file of a scanned folder: its name, modification time (UNIX ms) and size. */
+export type FolderFile = { file: string; mtime: number; size: number };
 export type LocalSeries = {
   name: string;
   description: string;
@@ -183,6 +188,9 @@ export type LocalSeries = {
   first: number;
   last: number;
   imported: number;
+  /** The file of a synced folder it comes from; null for a series imported
+   *  by hand, which folder syncs leave alone. */
+  source?: LocalSeriesSource | null;
 };
 
 // ── Runtime stubs (reject / no-op outside the Tauri shell) ──────────────────
@@ -252,6 +260,13 @@ export const commands: {
   localModelInstall(onProgress: any): Promise<CommandResult<void>>;
   localModelCancel(): Promise<void>;
   localModelRemove(): Promise<CommandResult<void>>;
+  localSeriesList(): Promise<CommandResult<LocalSeries[]>>;
+  localSeriesSave(meta: LocalSeries, rows: number[]): Promise<CommandResult<void>>;
+  localSeriesRead(name: string): Promise<CommandResult<number[]>>;
+  localSeriesDelete(name: string): Promise<CommandResult<void>>;
+  localSeriesRename(from: string, target: string): Promise<CommandResult<void>>;
+  localFolderScan(folder: string): Promise<CommandResult<FolderFile[]>>;
+  localFolderRead(folder: string, file: string): Promise<CommandResult<string>>;
   marketPassSet(pass: string | null, exp: number | null): void;
   marketPassResume(): void;
   [key: string]: any;
@@ -290,6 +305,13 @@ export const commands: {
   localModelInstall(onProgress: any): Promise<CommandResult<void>>;
   localModelCancel(): Promise<void>;
   localModelRemove(): Promise<CommandResult<void>>;
+  localSeriesList(): Promise<CommandResult<LocalSeries[]>>;
+  localSeriesSave(meta: LocalSeries, rows: number[]): Promise<CommandResult<void>>;
+  localSeriesRead(name: string): Promise<CommandResult<number[]>>;
+  localSeriesDelete(name: string): Promise<CommandResult<void>>;
+  localSeriesRename(from: string, target: string): Promise<CommandResult<void>>;
+  localFolderScan(folder: string): Promise<CommandResult<FolderFile[]>>;
+  localFolderRead(folder: string, file: string): Promise<CommandResult<string>>;
   marketPassSet(pass: string | null, exp: number | null): void;
   marketPassResume(): void;
   [key: string]: any;
