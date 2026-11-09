@@ -7,6 +7,7 @@
  */
 import type { Candle } from "../bindings";
 import { source } from "./sources";
+import { isLocalSymbol, localSnapshot, localTickerInfo } from "./local-series";
 
 /** In-flight coalescing: concurrent fetches for the same symbol share one
  *  request. A symbol switch fires info/snapshot from the chart legend, the
@@ -125,6 +126,7 @@ const infoCache = new Map<string, { at: number; p: Promise<TickerInfo> }>();
 
 /** Reference data of `symbol`, routed to the active source. */
 export function getTickerInfo(symbol: string): Promise<TickerInfo> {
+  if (isLocalSymbol(symbol)) return localTickerInfo(symbol) as Promise<TickerInfo>;
   const key = symbol.toUpperCase();
   const hit = infoCache.get(key);
   if (hit && Date.now() - hit.at < INFO_TTL_MS) return hit.p;
@@ -137,10 +139,11 @@ export function getTickerInfo(symbol: string): Promise<TickerInfo> {
   return entry.p;
 }
 
-export async function getTickerSnapshot(symbol: string, _wanted?: () => boolean): Promise<Snapshot> {
+export function getTickerSnapshot(symbol: string, _wanted?: () => boolean): Promise<Snapshot> {
   // `_wanted` (upstream's retry-loop cancel hook) is accepted for call-site
   // compatibility with upstream; the source socket's snapshot is a one-shot
   // coalesced request, so there is no retry loop to stop.
+  if (isLocalSymbol(symbol)) return localSnapshot(symbol) as Promise<Snapshot>;
   return coalesce(`snap:${symbol.toUpperCase()}`, () => source().tickerSnapshot(symbol));
 }
 
@@ -164,6 +167,7 @@ const newsCache = new Map<string, { at: number; p: Promise<NewsItem[]> }>();
 /** Newest `limit` headlines tagged with `symbol`, routed to the active source
  *  (browsers without headlines keep re-asking: a failure is not kept). */
 export function getLatestNews(symbol: string, limit = 1): Promise<NewsItem[]> {
+  if (isLocalSymbol(symbol)) return Promise.resolve([]);
   const key = `${symbol}|${limit}`;
   const hit = newsCache.get(key);
   if (hit && Date.now() - hit.at < NEWS_SHARE_MS) return hit.p;
