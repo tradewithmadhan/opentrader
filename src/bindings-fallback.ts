@@ -171,6 +171,20 @@ export type CompanyProfile = {
 export type FilingEvent = { date: string; time: string | null; kind: string; amended: boolean };
 export type NextEarnings = { date: string; time: string | null; fy: number | null; fp: string | null; estimated: boolean };
 
+// Imported series (mirrors core/local_series.rs): an imported CSV file's meta.
+export type LocalSeries = {
+  name: string;
+  description: string;
+  timezone: string;
+  base: string;
+  pricescale: number;
+  hasVolume: boolean;
+  bars: number;
+  first: number;
+  last: number;
+  imported: number;
+};
+
 // ── Runtime stubs (reject / no-op outside the Tauri shell) ──────────────────
 
 function missing(name: string): () => Promise<never> {
