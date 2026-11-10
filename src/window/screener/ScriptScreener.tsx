@@ -28,11 +28,9 @@ import { showConfirm } from "../../components/Dialogs";
 import * as kv from "../../data/kv";
 import { FLAG_HEX, FLAG_SORT_ORDER, type FlagColor } from "../../data/watchlist";
 import { isDeletedList, watchlistStore, type WatchList } from "../../data/watchlist-store";
-import { INDEXES } from "../../data/screener-catalog";
+import { FILTER_OPS, INDEXES } from "../../data/screener-catalog";
 import { allFlags, clearAllFlags, lastFlagColor, setFlag } from "../../data/symbol-flags";
 import {
-  OP_ICON,
-  OP_LABEL,
   PRICE_TARGETS,
   INTRADAY_MAX_SYMBOLS,
   SCRIPT_INTERVALS,
@@ -55,12 +53,13 @@ import { scriptScreenStore, type ScriptScreen, type ScriptSource } from "../../d
 import { getIndicatorEntry, indicatorName, isLibraryIndicatorId, loadIndicatorLibrary } from "../chart/indicators/registry";
 import { isUserIndicatorId } from "../chart/indicators/user-scripts";
 import { ChartContextMenu, type CtxNode } from "../chart/ChartContextMenu";
-import { CheckBox, SelectControl } from "../header/ChartPropertiesDialog";
+import { CheckBox, CheckMarkBox, SelectControl } from "../../components/form";
 import { defaultIndicatorOptions } from "../chart/indicators/indicator-options";
 import { IndicatorsDialog } from "../header/IndicatorsDialog";
 import { IndicatorSettingsDialog } from "../chart/IndicatorSettingsDialog";
 import { PopDivider, PopItem, PopSearch, PopSectionTitle, Popover, SelectButton } from "./Popover";
 import { ValueInput } from "./FilterEditor";
+import { translateWith } from "../../i18n/translator";
 
 /** Pills a new indicator starts with (the reference: its first ten outputs). */
 const MAX_PILLS = 10;
@@ -552,7 +551,7 @@ export function ScriptScreener(props: Props) {
                   <button type="button" class="scr-pill-main" aria-expanded={openFilter() === id} onClick={() => setOpenFilter(openFilter() === id ? null : id)}>
                     <span class="scr-pill-text">{titleOf(f().key)}</span>
                     <Show when={active()}>
-                      <Show when={f().op && OP_ICON[f().op!]}>
+                      <Show when={f().op && FILTER_OPS[f().op!].icon}>
                         {(icon) => (
                           <span class="scr-pill-icon">
                             <Icon name={`scr-op-${icon()}`} size={18} />
@@ -611,7 +610,7 @@ export function ScriptScreener(props: Props) {
           <span class="scr-light-btn-text">{scanning() ? "Stop" : "Scan"}</span>
         </button>
         <Show when={!scanning() && overCap()}>
-          <span class="sscr-progress">Intraday intervals scan up to {INTRADAY_MAX_SYMBOLS} symbols</span>
+          <span class="sscr-progress">{translateWith("Intraday intervals scan up to {0} symbols", INTRADAY_MAX_SYMBOLS)}</span>
         </Show>
         <Show when={scanning()}>
           <span class="sscr-progress" role="status">
@@ -908,7 +907,7 @@ export function ScriptScreener(props: Props) {
             }}
           />
           <PopItem
-            title={`Remove ${inactiveCount()} inactive filter${inactiveCount() === 1 ? "" : "s"}`}
+            title={translateWith(inactiveCount() === 1 ? "Remove {0} inactive filter" : "Remove {0} inactive filters", inactiveCount())}
             disabled={inactiveCount() === 0}
             onClick={() => {
               setMoreOpen(false);
@@ -939,11 +938,7 @@ export function ScriptScreener(props: Props) {
                     aria-checked={on()}
                     onClick={() => setColumns((keys) => (on() ? keys.filter((k) => k !== c.key) : [...keys, c.key]))}
                   >
-                    <span class="scr-checkbox" classList={{ "is-checked": on() }}>
-                      <Show when={on()}>
-                        <Icon name="scr-check" size={18} />
-                      </Show>
-                    </span>
+                    <CheckMarkBox variant="screener" checked={on()} />
                     <span class="scr-item-text">
                       <span class="scr-item-title">{c.title}</span>
                     </span>
@@ -1074,8 +1069,8 @@ function FilterEditor(props: {
       <div class="scr-manual">
         <SelectButton
           class="scr-select--stretch"
-          label={f().op ? OP_LABEL[f().op!] : "Select condition"}
-          options={ops().map((o) => ({ value: o, label: OP_LABEL[o], icon: OP_ICON[o] ? `scr-op-lg-${OP_ICON[o]}` : undefined }))}
+          label={f().op ? FILTER_OPS[f().op!].label : "Select condition"}
+          options={ops().map((o) => ({ value: o, label: FILTER_OPS[o].label, icon: FILTER_OPS[o].icon ? `scr-op-lg-${FILTER_OPS[o].icon}` : undefined }))}
           value={f().op ?? ""}
           onChange={setOp}
         />

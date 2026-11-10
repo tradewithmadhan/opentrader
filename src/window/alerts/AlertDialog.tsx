@@ -21,6 +21,8 @@ import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, on
 import { Portal } from "solid-js/web";
 import {
   alertStore,
+  alertWebhook,
+  setAlertWebhook,
   type AlertCondition,
   type AlertSchedule,
   type AlertFrequency,
@@ -34,19 +36,15 @@ import {
   choiceOf,
   defaultFibLevel,
   defaultFibLevel2,
-  drawingOperand,
   drawingOperators,
   fibLevelText,
   fixedFrequency,
-  indicatorOperand as studyOperand,
   movingBarsMin,
   savedConditions,
   sharedBarInterval,
   strategyOperators,
-  studyConditionOperand,
   studyLabel,
   studyPlots,
-  symbolOperand as compareOperand,
 } from "../../data/alert-operands";
 import {
   LEVEL_OPERATORS,
@@ -77,21 +75,19 @@ import { compareIntervals, favoriteIntervals, longIntervalLabel } from "../chart
 import { hasAlertFunction, studyConditions } from "../../data/alert-study-conditions";
 import { appendPlaceholder, placeholderGroups, type PlaceholderGroup } from "../../data/alert-placeholders";
 import { messageOutputs } from "../../data/alert-outputs";
-import { studyOperandValue } from "../../data/alert-engine";
-import { parseAmountText, stepAmountText } from "../../data/study-format";
-import * as kv from "../../data/kv";
+import { studyOperandValue } from "../../data/alert-studies";
+import { stepAmountText } from "../../data/study-format";
 import { getIndicatorEntry } from "../chart/indicators/registry";
 import type { SessionId } from "../../data/session/symbol-sessions";
 import { isFullSymbol, isSupportedResolution, toFullSymbol } from "../../data/datafeed";
 import { SOUND_DURATIONS, SOUND_GROUP, SOUND_OPTIONS, isAlertSoundPlaying, playAlertSound, stopAlertSound } from "../../data/alert-sounds";
 import { alertSettings } from "../../data/alert-settings";
-import {
-  alertWebhook,
-  ensureNotificationPermission,
-  resetRuleEvalState,
-  setAlertWebhook,
-} from "../../data/alert-engine";
+import { ensureNotificationPermission } from "../../data/alert-delivery";
 import { attachDialogSize } from "./dialog-size";
+import { createDialogKeys } from "../../components/Dialog";
+import { createPopover } from "../../components/popover";
+import * as form from "./alert-form";
+import { fieldText, isValidWebhookUrl, openPlaceholderGroups, saveOpenPlaceholderGroups, type ConditionChoices, type ConditionFields, type SideKind } from "./alert-form";
 import { ISO_WEEKDAYS, PRESET_SEGMENTS, PRESET_TITLES, localTimeZone, schedulePreset, scheduleTitle, segmentText, type SchedulePreset } from "../../data/alert-schedule";
 
 type Props = {
@@ -192,12 +188,8 @@ const OPERATOR_ICONS: Record<AlertOperator, string> = {
 function AdMenu(props: { variant: "box" | "inline"; value: string; options: MenuOption[]; onPick: (v: string) => void; more?: number; label?: string; placeholder?: string; group?: string; /** One option only: shown read-only (no menu). */ lockSingle?: boolean }) {
   const [open, setOpen] = createSignal(false);
   const [all, setAll] = createSignal(false);
-  let el: HTMLDivElement | undefined;
-  onMount(() => {
-    const onDown = (e: PointerEvent) => { if (el && !el.contains(e.target as Node)) setOpen(false); };
-    document.addEventListener("pointerdown", onDown, true);
-    onCleanup(() => document.removeEventListener("pointerdown", onDown, true));
-  });
+  // The menu and its button: a press outside closes it, Escape is the dialog's.
+  const el = createPopover(undefined, { onClose: () => setOpen(false), placement: false, active: open, escape: "none" });
   const current = () => props.options.find((o) => o.value === props.value);
   const locked = () => !!props.lockSingle && props.options.length <= 1;
   const cut = () => (props.more !== undefined && !all() && props.options.findIndex((o) => o.value === props.value) < props.more ? props.more : props.options.length);
@@ -294,7 +286,6 @@ function AdIntervalMenu(props: { value: string; origin: string; chart?: string; 
   const [open, setOpen] = createSignal(false);
   const [unfolded, setUnfolded] = createSignal<Record<string, boolean>>({});
   const [maxHeight, setMaxHeight] = createSignal(420);
-  let el: HTMLDivElement | undefined;
   let btn: HTMLButtonElement | undefined;
   let list: HTMLDivElement | undefined;
   // The width of the list's scroll bar, once the rows are laid out (folding a section changes it).
@@ -303,11 +294,7 @@ function AdIntervalMenu(props: { value: string; origin: string; chart?: string; 
     unfolded();
     queueMicrotask(() => list?.style.setProperty("--ad-iv-scrollbar", `${list.offsetWidth - list.clientWidth}px`));
   });
-  onMount(() => {
-    const onDown = (e: PointerEvent) => { if (el && !el.contains(e.target as Node)) setOpen(false); };
-    document.addEventListener("pointerdown", onDown, true);
-    onCleanup(() => document.removeEventListener("pointerdown", onDown, true));
-  });
+  const el = createPopover(undefined, { onClose: () => setOpen(false), placement: false, active: open, escape: "none" });
   const groups = (): IntervalGroup[] => [...(props.favorites.length ? [{ id: "favorites", title: "Favorites", items: props.favorites }] : []), ...props.groups];
   const toggle = () => {
     if (open()) { setOpen(false); return; }
@@ -371,36 +358,18 @@ function AdIntervalMenu(props: { value: string; origin: string; chart?: string; 
   );
 }
 
-/** Groups of the placeholder menu shown open; General only until the user
- *  opens or closes one (remembered). */
-const PLACEHOLDER_GROUPS_KEY = "alerts.placeholder-groups.v1";
-function openPlaceholderGroups(): Record<string, boolean> {
-  try {
-    return { general: true, ...JSON.parse(kv.getItem(PLACEHOLDER_GROUPS_KEY) ?? "{}") };
-  } catch {
-    return { general: true };
-  }
-}
-
 /** "Add placeholder" button of the message view and its menu: opens above the
  *  button, one foldable group per kind, a row = title + placeholder; a click
  *  adds the placeholder to the message and closes the menu. */
 function AdPlaceholders(props: { groups: PlaceholderGroup[]; onPick: (value: string) => void }) {
   const [open, setOpen] = createSignal(false);
   const [expanded, setExpanded] = createSignal(openPlaceholderGroups());
-  let el: HTMLDivElement | undefined;
-  onMount(() => {
-    const onDown = (e: PointerEvent) => { if (el && !el.contains(e.target as Node)) setOpen(false); };
-    // Escape closes the menu only (the dialog stays).
-    const onKey = (e: KeyboardEvent) => { if (open() && e.key === "Escape") { e.stopPropagation(); setOpen(false); } };
-    document.addEventListener("pointerdown", onDown, true);
-    window.addEventListener("keydown", onKey, true);
-    onCleanup(() => { document.removeEventListener("pointerdown", onDown, true); window.removeEventListener("keydown", onKey, true); });
-  });
+  // Escape closes the menu only (the dialog stays).
+  const el = createPopover(undefined, { onClose: () => setOpen(false), placement: false, active: open });
   const toggle = (id: string) => {
     const next = { ...expanded(), [id]: !expanded()[id] };
     setExpanded(next);
-    try { kv.setItem(PLACEHOLDER_GROUPS_KEY, JSON.stringify(next)); } catch { /* best-effort */ }
+    saveOpenPlaceholderGroups(next);
   };
   return (
     <div class="ad-ph" ref={el}>
@@ -438,23 +407,8 @@ function AdPlaceholders(props: { groups: PlaceholderGroup[]; onPick: (value: str
   );
 }
 
-/** A formatted amount as a number field holds it: no thousands separator, a plain minus sign. */
-const fieldText = (t: string) => t.replace(/,/g, "").replace(/−/g, "-");
-
-type SideKind = "value" | "drawing" | "indicator" | "price" | "symbol";
-
 /** The web version (alerts checked by the browser tab). */
 const WEB_BUILD = import.meta.env.MODE === "web";
-
-/** A deliverable webhook target: parses as a URL with an http(s) scheme. */
-function isValidWebhookUrl(raw: string): boolean {
-  try {
-    const u = new URL(raw.trim());
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
 
 
 export function AlertDialog(props: Props) {
@@ -654,7 +608,7 @@ export function AlertDialog(props: Props) {
   // In-app toast and notification schedule (reference Notifications view).
   const [toast, setToast] = createSignal(existing?.toast !== false);
   const [schedule, setSchedule] = createSignal<AlertSchedule | null>(existing?.schedule ?? null);
-  // Webhook — persisted per-rule beside the store (see alert-engine's kv map).
+  // Webhook — persisted per rule by the alert store (deleting the alert deletes it).
   const existingWebhook = existing ? alertWebhook(existing.id) : null;
   const [webhookOn, setWebhookOn] = createSignal(existingWebhook != null);
   const [webhookUrl, setWebhookUrl] = createSignal(existingWebhook ?? "");
@@ -796,54 +750,34 @@ export function AlertDialog(props: Props) {
     setRightLevel2(defaultFibLevel2(lv, rightLevel()));
   });
 
-  function buildLeft(): Operand {
-    if (leftKind() === "indicator" && leftIndicator()) {
-      if (!isOwn()) return indicatorOperand(leftIndicator(), leftPlot(), seed()?.left);
-      // A condition reads no plot: the study's label without a plot title.
-      return studyConditionOperand(indicatorOptions(), leftIndicator(), op(), leftCondition(), seed()?.left);
-    }
-    if (leftKind() === "symbol" && leftSymbol()) return symbolOperand(leftSymbol());
-    return { kind: "price" };
-  }
-
-  /** An operand on a compared symbol, named as the select shows it. */
-  const symbolOperand = (sym: string): Operand => compareOperand(compareOptions_(), sym);
-
-  /** A bound of a channel: a value, the price or a study's plot. */
-  function boundOperand(sel: string, text: string, plot: number, was: Operand | undefined): Operand {
-    if (sel === "price") return { kind: "price" };
-    if (sel.startsWith("ind:")) return indicatorOperand(sel.slice(4), plot, was);
-    if (sel.startsWith("sym:")) return symbolOperand(sel.slice(4));
-    return { kind: "value", value: parseAmountText(text) || 0 };
-  }
-
-  /** The lower bound of a channel between two bounds, else none. */
-  function buildRight2(): Operand | undefined {
-    return valueBand() ? boundOperand(lowerSel(), lowerValue(), lowerPlot(), seed()?.right2) : undefined;
-  }
-
-  function buildRight(): Operand {
-    // A study's condition compares nothing.
-    if (isOwn()) return { kind: "value", value: 0 };
-    if (isMoving()) return { kind: "value", value: parseFloat(pct()) || 0 };
-    if (valueBand()) return boundOperand(upperSel(), upperValue(), upperPlot(), seed()?.right);
-    switch (rightKind()) {
-      case "drawing":
-        return drawingOperand(rightDrawing(), drawingOptions().find((x) => x.id === rightDrawing()), { level: rightLevel(), level2: fibChannel() ? rightLevel2() : null, plot: rightVwapPlot() });
-      case "indicator": {
-        return indicatorOperand(rightIndicator(), rightPlot(), seed()?.right);
-      }
-      case "price":
-        return { kind: "price" };
-      case "symbol":
-        return symbolOperand(rightSymbol());
-      default:
-        return { kind: "value", value: parseAmountText(rightValue()) || 0 };
-    }
-  }
-
-  /** An operand on a study, with its inputs on the chart (an alert being edited keeps its own). */
-  const indicatorOperand = (indicatorId: string, plot: number, was: Operand | undefined): Operand => studyOperand(indicatorOptions(), indicatorId, plot, was);
+  /** The editor's fields as plain values, and what they are read against (the condition is built in ./alert-form). */
+  const fields = (): ConditionFields => ({
+    leftKind: leftKind(),
+    leftIndicator: leftIndicator(),
+    leftPlot: leftPlot(),
+    leftSymbol: leftSymbol(),
+    op: op(),
+    rightKind: rightKind(),
+    rightValue: rightValue(),
+    rightDrawing: rightDrawing(),
+    rightIndicator: rightIndicator(),
+    rightPlot: rightPlot(),
+    rightSymbol: rightSymbol(),
+    rightLevel: rightLevel(),
+    rightLevel2: rightLevel2(),
+    rightVwapPlot: rightVwapPlot(),
+    pct: pct(),
+    upperSel: upperSel(),
+    upperValue: upperValue(),
+    upperPlot: upperPlot(),
+    lowerSel: lowerSel(),
+    lowerValue: lowerValue(),
+    lowerPlot: lowerPlot(),
+  });
+  const choices = (): ConditionChoices => ({ studies: indicatorOptions(), compares: compareOptions_(), drawings: drawingOptions(), seed: seed(), studyCondition: leftCondition(), fibChannel: fibChannel() });
+  const buildLeft = () => form.buildLeft(fields(), choices());
+  const buildRight = () => form.buildRight(fields(), choices());
+  const buildRight2 = () => form.buildRight2(fields(), choices());
 
   /** Default message: the condition as it is set ("AZO Crossing 150"), or
    *  the message a study's condition declares. An alert keeps no message of
@@ -864,34 +798,12 @@ export function AlertDialog(props: Props) {
   const webhookValid = createMemo(() => !webhookOn() || isValidWebhookUrl(webhookUrl()));
 
   /** The condition in the editor can be saved. */
-  const conditionValid = createMemo(() => {
-    if (isCond()) return !!leftCondition();
-    if (isStrat()) return leftStrategy() && (op() === "strategy_orders" || leftCalls());
-    if (isCalls()) return leftCalls();
-    if (isMoving()) return Number.isFinite(parseFloat(pct()));
-    if (valueBand()) {
-      const ok = (sel: string, text: string) => (sel === "value" ? Number.isFinite(parseAmountText(text)) : sel === "price" || indicatorOptions().some((o) => `ind:${o.id}` === sel) || compareOptions_().some((c) => `sym:${c.symbol}` === sel));
-      return ok(upperSel(), upperValue()) && ok(lowerSel(), lowerValue());
-    }
-    if (rightKind() === "value") return Number.isFinite(parseAmountText(rightValue()));
-    if (rightKind() === "drawing") return drawingOptions().some((o) => o.id === rightDrawing());
-    if (rightKind() === "indicator") return indicatorOptions().some((o) => o.id === rightIndicator());
-    if (rightKind() === "symbol") return compareOptions_().some((c) => c.symbol === rightSymbol());
-    return true;
-  });
+  const conditionValid = createMemo(() => form.conditionValid(fields(), choices(), { strategy: leftStrategy(), calls: leftCalls() }));
   const canSave = createMemo(() => !!symbol().trim() && webhookValid() && (multi() || conditionValid()));
 
   /** The condition in the editor. */
   function snapshot(): AlertCondition {
-    const right2 = buildRight2();
-    return {
-      left: buildLeft(),
-      op: op(),
-      right: buildRight(),
-      ...(right2 ? { right2 } : {}),
-      ...(isMoving() ? { bars: barsValue() } : {}),
-      resolution: ruleResolution(),
-    };
+    return form.conditionOf(fields(), choices(), barsValue(), ruleResolution());
   }
 
   /** Put condition `c` in the editor (null: a new one, the price crossing its current value). */
@@ -1027,9 +939,6 @@ export function AlertDialog(props: Props) {
       let id: string;
       if (existing) {
         alertStore.update(existing.id, { ...r, enabled: true });
-        // The condition may have changed — drop the stale crossing baseline so the
-        // next tick re-establishes it instead of manufacturing a spurious cross.
-        resetRuleEvalState(existing.id);
         id = existing.id;
       } else {
         id = alertStore.add(r);
@@ -1044,21 +953,16 @@ export function AlertDialog(props: Props) {
     props.onClose();
   }
 
-  onMount(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        props.onClose();
-      } else if (existing && e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
-        // "Save changes in the Edit alert dialog" = Ctrl+Enter (bound for the
-        // Edit dialog only).
-        e.preventDefault();
-        e.stopPropagation();
-        save();
-      }
-    };
-    document.addEventListener("keydown", onKey, true);
-    onCleanup(() => document.removeEventListener("keydown", onKey, true));
+  createDialogKeys({
+    target: "document",
+    onEscape: () => props.onClose(),
+    onEnter: (e) => {
+      // "Save changes in the Edit alert dialog" = Ctrl+Enter (bound for the
+      // Edit dialog only).
+      if (!existing || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return false;
+      e.preventDefault();
+      save();
+    },
   });
 
   // ── View helpers ──────────────────────────────────────────────────────────
@@ -1403,7 +1307,7 @@ export function AlertDialog(props: Props) {
   };
 
   const subHeader = (title: string) => (
-    <header class="ad-header">
+    <header class="ad-header" data-dialog-title>
       <button type="button" class="ad-icon-btn" data-name="back" aria-label="Back" onClick={() => setView("main")}>
         {arrow("M11 3.5 5.5 9l5.5 5.5")}
       </button>
@@ -1421,7 +1325,7 @@ export function AlertDialog(props: Props) {
         <div class="ad" classList={{ "ad--message": view() === "message", "ad--condition": view() === "condition" }} role="dialog" aria-label={existing ? "Edit alert" : "Create alert"} ref={(el) => onMount(() => onCleanup(attachDialogSize(el)))} onMouseDown={(e) => e.stopPropagation()}>
           {/* ── Main view ── */}
           <Show when={view() === "main"}>
-            <header class="ad-header">
+            <header class="ad-header" data-dialog-title>
               <span class="ad-title">{existing ? "Edit alert on" : "Create alert on"}</span>
               <Show
                 when={!symbolEdit()}
@@ -1546,8 +1450,6 @@ export function AlertDialog(props: Props) {
                   type="button"
                   class="ot-dlg-btn is-secondary ad-delete"
                   onClick={() => {
-                    resetRuleEvalState(existing!.id);
-                    setAlertWebhook(existing!.id, null);
                     alertStore.remove(existing!.id);
                     props.onClose();
                   }}
@@ -1565,7 +1467,7 @@ export function AlertDialog(props: Props) {
 
           {/* ── Add / Edit condition ── */}
           <Show when={view() === "condition"}>
-            <header class="ad-header">
+            <header class="ad-header" data-dialog-title>
               {/* Back keeps an edited condition, drops a new one. */}
               <button type="button" class="ad-icon-btn" data-name="back" aria-label="Back" onClick={() => (draft()?.saved ? applyDraft() : abortDraft())}>
                 {arrow("M11 3.5 5.5 9l5.5 5.5")}
@@ -1650,7 +1552,7 @@ export function AlertDialog(props: Props) {
                 <span class="ad-check-title">Show toast notification</span>
                 <span class="ad-check-desc">Displays an onsite notification in the page corner.</span>
               </label>
-              {/* Webhook — POSTs the fire payload as JSON (see alert-engine). */}
+              {/* Webhook — POSTs the fire payload as JSON (see data/alert-delivery). */}
               <label class="ad-check">
                 <input type="checkbox" checked={draftWebhookOn()} onChange={() => setDraftWebhookOn((v) => !v)} />
                 <span class="ad-check-title">Webhook URL</span>

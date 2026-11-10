@@ -14,7 +14,8 @@
  * metrics.
  */
 import { Icon } from "../../../components/Icon";
-import { sourcesEdit } from "../../shell/source-edits";
+import type { SourcesPatch } from "../../shell/chart-edits";
+import type { ComparePatch } from "../../shell/tabs";
 import { splitSymbol } from "../../../data/datafeed";
 import { emitAppEvent, type ChildStudyParent } from "../../../data/app-events";
 import { canHaveChildren, parseSourceRef, plotChoices, sourceRef } from "../indicators/study-sources";
@@ -143,7 +144,7 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
     const steps = cx.zOrderSteps(id);
     if (!steps) return null;
     const row = (op: ZOrderOp, label: string, enabled: boolean): CtxNode => ({
-      kind: "item", id: `z-${op}`, label, disabled: !enabled, onSelect: () => sourcesEdit(Z_UNDO[op](sourceTitle(id)), () => cx.moveZ(id, op)),
+      kind: "item", id: `z-${op}`, label, disabled: !enabled, onSelect: () => cx.moveZ(id, op, Z_UNDO[op](sourceTitle(id))),
     });
     return {
       kind: "item", id: "visual-order", label: "Visual order", icon: <Icon name="dt-cm-visual-order" size={18} />,
@@ -161,21 +162,17 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
     const visibility = visibilityForMode(props.interval ?? "1D", mode);
     const cmp = cx.compareEntry(id);
     if (cmp) {
-      props.onCompareChange?.(id, { style: { ...cmp.style, visibility } });
+      cx.edits.editSources({ compare: { [id]: { style: { ...cmp.style, visibility } } } }, VISIBILITY_UNDO[mode]);
       return;
     }
     const c = cx.controller;
     if (!c) return;
-    const inputs = c.getInputs(id) ?? {};
-    const styles = c.getStyles(id) ?? {};
-    const options = { ...c.getOptions(id), visibility };
-    c.applySettings(id, inputs, styles, options);
-    props.onIndicatorSettings?.(id, { inputs, styles, options });
+    cx.edits.editStudySettings(id, { options: { ...c.getOptions(id), visibility } }, VISIBILITY_UNDO[mode]);
     cx.refreshIndicatorLegend(cx.crosshairActive ? cx.lastLegendTime : undefined);
   }
   function visibilityRow(id: string): CtxNode {
     const row = (mode: IntervalsVisibilityMode, label: string): CtxNode => ({
-      kind: "item", id: `vis-${mode}`, label, onSelect: () => sourcesEdit(VISIBILITY_UNDO[mode], () => setVisibility(id, mode)),
+      kind: "item", id: `vis-${mode}`, label, onSelect: () => setVisibility(id, mode),
     });
     return {
       kind: "item", id: "visibility-intervals", label: "Visibility on intervals",
@@ -199,7 +196,7 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
       ["unmergeDown", "New pane below"],
     ];
     const submenu = rows.filter(([k]) => moves[k]).map(([k, label]): CtxNode => ({
-      kind: "item", id: `move-${k}`, label, onSelect: () => sourcesEdit(MOVE_UNDO[k], () => cx.moveStudy(id, k)),
+      kind: "item", id: `move-${k}`, label, onSelect: () => cx.moveStudy(id, k, MOVE_UNDO[k]),
     }));
     if (!submenu.length) return null;
     return { kind: "item", id: "move-to", label: "Move to", icon: <Icon name="ot-header-move-to" size={18} />, submenu };
@@ -213,12 +210,11 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
   // scale is offered while the pane has room (8 scales) and the source shares
   // its scale or is on the other side; it is named when another pane already
   // has a scale at that place. No scale: off for the last source on a scale.
-  function pinTo(id: string, scale: StudyScale) {
+  // A pin is one undo step written to the pane: the chart draws the source on its new scale from there.
+  function pinTo(id: string, scale: StudyScale, label: string) {
     const c = cx.controller;
-    if (!c) return;
-    const options = c.pinToScale(id, scale);
-    if (!options) return;
-    props.onIndicatorSettings?.(id, { inputs: c.getInputs(id) ?? {}, styles: c.getStyles(id) ?? {}, options });
+    if (!c || c.scaleOf(id) === null) return;
+    cx.edits.editSources({ studies: { [id]: { options: { ...c.getOptions(id), scale } } } }, label);
     cx.syncSideScales();
     cx.syncScaleLayout();
     cx.refreshIndicatorLegend(cx.crosshairActive ? cx.lastLegendTime : undefined);
@@ -228,10 +224,10 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
     const cur = c?.scaleOf(id) ?? null;
     const pane = c?.paneOf(id) ?? null;
     if (!c || !cur || pane === null) return null;
-    return pinRowFor(id, cur, pane, (scale) => pinTo(id, scale));
+    return pinRowFor(id, cur, pane, (scale, label) => pinTo(id, scale, label));
   }
-  /** The "Pin to scale" row of a source on scale `cur` of pane `pane`; `pin` moves it. */
-  function pinRowFor(id: string, cur: StudyScale, pane: number, pin: (scale: StudyScale) => void): CtxNode {
+  /** The "Pin to scale" row of a source on scale `cur` of pane `pane`; `pin` moves it (one undo step named `label`). */
+  function pinRowFor(id: string, cur: StudyScale, pane: number, pin: (scale: StudyScale, label: string) => void): CtxNode {
     const lay = cx.scaleLayout();
     const counts = lay.slotCounts();
     const named = counts.total > 1;
@@ -250,7 +246,7 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
         kind: "item", id: `pin-new-${side}`, label,
         onSelect: () => {
           const key = cx.scaleLayout().newKeyFor(pane, side);
-          if (key) sourcesEdit(`move ${title} to new ${side} scale`, () => pin(key));
+          if (key) pin(key, `move ${title} to new ${side} scale`);
         },
       };
     };
@@ -259,7 +255,7 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
       const letter = scaleLetter(side, index);
       const label = named ? `${checked ? "Pinned" : "Pin"} to scale ${letter}` : `${checked ? "Pinned" : "Pin"} to ${side} scale`;
       const undoText = named ? `pin to scale ${letter}` : `pin to ${side} scale`;
-      return { kind: "item", id: `pin-${key}`, label, checked, onSelect: () => { if (!checked) sourcesEdit(undoText, () => pin(key)); } };
+      return { kind: "item", id: `pin-${key}`, label, checked, onSelect: () => { if (!checked) pin(key, undoText); } };
     };
     const newRight = newRow("right");
     const newLeft = newRow("left");
@@ -275,7 +271,7 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
     sub.push({
       kind: "item", id: "pin-none", label: "No scale (fullscreen)", checked: cur === "none",
       disabled: !(cur === "none" || onScales > 1),
-      onSelect: () => { if (cur !== "none") sourcesEdit(`make ${title} no scale (Full screen)`, () => pin("none")); },
+      onSelect: () => { if (cur !== "none") pin("none", `make ${title} no scale (Full screen)`); },
     });
     const now = cur === "none" || !curSlot ? "no scale" : named ? scaleLetter(curSlot.side, curSlot.index) : curSlot.side;
     return { kind: "item", id: "pin-to-scale", label: `Pin to scale (now ${now})`, icon: PIN_ICON(), submenu: sub };
@@ -304,13 +300,17 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
     const c = cx.controller;
     const pane = comparePane(id);
     if (!c || pane === null || !compareMoves(id)?.[move]) return;
+    const label = MOVE_UNDO[move];
     if (move === "mergeUp" || move === "mergeDown") {
       const target = move === "mergeUp" ? pane - 1 : pane + 1;
       // Into the price pane: over the series on a scale of its own; else the pane's group.
-      if (target === cx.mainPane()) { props.onCompareChange?.(id, { placement: "scale", group: undefined, paneScale: undefined, scale: undefined }); return; }
+      if (target === cx.mainPane()) {
+        cx.edits.editSources({ compare: { [id]: { placement: "scale", group: undefined, paneScale: undefined, scale: undefined } } }, label);
+        return;
+      }
       const group = c.groupOfPane(target);
       if (!group) return;
-      props.onCompareChange?.(id, { placement: "pane", group, paneScale: undefined });
+      cx.edits.editSources({ compare: { [id]: { placement: "pane", group, paneScale: undefined } } }, label);
       return;
     }
     // A new pane right above / below the panes it shares.
@@ -321,9 +321,7 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
     before.forEach((x, k) => { if (mates.includes(x)) lastMate = k; });
     const at = first < 0 ? (move === "unmergeUp" ? 0 : before.length) : move === "unmergeUp" ? first : lastMate + 1;
     const order = [...before.slice(0, at), id, ...before.slice(at)];
-    c.setPaneOrder(order);
-    props.onPaneOrder?.(order);
-    props.onCompareChange?.(id, { placement: "pane", group: undefined, paneScale: undefined });
+    cx.edits.editSources({ compare: { [id]: { placement: "pane", group: undefined, paneScale: undefined } }, paneOrder: order }, label);
   }
   function compareMoveRow(id: string): CtxNode | null {
     const moves = compareMoves(id);
@@ -335,7 +333,7 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
       ["unmergeDown", "New pane below"],
     ];
     const submenu = rows.filter(([k]) => moves[k]).map(([k, label]): CtxNode => ({
-      kind: "item", id: `move-${k}`, label, onSelect: () => sourcesEdit(MOVE_UNDO[k], () => moveCompare(id, k)),
+      kind: "item", id: `move-${k}`, label, onSelect: () => moveCompare(id, k),
     }));
     if (!submenu.length) return null;
     return { kind: "item", id: "move-to", label: "Move to", icon: <Icon name="ot-header-move-to" size={18} />, submenu };
@@ -349,12 +347,14 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
     const cur: StudyScale = e.placement === "none" || (e.placement === "pane" && e.paneScale === "none")
       ? "none"
       : cx.scaleLayout().sourceScale(id)?.key ?? "none";
-    return pinRowFor(id, cur, pane, (scale) => {
-      if (e.placement === "pane") props.onCompareChange?.(id, { paneScale: scale });
-      // On the series' scale: "Same % scale"; else a scale of its own or none.
-      else if (scale === "none") props.onCompareChange?.(id, { placement: "none" });
-      else if (scale === main && pane === cx.mainPane()) props.onCompareChange?.(id, { placement: "percent" });
-      else props.onCompareChange?.(id, { placement: "scale", scale });
+    return pinRowFor(id, cur, pane, (scale, label) => {
+      const patch: ComparePatch =
+        e.placement === "pane" ? { paneScale: scale }
+        // On the series' scale: "Same % scale"; else a scale of its own or none.
+        : scale === "none" ? { placement: "none" }
+        : scale === main && pane === cx.mainPane() ? { placement: "percent" }
+        : { placement: "scale", scale };
+      cx.edits.editSources({ compare: { [id]: patch } }, label);
       cx.syncScaleLayout();
     });
   }
@@ -374,27 +374,27 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
 
   // ── Study on study (indicators/study-sources.ts) ───────────────────────
   // ── Main series: Visual order, Move to, Pin to scale ──────────────────
-  /** Pin the series to a scale: the sources on its former scale stay there (reference: a source keeps its
-   *  scale object), as pinned studies / a compared symbol on that scale. */
-  function pinSeries(scale: StudyScale) {
+  /** Pin the series to a scale (one undo step named `label`): the sources on its former scale stay there
+   *  (reference: a source keeps its scale object), as pinned studies / a compared symbol on that scale. */
+  function pinSeries(scale: StudyScale, label: string) {
     const old = cx.seriesKey();
     if (scale === old) return;
     const c = cx.controller;
     const pane = cx.mainPane();
+    const patch: SourcesPatch = { studies: {}, compare: {}, seriesScale: scale === cx.mainSide() ? null : scale };
     if (old !== "none" && c) {
       for (const src of cx.scaleLayout().sourcesOn(pane, old)) {
         if (src === MAIN_SOURCE_ID) continue;
         const cmp = cx.compareEntry(src);
         if (cmp) {
-          if (cmp.placement === "percent") props.onCompareChange?.(src, { placement: "scale", scale: old });
+          if (cmp.placement === "percent") patch.compare![src] = { placement: "scale", scale: old };
           continue;
         }
-        if (c.getOptions(src).scale) continue;
-        const options = c.setScaleKey(src, old);
-        if (options) props.onIndicatorSettings?.(src, { inputs: c.getInputs(src) ?? {}, styles: c.getStyles(src) ?? {}, options });
+        if (c.paneOf(src) === null || c.getOptions(src).scale) continue;
+        patch.studies![src] = { options: { ...c.getOptions(src), scale: old } };
       }
     }
-    props.onSeriesScale?.(scale === cx.mainSide() ? null : scale);
+    cx.edits.editSources(patch, label);
   }
   function seriesArrangeRows(): CtxNode[] {
     const out: CtxNode[] = [];
@@ -409,7 +409,7 @@ export function createSourceMenu(cx: ChartCx): SourceMenuApi {
         ["unmergeDown", "New pane below"],
       ];
       const submenu = rows.filter(([k]) => moves[k]).map(([k, label]): CtxNode => ({
-        kind: "item", id: `move-${k}`, label, onSelect: () => sourcesEdit(MOVE_UNDO[k], () => cx.moveSeries(k)),
+        kind: "item", id: `move-${k}`, label, onSelect: () => cx.moveSeries(k, MOVE_UNDO[k]),
       }));
       if (submenu.length) out.push({ kind: "item", id: "move-to", label: "Move to", icon: <Icon name="ot-header-move-to" size={18} />, submenu });
     }

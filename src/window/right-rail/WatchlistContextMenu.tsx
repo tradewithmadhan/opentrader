@@ -31,11 +31,14 @@
  * Section header menu (160×121): Rename / Remove section / Add symbol.
  */
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
-import { FLAG_HEX, WL_ICONS, type FlagColor, type Row } from "../../data/watchlist";
+import { FLAG_HEX, type FlagColor, type Row } from "../../data/watchlist";
+import { WL_ICONS } from "./watchlist/ui";
 import type { WatchList } from "../../data/watchlist-store";
 
 /** The 7 flag colours, in `data-color` order. */
 import { FLAG_COLORS, flagOf } from "../../data/symbol-flags";
+import { createPopover } from "../../components/popover";
+import { translateWith } from "../../i18n/translator";
 
 const ICON_PLUS =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18"><path fill="currentColor" d="M8.5 4h1v4.5H14v1H9.5V14h-1V9.5H4v-1h4.5V4Z"></path></svg>';
@@ -67,28 +70,15 @@ function useMenuShell(
     if (left + r.width > window.innerWidth - 4) left = Math.max(4, window.innerWidth - r.width - 4);
     if (top + r.height > window.innerHeight - 4) top = Math.max(4, window.innerHeight - r.height - 4);
     setPos({ left, top });
-
-    const onDown = (e: PointerEvent) => {
-      if (!root.contains(e.target as Node)) onClose();
-    };
-    // Esc closes the menu only: the list under it keeps its selection.
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.stopPropagation();
-      e.preventDefault();
-      onClose();
-    };
-    window.addEventListener("pointerdown", onDown, true);
-    window.addEventListener("keydown", onKey, true);
     window.addEventListener("scroll", onClose, true);
     window.addEventListener("resize", onClose);
     onCleanup(() => {
-      window.removeEventListener("pointerdown", onDown, true);
-      window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("scroll", onClose, true);
       window.removeEventListener("resize", onClose);
     });
   });
+  // Esc closes the menu only: the list under it keeps its selection.
+  createPopover(undefined, { onClose, placement: false, inside: () => [rootRef()], on: { target: "window", capture: true } });
   return pos;
 }
 
@@ -257,7 +247,7 @@ export function WatchlistContextMenu(props: Props) {
       <Show when={!multi() && props.row}>
         <button type="button" role="menuitem" class="ot-menu-item" onClick={() => run(() => props.onAddNote(props.row!))}>
           <span class="ot-menu-item__icon" aria-hidden="true" innerHTML={ICON_NOTE} />
-          <span class="ot-menu-item__label">Add note for {sym()}</span>
+          <span class="ot-menu-item__label">{translateWith("Add note for {0}", sym())}</span>
         </button>
       </Show>
 

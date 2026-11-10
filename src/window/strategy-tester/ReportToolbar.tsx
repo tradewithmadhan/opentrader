@@ -13,13 +13,14 @@ import { Popover, PopItem, PopSectionTitle } from "../screener/Popover";
 import { strategyTester } from "../../data/strategy-tester-store";
 import { DEFAULT_PROPERTIES, type BacktestReport, type StrategyProperties } from "../../backtester/types";
 import { detalizationTicks } from "../../backtester/magnifier";
-import { CheckBox } from "../header/ChartPropertiesDialog";
+import { CheckBox } from "../../components/form";
 import { EXECUTION_PROPERTY, SYNTHETIC_STYLES, executionOptions } from "../chart/StrategyPropertiesTab";
 import { compact, dateRange } from "./format";
 import { cachedSymbolSessions } from "../../data/session";
 import { COMMUNITY_ENABLED } from "../../data/community/api";
 import { backtestTable, requestShare } from "../../data/community/share";
 import { shortIntervalLabel } from "../chart/interval-favorites";
+import { translateWith } from "../../i18n/translator";
 
 type Props = {
   report: BacktestReport | null;
@@ -195,7 +196,7 @@ export function ReportToolbar(props: Props) {
           />
           <PopItem
             title="High detalization"
-            right={<span class="st-pill-option-note">~{detalizationTicks(props.interval ?? "1D")} ticks per bar</span>}
+            right={<span class="st-pill-option-note">{translateWith("~{0} ticks per bar", detalizationTicks(props.interval ?? "1D"))}</span>}
             selected={effective().barMagnifier}
             disabled={synthetic()}
             onClick={() => {

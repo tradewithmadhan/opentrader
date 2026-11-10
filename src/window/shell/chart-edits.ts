@@ -1,8 +1,9 @@
 /*
  * Edits of a chart's content written into its tab: studies (add, remove with
  * the drawings they own, order, settings, indicator templates), compared
- * symbols, pane order / source order / link group / series eye, the settled
- * visible range and the layout splitter sizes. The per-pane callbacks name
+ * symbols, the places of the sources (editSources: panes, scales, drawing
+ * order), link group / series eye, the settled visible range and the layout
+ * splitter sizes. The per-pane callbacks name
  * their tab: every opened tab keeps its grid mounted, so a pane writes into
  * its own tab, shown or not. Removals of studies, compare changes and
  * splitter changes are undo steps; `applyUndoEntry` writes one side of any
@@ -34,10 +35,26 @@ import { isScaleKey } from "../chart/scales/scale-layout";
 import { showConfirm } from "../../components/Dialogs";
 import type { ChildStudyParent } from "../../data/app-events";
 import type { DrawingStore } from "../drawings/drawing-store";
+import type { Drawing } from "lightweight-charts-drawing/core/types";
+
+/** An edit of a chart's sources (editSources): study settings and compared symbol patches by id, the studies' list
+ *  in a new order, the pane order, the sources' drawing order, the series' scale (null = the chart's scales side)
+ *  and pane (the group of the study pane it shares, null = a pane of its own), and the chart's drawings placed
+ *  again with them (the drawings `key` holds, in their new order). */
+export type SourcesPatch = {
+  studies?: Record<string, PaneIndicatorSettings>;
+  compare?: Record<string, ComparePatch>;
+  indicators?: string[];
+  paneOrder?: string[];
+  sourceOrder?: string[];
+  seriesScale?: string | null;
+  seriesPane?: string | null;
+  drawings?: { key: string; list: Drawing[] };
+};
 
 export function createChartEdits(
   t: Pick<AppTabs, "tabOf" | "patchTab" | "activeTab" | "activePaneState" | "patchActivePane">,
-  undo: Pick<UndoHistory, "commit" | "record" | "undoStack" | "redoStack">,
+  undo: Pick<UndoHistory, "commit" | "record" | "rollback" | "undoStack" | "redoStack">,
   d: Pick<DrawingStore, "drawingKeyFor" | "drawingsFor" | "splitView" | "restoreSlice">,
 ) {
   const { tabOf, patchTab, activeTab, activePaneState, patchActivePane } = t;
@@ -48,15 +65,6 @@ export function createChartEdits(
   /** Remove a study from a SPECIFIC pane (the per-pane legend's trash). */
   function removeIndicatorFromPane(tabId: string, paneIndex: number, id: string) {
     removeStudies(tabId, paneIndex, [id]);
-  }
-  /** Reorder a SPECIFIC pane's studies (pane controls: move pane up / down —
-   *  stacked panes are allocated in list order). */
-  function reorderIndicatorsForPane(tabId: string, paneIndex: number, ids: string[]) {
-    const tab = tabOf(tabId);
-    if (!tab) return;
-    patchTab(tabId, {
-      panes: tab.panes.map((p, i) => (i === paneIndex ? { ...p, indicators: ids } : p)),
-    });
   }
   /** Persist a study's edited inputs/styles onto a SPECIFIC pane (the per-pane
    *  Settings dialog → Ok). Stored under `indicatorSettings[id]`; the saveTabs
@@ -69,6 +77,76 @@ export function createChartEdits(
         i === paneIndex ? { ...p, indicatorSettings: { ...p.indicatorSettings, [id]: { ...p.indicatorSettings?.[id], ...settings } } } : p,
       ),
     });
+  }
+  /** Change the sources of a SPECIFIC pane as one undo step named `label`: the store is written and the chart draws
+   *  the sources from it (studies' settings and order, compared symbols, the pane and source orders, the series'
+   *  scale and pane), with the drawings placed again with them. Each study / compare patch replaces the fields it
+   *  holds. `coalesce`: one step with the previous one of the same key (the keystrokes
+   *  of one dialog field); `session`: the dialog the edit is made in (its Cancel takes the session's steps back, see
+   *  UndoHistory.rollback). */
+  function editSources(tabId: string, paneIndex: number, patch: SourcesPatch, label: string, opts: { coalesce?: string; session?: string } = {}) {
+    const pane = tabOf(tabId)?.panes[paneIndex];
+    if (!pane) return;
+    const before = chartSources(pane);
+    const after = chartSources(pane);
+    const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+    // A study on its defaults has no saved settings: its `before` takes the defaults of the fields the edit sets,
+    // so an undo draws the study with them again (no saved value leaves the edited one drawn).
+    const defaults: PaneIndicatorSettings = { inputs: {}, styles: {}, options: defaultIndicatorOptions() };
+    for (const [id, p] of Object.entries(patch.studies ?? {})) {
+      if (!pane.indicators.includes(id)) continue;
+      const cur = before.indicatorSettings?.[id];
+      const next: PaneIndicatorSettings = { ...cur, ...clone(p) };
+      if (JSON.stringify(next) === JSON.stringify(cur ?? {})) continue;
+      after.indicatorSettings = { ...after.indicatorSettings, [id]: next };
+      const was: PaneIndicatorSettings = { ...cur };
+      for (const k of ["inputs", "styles", "options"] as const) if (k in p && was[k] === undefined) Object.assign(was, { [k]: defaults[k] });
+      if (Object.keys(was).length) before.indicatorSettings = { ...before.indicatorSettings, [id]: was };
+    }
+    if (patch.compare && after.compare) {
+      after.compare = after.compare.map((c) => {
+        const p = patch.compare![c.id];
+        return p ? clone({ ...c, ...p, hidden: p.hidden ?? c.hidden }) : c;
+      });
+    }
+    if (patch.indicators) after.indicators = patch.indicators.slice();
+    if (patch.paneOrder) after.paneOrder = patch.paneOrder.slice();
+    if (patch.sourceOrder) after.sourceOrder = patch.sourceOrder.slice();
+    if (patch.seriesScale !== undefined) after.seriesScale = (patch.seriesScale ?? undefined) as PaneChart["seriesScale"];
+    if (patch.seriesPane !== undefined) after.seriesPane = patch.seriesPane ?? undefined;
+    const slices = patch.drawings ? d.splitView(patch.drawings.key, patch.drawings.list) : [];
+    if (!slices.length && JSON.stringify(after) === JSON.stringify(chartSources(pane))) return;
+    undo.commit({
+      kind: "layout-sources",
+      tabId,
+      before: { [paneIndex]: before },
+      after: { [paneIndex]: after },
+      slices,
+      label,
+      at: Date.now(),
+      ...opts,
+    });
+  }
+  /** A Settings dialog's Cancel: the steps made in its session are taken back (not left to redo). */
+  function rollbackSources(session: string) {
+    undo.rollback(session);
+  }
+  /** Change a study's settings on a SPECIFIC pane as one undo step (editSources). */
+  function editStudySettings(
+    tabId: string,
+    paneIndex: number,
+    id: string,
+    patch: PaneIndicatorSettings,
+    label: string,
+    opts: { coalesce?: string; session?: string } = {},
+  ) {
+    editSources(tabId, paneIndex, { studies: { [id]: patch } }, label, opts);
+  }
+  /** Merge input values into a study's saved inputs, one undo step as the Settings dialog's Ok (Strategy Tester
+   *  properties, the agent's set inputs). */
+  function patchStudyInputs(tabId: string, paneIndex: number, id: string, patch: Record<string, unknown>) {
+    const cur = tabOf(tabId)?.panes[paneIndex]?.indicatorSettings?.[id]?.inputs;
+    editStudySettings(tabId, paneIndex, id, { inputs: { ...cur, ...patch } }, `change ${getIndicatorEntry(id)?.name ?? id} properties`);
   }
   /** Persist a pane's settled scroll/zoom anchor (its visible logical range).
    *  The saveTabs effect then writes it to localStorage, so the view survives tab
@@ -373,15 +451,9 @@ export function createChartEdits(
     return list.map((s) => ({ symbol: s, description: compareNames()[s] || undefined }));
   }
 
-  // ── Pane order, link group, series eye ─────────────────────────────────
-  /** Pane controls moved a pane: persist the stacking order. */
-  function setPaneOrderForPane(tabId: string, paneIndex: number, order: string[]) {
-    const tab = tabOf(tabId);
-    if (!tab) return;
-    patchTab(tabId, { panes: tab.panes.map((p, i) => (i === paneIndex ? { ...p, paneOrder: order } : p)) });
-  }
-  /** The main series was dragged into a study pane (its pane group) or got
-   *  a pane of its own (null). */
+  // ── Series pane, link group, series eye ────────────────────────────────
+  /** The saved place of the main series (the group of the study pane it shares, null = a pane of its own), no undo
+   *  step: the place the chart settles on (the study pane it shared is gone). Its moves are editSources steps. */
   function setSeriesPaneForPane(tabId: string, paneIndex: number, group: string | null) {
     const tab = tabOf(tabId);
     if (!tab) return;
@@ -392,24 +464,6 @@ export function createChartEdits(
         return group ? { ...rest, seriesPane: group } : rest;
       }),
     });
-  }
-  /** The main series pinned to a scale (series menu "Pin to scale"; null = the chart's scales side). */
-  function setSeriesScaleForPane(tabId: string, paneIndex: number, key: string | null) {
-    const tab = tabOf(tabId);
-    if (!tab) return;
-    patchTab(tabId, {
-      panes: tab.panes.map((p, i) => {
-        if (i !== paneIndex) return p;
-        const { seriesScale: _old, ...rest } = p;
-        return key ? { ...rest, seriesScale: key as PaneChart["seriesScale"] } : rest;
-      }),
-    });
-  }
-  /** Persist a pane's source drawing order (Object tree drag). */
-  function setSourceOrderForPane(tabId: string, paneIndex: number, order: string[]) {
-    const tab = tabOf(tabId);
-    if (!tab) return;
-    patchTab(tabId, { panes: tab.panes.map((p, i) => (i === paneIndex ? { ...p, sourceOrder: order } : p)) });
   }
   /** Symbol / Interval syncing group of a chart of the layout. */
   function setPaneLinkGroup(tabId: string, paneIndex: number, g: PaneChart["linkGroup"]) {
@@ -486,8 +540,11 @@ export function createChartEdits(
 
   return {
     removeIndicatorFromPane,
-    reorderIndicatorsForPane,
     setIndicatorSettingsForPane,
+    editSources,
+    rollbackSources,
+    editStudySettings,
+    patchStudyInputs,
     setVisibleRangeForPane,
     addIndicator,
     toggleScriptOnChart,
@@ -501,13 +558,13 @@ export function createChartEdits(
     patchCompare,
     compareAdded,
     compareRecent,
-    setPaneOrderForPane,
     setSeriesPaneForPane,
-    setSeriesScaleForPane,
-    setSourceOrderForPane,
     setPaneLinkGroup,
     toggleSeriesHidden,
     toggleIndicatorsLegend,
     applyUndoEntry,
   };
 }
+
+/** The chart edits App creates once. */
+export type ChartEdits = ReturnType<typeof createChartEdits>;

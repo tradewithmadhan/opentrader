@@ -36,6 +36,7 @@ import { type ChartCx } from "./context";
 import { emitAppEvent } from "../../../data/app-events";
 import { waitBeforeRetry } from "../../../data/connection";
 import type { SessionId } from "../../../data/session";
+import { lastAtOrBefore, lowerBound } from "../time-search";
 
 export type GotoOpts = {
   /** Centre the target even when it is already in view (the reference app Go to). */
@@ -55,7 +56,6 @@ export interface HistoryApi {
   goToRange: (fromSec: number, toSec: number) => Promise<void>;
   goToTime: (targetSec: number, opts?: GotoOpts) => Promise<void>;
   gotoDateIndex: (sec: number) => number;
-  readonly historyEndClose: (() => void) | null;
   historyExhausted: boolean;
   holdLinkQuiet: () => void;
   loadingMore: boolean;
@@ -80,7 +80,7 @@ export interface HistoryApi {
 }
 
 export function createHistory(cx: ChartCx): HistoryApi {
-  const { afterSeriesData, chartReady, currentTokens, dataExtras, historyEnd, mainLastIndex, paneId, props, refreshIndicatorLegend, refreshLegend, updateSessionBreaks } = cx;
+  const { chartReady, currentTokens, historyEnd, paneId, props, refreshIndicatorLegend, refreshLegend } = cx;
   // Suppress flags: set while APPLYING an inbound sync so the resulting
   // crosshair / range event isn't re-broadcast (which would echo-loop).
   let suppressCrosshairBroadcast = false;
@@ -133,6 +133,8 @@ export function createHistory(cx: ChartCx): HistoryApi {
   let historyExhausted = false;
 
   let historyEndClose: (() => void) | null = null;
+  // The notice goes with the chart.
+  onCleanup(() => historyEndClose?.());
   /** Read-ahead buffer: the window older than the current oldest bar, fetched in
    *  the background after each load (and once after the initial load) so the
    *  next scroll-back prepends instantly instead of waiting on the network.
@@ -328,7 +330,7 @@ export function createHistory(cx: ChartCx): HistoryApi {
     // Brick types re-derive their items from the whole history (item
     // count unrelated to the bars added): keep the distance to the last
     // item, at the same bar spacing.
-    const prevLast = isTransformType(cx.activeType) ? mainLastIndex() : null;
+    const prevLast = isTransformType(cx.activeType) ? cx.mainLastIndex() : null;
     const prevLen = cx.raw.length;
     if (isDaily) {
       // Bar Replay: the daily family is loaded whole; a re-aggregation here
@@ -345,16 +347,16 @@ export function createHistory(cx: ChartCx): HistoryApi {
     } else {
       cx.raw = [...toOHLC(older), ...cx.raw];
     }
-    setDataForType(cx.series, cx.activeType, cx.raw, currentTokens(), dataExtras());
-    afterSeriesData();
-    updateSessionBreaks();
+    setDataForType(cx.series, cx.activeType, cx.raw, currentTokens(), cx.dataExtras());
+    cx.afterSeriesData();
+    cx.updateSessionBreaks();
     scheduleIndicatorRender();
     if (!cx.crosshairActive) refreshLegend();
     // Pin the view by the bars actually added — aggregation can change the
     // count for 1W/1M, so use the length delta, not the raw page length.
     const delta = cx.raw.length - prevLen;
     if (isTransformType(cx.activeType)) {
-      const last = mainLastIndex();
+      const last = cx.mainLastIndex();
       if (prevRange && prevLast != null && last != null) {
         ts.setVisibleLogicalRange({ from: prevRange.from + last - prevLast, to: prevRange.to + last - prevLast });
       }
@@ -385,7 +387,7 @@ export function createHistory(cx: ChartCx): HistoryApi {
     const prevRange = ts.getVisibleLogicalRange();
     // Brick types re-derive their items from the whole history: keep the
     // distance to the last item instead.
-    const prevLast = isTransformType(cx.activeType) ? mainLastIndex() : null;
+    const prevLast = isTransformType(cx.activeType) ? cx.mainLastIndex() : null;
     const anchor = prevRange ? Math.min(Math.max(Math.round(prevRange.to), 0), cx.raw.length - 1) : -1;
     const anchorSec = anchor >= 0 ? (cx.raw[anchor].time as number) : null;
     const byTime = (a: { time: unknown }, b: { time: unknown }) => (a.time as number) - (b.time as number);
@@ -395,13 +397,13 @@ export function createHistory(cx: ChartCx): HistoryApi {
     } else {
       cx.raw = [...cx.raw, ...toOHLC(missing)].sort(byTime);
     }
-    setDataForType(cx.series, cx.activeType, cx.raw, currentTokens(), dataExtras());
-    afterSeriesData();
-    updateSessionBreaks();
+    setDataForType(cx.series, cx.activeType, cx.raw, currentTokens(), cx.dataExtras());
+    cx.afterSeriesData();
+    cx.updateSessionBreaks();
     scheduleIndicatorRender();
     if (!cx.crosshairActive) refreshLegend();
     if (isTransformType(cx.activeType)) {
-      const last = mainLastIndex();
+      const last = cx.mainLastIndex();
       if (prevRange && prevLast != null && last != null) {
         ts.setVisibleLogicalRange({ from: prevRange.from + last - prevLast, to: prevRange.to + last - prevLast });
       }
@@ -440,33 +442,13 @@ export function createHistory(cx: ChartCx): HistoryApi {
   /** Index of the newest loaded bar at or before `targetSec` (binary search on
    *  the time-ascending `raw`); 0 when the target predates every bar. */
   function indexAtOrBefore(targetSec: number): number {
-    let lo = 0,
-      hi = cx.raw.length - 1,
-      ans = 0;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if ((cx.raw[mid].time as number) <= targetSec) {
-        ans = mid;
-        lo = mid + 1;
-      } else hi = mid - 1;
-    }
-    return ans;
+    return Math.max(0, lastAtOrBefore(cx.raw, targetSec));
   }
 
   /** Index of the oldest loaded bar at or after `targetSec` (lower bound);
    *  the newest bar when the target is past every bar. */
   function indexAtOrAfter(targetSec: number): number {
-    let lo = 0,
-      hi = cx.raw.length - 1,
-      ans = cx.raw.length - 1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if ((cx.raw[mid].time as number) >= targetSec) {
-        ans = mid;
-        hi = mid - 1;
-      } else lo = mid + 1;
-    }
-    return ans;
+    return Math.min(lowerBound(cx.raw, targetSec), cx.raw.length - 1);
   }
 
   // ── Date-range sync, driver side ────────────────────────────────────────
@@ -600,7 +582,7 @@ export function createHistory(cx: ChartCx): HistoryApi {
       }
       const ts = cx.chart.timeScale();
       const prevRange = ts.getVisibleLogicalRange();
-      const prevLast = isTransformType(cx.activeType) ? mainLastIndex() : null;
+      const prevLast = isTransformType(cx.activeType) ? cx.mainLastIndex() : null;
       const prevLen = cx.raw.length;
       // In Bar Replay the replayed series takes them in front.
       if (cx.replayActive) cx.replayOnPrepend(toOHLC(older));
@@ -610,14 +592,14 @@ export function createHistory(cx: ChartCx): HistoryApi {
       // dates) before the view is put back below: guard it too, so it is not
       // persisted, paged or sent to synced panes / linked tabs.
       holdSyncGuard();
-      setDataForType(cx.series, cx.activeType, cx.raw, currentTokens(), dataExtras());
-      afterSeriesData();
-      updateSessionBreaks();
+      setDataForType(cx.series, cx.activeType, cx.raw, currentTokens(), cx.dataExtras());
+      cx.afterSeriesData();
+      cx.updateSessionBreaks();
       scheduleIndicatorRender();
       if (!cx.crosshairActive) refreshLegend();
       const delta = cx.raw.length - prevLen;
       if (isTransformType(cx.activeType)) {
-        const last = mainLastIndex();
+        const last = cx.mainLastIndex();
         if (prevRange && prevLast != null && last != null) {
           holdSyncGuard();
           ts.setVisibleLogicalRange({ from: prevRange.from + last - prevLast, to: prevRange.to + last - prevLast });
@@ -790,9 +772,6 @@ export function createHistory(cx: ChartCx): HistoryApi {
     goToRange,
     goToTime,
     gotoDateIndex,
-    get historyEndClose() {
-      return historyEndClose;
-    },
     get historyExhausted() {
       return historyExhausted;
     },

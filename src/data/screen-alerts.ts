@@ -10,7 +10,7 @@
 import { createEffect, createRoot } from "solid-js";
 import { alertStore, isScreenRule, type AlertRule } from "./alert-store";
 import type { ScanRow } from "../bindings";
-import { deliverScreenFire } from "./alert-engine";
+import { deliverScreenFire } from "./alert-delivery";
 import { onScreenerUpdate, screenerClose, screenerFields, screenerOpen, screenerScan } from "./screener-api";
 import { planScreen } from "./screener-query";
 import { screenerStore } from "./screener-store";

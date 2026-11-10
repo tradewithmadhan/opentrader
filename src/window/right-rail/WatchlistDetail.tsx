@@ -29,6 +29,8 @@ import { marketSession as marketSessionOf, type MarketSession } from "../../data
 import { isEconomicSymbol, isLocalSymbol } from "../../data/datafeed";
 import { cachedSymbolSessions } from "../../data/session";
 import { abbreviatedPrice } from "../chart/price-format";
+import { createPopover } from "../../components/popover";
+import { translateWith } from "../../i18n/translator";
 
 const DASH = "—";
 
@@ -132,7 +134,7 @@ const PERIODS = ["1W", "1M", "3M", "6M", "YTD", "1Y"] as const;
 
 // ── Detail-panel preferences (Settings header button) ──
 // Settings toggles which sections show.
-// Persists to localStorage, alongside per-symbol notes (the "Add note" button).
+// Persists to kv, alongside per-symbol notes (the "Add note" button).
 const PREFS_KEY = "ot:watchlist:detail-prefs:v1";
 const NOTES_KEY = "ot:watchlist:notes:v1";
 
@@ -220,12 +222,14 @@ export function WatchlistDetail(props: Props) {
     setPrefs((p) => ({ ...p, sections: { ...p.sections, [k]: !p.sections[k] } }));
 
   // Outside-click / Esc closes any open header popover.
-  let actionsEl: HTMLDivElement | undefined;
+  const actionsEl = createPopover(undefined, {
+    onClose: () => setOpenPanel(null),
+    placement: false,
+    active: () => !!openPanel(),
+    escape: "pass",
+    on: { target: "window", capture: false },
+  });
   onMount(() => {
-    const onDown = (e: PointerEvent) => {
-      if (openPanel() && actionsEl && !actionsEl.contains(e.target as Node)) setOpenPanel(null);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpenPanel(null); };
     // Watchlist's row context menu ("Add note for …") selects the row, then
     // asks this pane to open its note editor.
     const onOpenNote = () => {
@@ -235,14 +239,8 @@ export function WatchlistDetail(props: Props) {
       if (props.collapsed) props.onToggleCollapse?.();
       setOpenPanel("note");
     };
-    window.addEventListener("pointerdown", onDown);
-    window.addEventListener("keydown", onKey);
     const offOpenNote = onAppEvent("wl-open-note", onOpenNote);
-    onCleanup(() => {
-      window.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("keydown", onKey);
-      offOpenNote();
-    });
+    onCleanup(offOpenNote);
   });
 
   // Fast path: reference info + live snapshot, in parallel — these populate the
@@ -454,7 +452,7 @@ export function WatchlistDetail(props: Props) {
           {/* Add-note popover — a per-symbol note, persisted locally. */}
           <Show when={openPanel() === "note"}>
             <div class="watchlist-detail-popover watchlist-detail-note-popover" role="dialog" aria-label="Note">
-              <div class="watchlist-detail-popover-title">Note · {short() || DASH}</div>
+              <div class="watchlist-detail-popover-title">{translateWith("Note · {0}", short() || DASH)}</div>
               <textarea
                 class="watchlist-detail-note-input"
                 placeholder="Write a note for this symbol…"

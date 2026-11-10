@@ -28,6 +28,7 @@ export type ChartAggregate = any;
 export type SecondAggregate = any;
 export type TradeTick = any;
 export type DataStatus = any;
+export type History = any;
 export type ProviderCapabilities = any;
 export type EngineRule = any;
 export type EngineGrid = any;

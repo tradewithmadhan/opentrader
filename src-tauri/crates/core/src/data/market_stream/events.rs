@@ -72,6 +72,12 @@ pub struct TradeTick {
     /// of its minute (UNIX seconds). `None` when the quote has no minute bar.
     pub trade_price: Option<f64>,
     pub trade_time: Option<f64>,
+    /// High and low of that minute so far: what an alert read in the window
+    /// (web build) needs to see the range the backend engine sees.
+    #[serde(default)]
+    pub trade_high: Option<f64>,
+    #[serde(default)]
+    pub trade_low: Option<f64>,
 }
 
 /// The live stream left or joined real-time data (#252). Sent when a session
@@ -141,7 +147,7 @@ impl Pending {
 
     /// The views get the newest trade per flush; the host's alert rules get
     /// every trade (#265), with what its minute traded so far.
-    fn trade(&mut self, tick: TradeTick) {
+    fn trade(&mut self, mut tick: TradeTick) {
         let price = tick.price;
         let bar = tick.trade_time.map(|time| {
             let bar = self.trade_bars.entry(tick.symbol.clone()).or_insert(Candle { time, open: price, high: price, low: price, close: price, volume: 0.0 });
@@ -154,6 +160,9 @@ impl Pending {
             bar.clone()
         });
         self.app.on_quote(&tick.symbol, price, bar.as_ref());
+        // The views get the newest trade only: it carries the minute's range.
+        tick.trade_high = bar.as_ref().map(|b| b.high);
+        tick.trade_low = bar.as_ref().map(|b| b.low);
         self.trades.insert(tick.symbol.clone(), tick);
     }
 
@@ -264,12 +273,16 @@ fn parse_trade(ev: &serde_json::Value) -> Option<TradeTick> {
         source: None,
         trade_price: ev.get("p").and_then(|v| v.as_f64()),
         trade_time: ev.get("t").and_then(|v| v.as_f64()).map(|ms| (ms / 60_000.0).floor() * 60.0),
+        // Filled in from the minute's trades as they arrive (`Pending::trade`).
+        trade_high: None,
+        trade_low: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::LockExt;
 
     #[test]
     fn stream_data_messages_parse() {
@@ -294,17 +307,19 @@ mod tests {
     struct Recorder(std::sync::Mutex<Vec<(&'static str, serde_json::Value)>>);
     impl crate::host::Host for Recorder {
         fn emit_value(&self, name: &'static str, payload: serde_json::Value) {
-            self.0.lock().unwrap().push((name, payload));
+            self.0.locked().push((name, payload));
         }
     }
 
-    /// The quotes the host's alert rules read: price and bar (time, high, low).
+    /// A quote the host's alert rules read: price and bar (time, high, low).
+    type Quote = (f64, Option<(f64, f64, f64)>);
+
     #[derive(Default)]
-    struct Quotes(std::sync::Mutex<Vec<(f64, Option<(f64, f64, f64)>)>>);
+    struct Quotes(std::sync::Mutex<Vec<Quote>>);
     impl crate::host::Host for Quotes {
         fn emit_value(&self, _: &'static str, _: serde_json::Value) {}
         fn on_quote(&self, _symbol: &str, last: f64, minute: Option<&Candle>) {
-            self.0.lock().unwrap().push((last, minute.map(|b| (b.time, b.high, b.low))));
+            self.0.locked().push((last, minute.map(|b| (b.time, b.high, b.low))));
         }
     }
 
@@ -312,14 +327,14 @@ mod tests {
     fn every_trade_reaches_the_alert_rules_with_its_minute_so_far() {
         let quotes = std::sync::Arc::new(Quotes::default());
         let host: HostRef = quotes.clone();
-        let trade = |price: f64, time: Option<f64>| TradeTick { symbol: "A".into(), price, change: None, change_percent: None, ext_change_percent: None, volume: None, source: None, trade_price: Some(price), trade_time: time };
+        let trade = |price: f64, time: Option<f64>| TradeTick { symbol: "A".into(), price, change: None, change_percent: None, ext_change_percent: None, volume: None, source: None, trade_price: Some(price), trade_time: time, trade_high: None, trade_low: None };
         let mut p = Pending::new(&host);
         p.trade(trade(10.0, Some(60.0)));
         p.trade(trade(12.0, Some(60.0)));
         p.trade(trade(11.0, Some(60.0)));
         p.trade(trade(9.0, Some(120.0)));
         p.trade(trade(8.0, None));
-        let got = quotes.0.lock().unwrap().clone();
+        let got = quotes.0.locked().clone();
         assert_eq!(
             got,
             vec![
@@ -340,7 +355,7 @@ mod tests {
     fn pending_sends_the_newest_bar_per_symbol_and_closed_bars() {
         let rec = std::sync::Arc::new(Recorder(Default::default()));
         let host: HostRef = rec.clone();
-        let sent = |rec: &Recorder| rec.0.lock().unwrap().drain(..).map(|(n, v)| (n, v["symbol"].as_str().unwrap().to_string(), v["time"].as_f64(), v["close"].as_f64())).collect::<Vec<_>>();
+        let sent = |rec: &Recorder| rec.0.locked().drain(..).map(|(n, v)| (n, v["symbol"].as_str().unwrap().to_string(), v["time"].as_f64(), v["close"].as_f64())).collect::<Vec<_>>();
         let mut p = Pending::new(&host);
         for c in [2.0, 3.0, 4.0] {
             p.minute(minute("A", 60.0, c));
@@ -364,20 +379,20 @@ mod tests {
     fn pending_sends_trades_every_trade_flush() {
         let rec = std::sync::Arc::new(Recorder(Default::default()));
         let host: HostRef = rec.clone();
-        let trade = |price: f64| TradeTick { symbol: "A".into(), price, change: None, change_percent: None, ext_change_percent: None, volume: None, source: None, trade_price: Some(price), trade_time: None };
+        let trade = |price: f64| TradeTick { symbol: "A".into(), price, change: None, change_percent: None, ext_change_percent: None, volume: None, source: None, trade_price: Some(price), trade_time: None, trade_high: None, trade_low: None };
         let mut p = Pending::new(&host);
         p.trade(trade(1.0));
         p.trade(trade(2.0));
         p.flush();
-        assert!(rec.0.lock().unwrap().is_empty());
+        assert!(rec.0.locked().is_empty());
         // the trade interval is over
         p.trades_sent = Instant::now() - TRADE_FLUSH;
         p.flush();
-        let out: Vec<_> = rec.0.lock().unwrap().drain(..).map(|(n, v)| (n, v["price"].as_f64())).collect();
+        let out: Vec<_> = rec.0.locked().drain(..).map(|(n, v)| (n, v["price"].as_f64())).collect();
         assert_eq!(out, vec![("trade-tick", Some(2.0))]);
         // the session ends: what is left is sent
         p.trade(trade(3.0));
         drop(p);
-        assert_eq!(rec.0.lock().unwrap().len(), 1);
+        assert_eq!(rec.0.locked().len(), 1);
     }
 }

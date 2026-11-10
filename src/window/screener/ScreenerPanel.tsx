@@ -77,6 +77,7 @@ import { promptNewWatchlist } from "../right-rail/watchlist-prompts";
 import { scriptResultsCsv } from "./script-csv";
 import { csvFileName, downloadText } from "./screener-csv";
 import { showConfirm, showNotice, showRename } from "../../components/Dialogs";
+import { translateWith } from "../../i18n/translator";
 
 /** The view type menu (the reference app order). */
 const VIEWS: { id: ViewMode; title: string; icon: string }[] = [
@@ -120,7 +121,7 @@ export function ScreenerPanel(props: Props) {
   let setsBtn!: HTMLButtonElement;
   let titleBtn!: HTMLButtonElement;
   const [titleOpen, setTitleOpen] = createSignal(false);
-  const script = () => scriptScreenStore.kind() === "script";
+  const script = () => screenerStore.kind() === "script";
   // The script screener's shown rows and columns, for the title menu.
   let scriptRows: () => ScriptRow[] = () => [];
   let scriptColumns: () => ScriptColumn[] = () => [];
@@ -140,7 +141,7 @@ export function ScreenerPanel(props: Props) {
   };
   /** The Stock or ETF Screener; leaving a changed screen asks first. */
   const showScreener = (t: ScreenerType) => {
-    if (script()) scriptScreenStore.setKind("stock");
+    if (script()) screenerStore.setKind("stock");
     if (screenerStore.type() !== t) leaveScreen(() => screenerStore.setType(t));
   };
   const saveScreenAs = () =>
@@ -636,7 +637,7 @@ export function ScreenerPanel(props: Props) {
               {viewTools()}
               <div class="scr-header-controls">
                 <Show when={!waiting() && view() !== "table" && (view() === "heatmap" ? heatTotal() : ctl.total()) !== null}>
-                  <span class="scr-total">{(view() === "heatmap" ? heatTotal() : ctl.total())!.toLocaleString("en-US")} total</span>
+                  <span class="scr-total">{translateWith("{0} total", (view() === "heatmap" ? heatTotal() : ctl.total())!.toLocaleString("en-US"))}</span>
                 </Show>
                 <Show when={roomy()}>{refreshButton()}</Show>
                 <button
@@ -738,7 +739,7 @@ export function ScreenerPanel(props: Props) {
         <Popover anchor={titleBtn} onClose={() => setTitleOpen(false)} width={260}>
           <PopItem title="Stock Screener" selected={!script() && screenerStore.type() === "stock"} onClick={() => { setTitleOpen(false); showScreener("stock"); }} />
           <PopItem title="ETF Screener" selected={!script() && screenerStore.type() === "etf"} onClick={() => { setTitleOpen(false); showScreener("etf"); }} />
-          <PopItem title="Script Screener" selected={script()} onClick={() => { setTitleOpen(false); scriptScreenStore.setKind("script"); }} />
+          <PopItem title="Script Screener" selected={script()} onClick={() => { setTitleOpen(false); screenerStore.setKind("script"); }} />
           <PopDivider />
           <PopSectionTitle title="Placement" />
           <PopItem title="Right panel" selected={screenerPanel.placement() === "right"} onClick={() => { setTitleOpen(false); place("right"); }} />

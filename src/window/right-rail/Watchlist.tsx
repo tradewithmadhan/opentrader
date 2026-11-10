@@ -5,7 +5,7 @@
  *
  * Settings (Feature: watchlist settings, ported from the reference mock): the
  * header gear opens WatchlistSettingsMenu — Table/tile view, customizable
- * columns, logo toggle, Symbol/Name display. Persisted to localStorage.
+ * columns, logo toggle, Symbol/Name display. Persisted to kv.
  *
  * The panel's parts (columns, cells, sort, selection, sections, drag and
  * drop, menus, rows, headers) live in watchlist/; they share the panel's
@@ -17,13 +17,8 @@ import { Icon } from "../../components/Icon";
 import { Tooltip } from "../../components/Tooltip";
 import { PanelHeader } from "../../components/PanelHeader";
 import { IconButton } from "../../components/IconButton";
-import {
-  HEADER_ITEMS,
-  WL_COLUMNS,
-  WL_ICONS,
-  type SortKey,
-  type WlSettings,
-} from "../../data/watchlist";
+import type { SortKey, WlSettings } from "../../data/watchlist";
+import { HEADER_ITEMS, WL_COLUMNS, WL_ICONS } from "./watchlist/ui";
 import {
   watchlistStore,
   isSectionId,
@@ -57,6 +52,7 @@ import { createKeyboard } from "./watchlist/keyboard";
 import { createRowMenus } from "./watchlist/row-menus";
 import { createRows } from "./watchlist/rows";
 import { createHeaders } from "./watchlist/headers";
+import { createPopover } from "../../components/popover";
 
 export function Watchlist(props: WatchlistProps) {
   const watchlistsHeader = HEADER_ITEMS.find((h) => h.dataName === "watchlists-button");
@@ -64,7 +60,7 @@ export function Watchlist(props: WatchlistProps) {
   const actionItems = HEADER_ITEMS.filter((h) => h.dataName !== "watchlists-button");
 
   // ── Active list (multi-list store) ──
-  // The store owns the lists + which one is active and persists to localStorage.
+  // The store owns the lists + which one is active and persists to kv.
   // Its sections/extras drive the rows; its marker drives the header + toolbar.
   const active = (): WatchList | undefined => watchlistStore.active();
   const groups = () => active()?.groups ?? [];
@@ -106,12 +102,14 @@ export function Watchlist(props: WatchlistProps) {
   };
   const [sortMenuOpen, setSortMenuOpen] = createSignal(false);
   let sortWrapEl: HTMLDivElement | undefined;
-  onMount(() => {
-    const onDown = (e: PointerEvent) => {
-      if (sortMenuOpen() && sortWrapEl && !sortWrapEl.contains(e.target as Node)) setSortMenuOpen(false);
-    };
-    window.addEventListener("pointerdown", onDown);
-    onCleanup(() => window.removeEventListener("pointerdown", onDown));
+  // The sort menu and its button are one wrapper: a press outside it closes the menu.
+  createPopover(undefined, {
+    onClose: () => setSortMenuOpen(false),
+    placement: false,
+    inside: () => [sortWrapEl],
+    active: () => sortMenuOpen() && !!sortWrapEl,
+    escape: "none",
+    on: { target: "window", capture: false },
   });
   // Hidden file input backing the menu's "Upload list…" action.
   let uploadInput: HTMLInputElement | undefined;

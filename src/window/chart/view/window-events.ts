@@ -16,9 +16,7 @@ import { STRATEGY_UPDATED_EVENT, type StrategyUpdatedDetail } from "../indicator
 import { emitAppEvent, onAppEvent, type AppEventName, type AppEvents } from "../../../data/app-events";
 import { startReplayAt } from "../../../data/replay";
 import { type ChartCx } from "./context";
-import { indexAtOrBefore } from "./helpers";
-import { sourcesEdit } from "../../shell/source-edits";
-import { getIndicatorEntry } from "../indicators/registry";
+import { lastAtOrBefore } from "../time-search";
 
 /** What createWindowEvents adds to the chart context. */
 export interface WindowEventsApi {
@@ -74,7 +72,7 @@ export function createWindowEvents(cx: ChartCx): WindowEventsApi {
           // only if no price was sent (older broadcast / off-scale cursor).
           const price = d.price != null ? d.price : (cx.raw.length ? cx.raw[cx.raw.length - 1].close : 0);
           // The bar holding the time (another interval's time falls inside one): the library would take the next.
-          const k = indexAtOrBefore(cx.raw, d.time);
+          const k = lastAtOrBefore(cx.raw, d.time);
           const past = k === cx.raw.length - 1 && d.time > (cx.raw[k].time as number);
           const time = past ? d.time : (cx.raw[k].time as number);
           cx.chart.setCrosshairPosition(price, time as UTCTimestamp, cx.series);
@@ -124,17 +122,6 @@ export function createWindowEvents(cx: ChartCx): WindowEventsApi {
       void cx.goToTime(d.time);
     };
     listenWhenShown("chart-sync-crosshair", onSyncCrosshair);
-    // An edit of a source begins on the focused chart: its studies as drawn, for the undo step (source-edits.ts).
-    listenWhenShown("chart-sources-snapshot", (d) => {
-      const c = cx.controller;
-      if (!props.active || !c || !d) return;
-      const out: Record<string, { inputs: Record<string, unknown>; styles: unknown; options: unknown }> = {};
-      for (const id of props.indicators ?? []) {
-        const inputs = c.getInputs(id);
-        if (inputs) out[id] = { inputs: { ...inputs }, styles: { ...c.getStyles(id) }, options: c.getOptions(id) };
-      }
-      d.fill(out);
-    });
     listenWhenShown("chart-sync-range", onSyncRange);
     listenWhenShown("chart-sync-time", onSyncTime);
     listenWhenShown("chart-link-range", onLinkRange);
@@ -266,7 +253,7 @@ export function createWindowEvents(cx: ChartCx): WindowEventsApi {
     const onResetTime = () => {
       if (!props.active) return;
       cx.resetTimeScale();
-      cx.refreshBarsRef?.();
+      cx.refreshControlBars();
     };
     listenWhenShown("chart-zoom", onZoom);
     listenWhenShown("chart-scale", onScale);
@@ -323,20 +310,7 @@ export function createWindowEvents(cx: ChartCx): WindowEventsApi {
         setSettingsTab(d.tab);
         setSettingsForId(id);
       };
-      const onPatchInputs = (d: AppEvents["chart-patch-study-inputs"] | undefined) => {
-        if (!props.active || props.shown === false || !d || !cx.controller || !(props.indicators ?? []).includes(d.id)) return;
-        const c = cx.controller;
-        const inputs = { ...(c.getInputs(d.id) ?? {}), ...d.patch };
-        const styles = c.getStyles(d.id) ?? {};
-        const options = c.getOptions(d.id);
-        // One undo step, as the Settings dialog's Ok.
-        sourcesEdit(`change ${getIndicatorEntry(d.id)?.name ?? d.id} properties`, () => {
-          c.applySettings(d.id, inputs, styles, options);
-          props.onIndicatorSettings?.(d.id, { inputs, styles, options });
-        });
-      };
       onCleanup(onAppEvent("chart-open-study-settings", onOpenSettings));
-      onCleanup(onAppEvent("chart-patch-study-inputs", onPatchInputs));
     });
     // Strategies: a backtest of this chart finished — redraw its trade marks.
     onMount(() => {

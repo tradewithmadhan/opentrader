@@ -12,6 +12,7 @@
  *              with the live price (`Ratio`: P/E, P/S, EV...).
  */
 use crate::data::market_rest::MarketRow;
+use crate::sync::LockExt;
 use crate::screener::state::StateFile;
 use crate::screener::table::{Join, Row, Table};
 use crate::screener::technicals::{self, Tech};
@@ -472,7 +473,7 @@ fn state_num(t: &Table, row: &Row, key: &str, step: Step) -> Option<f64> {
 }
 
 fn range(m: &MarketRow) -> Option<f64> {
-    (m.high > 0.0 && m.low > 0.0).then(|| m.high - m.low)
+    (m.high > 0.0 && m.low > 0.0).then_some(m.high - m.low)
 }
 
 fn perf(price: f64, base: f64) -> Option<f64> {
@@ -491,7 +492,7 @@ fn atr_step(s: &StateFile, i: usize, m: &MarketRow, n: u32) -> Option<f64> {
 /// A custom field id as a `'static` key (a few hundred at most: lengths 1 to 500 of three kinds).
 fn intern(id: &str) -> &'static str {
     static KEYS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, &'static str>>> = std::sync::OnceLock::new();
-    let mut keys = KEYS.get_or_init(Default::default).lock().expect("field keys lock");
+    let mut keys = KEYS.get_or_init(Default::default).locked();
     if let Some(k) = keys.get(id) {
         return k;
     }
@@ -555,10 +556,11 @@ pub fn catalog(t: &Table) -> Vec<FieldInfo> {
 
 /// Distinct values of a text field over the table, sorted (the options of the
 /// Sector / Industry checkbox filters). Errors on an unknown or numeric field.
-pub fn text_values(t: &Table, id: &str) -> Result<Vec<String>, String> {
-    let f = Field::parse(id).ok_or_else(|| format!("unknown field {id}"))?;
+pub fn text_values(t: &Table, id: &str) -> crate::error::Result<Vec<String>> {
+    use crate::error::Error;
+    let f = Field::parse(id).ok_or_else(|| Error::invalid(format!("unknown field {id}")))?;
     if !f.is_text() {
-        return Err(format!("{id} is not a text field"));
+        return Err(Error::invalid(format!("{id} is not a text field")));
     }
     let mut set = std::collections::BTreeSet::new();
     for row in &t.rows {

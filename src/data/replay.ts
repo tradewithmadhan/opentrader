@@ -11,8 +11,10 @@
  * States: off (no toolbar) → open (toolbar, no point) → selecting (the chart
  * picks a bar) → paused / playing (charts cut at the replay time).
  */
-import { createSignal } from "solid-js";
+import { createSignal, untrack } from "solid-js";
 import * as kv from "./kv";
+import { oneOf, persisted } from "./persisted";
+import { intervalSeconds, isDailyInterval, parseInterval } from "./interval";
 import type { WallDate, WallTime } from "../window/chart/day-key";
 
 /** Which charts a replay covers (the header "Replay mode" menu). */
@@ -45,47 +47,54 @@ export function clampDelay(ms: number): number {
   return best;
 }
 
-function readMode(): ReplayMode {
-  return kv.getItem(MODE_KEY) === "AllCharts" ? "AllCharts" : "ActiveChart";
-}
-function readTiming(): TimingMode {
-  const v = kv.getItem(TIMING_KEY);
-  return v === "date" || v === "first" || v === "random" ? v : "bar";
-}
-function readDelay(): number {
-  const n = Number(kv.getItem(DELAY_KEY));
-  return Number.isFinite(n) && n > 0 ? clampDelay(n) : DEFAULT_REPLAY_DELAY;
-}
+// The last mode, start mode and speed used, in any window: a new tab's replay starts with them.
+const [lastMode, saveMode] = persisted<ReplayMode>(MODE_KEY, {
+  parse: oneOf("ActiveChart", "AllCharts"),
+  format: String,
+  default: "ActiveChart",
+  sync: true,
+});
+const [lastTiming, saveTiming] = persisted<TimingMode>(TIMING_KEY, {
+  parse: oneOf("bar", "date", "first", "random"),
+  format: String,
+  default: "bar",
+  sync: true,
+});
+const [lastDelay, saveDelay] = persisted<number>(DELAY_KEY, {
+  parse: (raw) => {
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? clampDelay(n) : undefined;
+  },
+  format: String,
+  default: DEFAULT_REPLAY_DELAY,
+  sync: true,
+});
 
 // ── Update intervals ─────────────────────────────────────────────────────────
 
-/** Seconds of an interval id ("1S", "5", "60", "1D", "1W", "1M"); a month
- *  counts 30 days (the reference app). */
-export function replayIntervalSeconds(id: string): number {
-  const m = /^(\d+)([SDWM])$/.exec(id);
-  if (m) {
-    const n = Number(m[1]);
-    return n * ({ S: 1, D: 86400, W: 7 * 86400, M: 30 * 86400 } as const)[m[2] as "S" | "D" | "W" | "M"];
-  }
-  const n = Number(id);
-  return Number.isFinite(n) ? n * 60 : NaN;
-}
+/** Seconds of an interval id (a month counts 30 days, as in the reference app);
+ *  NaN for an id that is no interval, so it compares false and is left out. */
+const seconds = (id: string): number => intervalSeconds(id) ?? NaN;
+
+/** The unit of an interval id, null when it is no interval. */
+const unitOf = (id: string) => parseInterval(id)?.unit ?? null;
 
 /** Candidate update intervals by chart interval kind (the reference app list, without
  *  ticks: the data has no trades). */
 function candidatesFor(chart: string): string[] {
-  if (/^\d+S$/.test(chart)) return ["1S", "5S", "10S", "15S", "30S", "45S"];
-  if (/^\d+D$/.test(chart)) return ["60", "120", "180", "240", "1D"];
-  if (/^\d+[WM]$/.test(chart)) return ["1D"];
-  const mins = Number(chart);
+  const unit = unitOf(chart);
+  if (unit === "second") return ["1S", "5S", "10S", "15S", "30S", "45S"];
+  if (unit === "day") return ["60", "120", "180", "240", "1D"];
+  if (unit === "week" || unit === "month") return ["1D"];
   const small = ["1S", "1", "3", "5", "10", "15", "30", "45"];
-  return mins >= 60 ? [...small, "60", "120", "180", "240"] : small;
+  return seconds(chart) >= 3600 ? [...small, "60", "120", "180", "240"] : small;
 }
 
 /** The interval every chart steps on at least (the reference app common divisor):
  *  the chart interval itself, "1D" for a daily, weekly or monthly chart. */
 function baseOf(chart: string): string {
-  return /^\d+[DWM]$/.test(chart) ? "1D" : chart;
+  const iv = parseInterval(chart);
+  return iv && isDailyInterval(iv) ? "1D" : chart;
 }
 
 /** Update intervals offered for the charts in replay (`intervals`, one per
@@ -97,20 +106,21 @@ export function updateIntervals(intervals: string[], available: (id: string) => 
   if (intervals.length === 0) return [];
   const main = intervals[0];
   const base = baseOf(main);
-  const baseSec = replayIntervalSeconds(base);
+  const baseSec = seconds(base);
   const divides = (id: string) => {
-    const s = replayIntervalSeconds(id);
+    const s = seconds(id);
     return intervals.every((iv) => {
-      if (/^\d+[WM]$/.test(iv)) return id === "1D";
-      const t = replayIntervalSeconds(iv);
+      const unit = unitOf(iv);
+      if (unit === "week" || unit === "month") return id === "1D";
+      const t = seconds(iv);
       return Number.isFinite(t) && t % s === 0;
     });
   };
   const all = [...new Set([...candidatesFor(main), base])].filter((id) => {
-    const s = replayIntervalSeconds(id);
+    const s = seconds(id);
     return Number.isFinite(s) && s <= baseSec && divides(id);
   });
-  all.sort((a, b) => replayIntervalSeconds(a) - replayIntervalSeconds(b));
+  all.sort((a, b) => seconds(a) - seconds(b));
   return all.filter(available);
 }
 
@@ -124,8 +134,8 @@ export function autoUpdateInterval(list: string[], chart: string): string {
  *  the largest offered one shorter than it, else the first. */
 export function fallbackUpdateInterval(list: string[], current: string): string | null {
   if (list.includes(current)) return current;
-  const cur = replayIntervalSeconds(current);
-  const shorter = list.filter((id) => replayIntervalSeconds(id) < cur);
+  const cur = seconds(current);
+  const shorter = list.filter((id) => seconds(id) < cur);
   return shorter.length > 0 ? shorter[shorter.length - 1] : list[0] ?? null;
 }
 
@@ -226,23 +236,22 @@ export function stopReplayToolbarHighlight() {
   if ((Number(kv.getItem(HIGHLIGHT_KEY)) || 0) < 3) kv.setItem(HIGHLIGHT_KEY, "4");
 }
 
-const [jumpHintClosed, setJumpHintClosed] = createSignal(kv.getItem(JUMP_HINT_KEY) === "true");
+// Closed in one window: closed in all (stored "true").
+const [jumpHintClosed, setJumpHintClosed] = persisted(JUMP_HINT_KEY, { parse: (raw) => raw === "true", default: false, sync: true });
 /** "Click to select the starting point." while a bar is picked, until it is
  *  closed once. */
 export const replayJumpHintShown = () => cur().selecting() && !jumpHintClosed();
 export function closeReplayJumpHint() {
   setJumpHintClosed(true);
-  kv.setItem(JUMP_HINT_KEY, "true");
 }
 
 const SAVE_SESSION_KEY = "ot:replay-save-session";
-/** "Save this replay" (leave dialog), on by default. */
-export function replaySaveSession(): boolean {
-  return kv.getItem(SAVE_SESSION_KEY) !== "false";
-}
-export function setReplaySaveSession(v: boolean) {
-  kv.setItem(SAVE_SESSION_KEY, v ? "true" : "false");
-}
+/** "Save this replay" (leave dialog), on by default; stored "true" / "false". */
+export const [replaySaveSession, setReplaySaveSession] = persisted(SAVE_SESSION_KEY, {
+  parse: (raw) => raw !== "false",
+  default: true,
+  sync: true,
+});
 
 // ── Sessions: one replay per tab ─────────────────────────────────────────────
 // The reference app runs each tab as its own page, so each has its own
@@ -259,9 +268,9 @@ function createSession(tab: string) {
   /** Replay time (s): the data shown ends at it. */
   const [point, setPoint] = createSignal<number | null>(null);
   // Mode, start mode and speed: a new tab's replay starts with the last ones used.
-  const [mode, setMode] = createSignal<ReplayMode>(readMode());
-  const [timing, setTiming] = createSignal<TimingMode>(readTiming());
-  const [delay, setDelay] = createSignal<number>(readDelay());
+  const [mode, setMode] = createSignal<ReplayMode>(untrack(lastMode));
+  const [timing, setTiming] = createSignal<TimingMode>(untrack(lastTiming));
+  const [delay, setDelay] = createSignal<number>(untrack(lastDelay));
   /** Fixed update interval; null = Auto. */
   const [fixedUpdate, setFixedUpdate] = createSignal<string | null>(null);
   const [dateDialog, setDateDialog] = createSignal(false);
@@ -597,7 +606,7 @@ export function setReplayDelay(ms: number) {
   const s = cur();
   const d = clampDelay(ms);
   s.setDelay(d);
-  kv.setItem(DELAY_KEY, String(d));
+  saveDelay(d);
   // Playing: restart at the new speed.
   if (s.playing()) startTimer(s);
 }
@@ -739,7 +748,7 @@ export function selectRandom(inSession: (sec: number) => boolean = () => true) {
 
 export function setTimingMode(m: TimingMode) {
   cur().setTiming(m);
-  kv.setItem(TIMING_KEY, m);
+  saveTiming(m);
 }
 
 /** Run the start-point action of the current timing mode. */
@@ -860,6 +869,6 @@ export function closeReplay() {
 
 function setMode(s: Session, m: ReplayMode) {
   s.setMode(m);
-  kv.setItem(MODE_KEY, m);
+  saveMode(m);
 }
 export const setReplayMode = (m: ReplayMode) => setMode(cur(), m);

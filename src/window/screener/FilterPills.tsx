@@ -19,12 +19,13 @@ import { For, Show, createMemo, createSignal } from "solid-js";
 import { Icon } from "../../components/Icon";
 import { FLAG_HEX, FLAG_SORT_ORDER } from "../../data/watchlist";
 import { isDeletedList, watchlistStore, type WatchList } from "../../data/watchlist-store";
-import { COLUMN_BY_ID, OPERATION_ICON, emptyFilter, isOffered, type ColumnRef, type Filter } from "../../data/screener-catalog";
+import { COLUMN_BY_ID, FILTER_OPS, emptyFilter, isOffered, type ColumnRef, type Filter } from "../../data/screener-catalog";
 import { isActive, pillTexts } from "../../data/screener-query";
 import { screenerStore } from "../../data/screener-store";
 import { CategoryMenu } from "./CategoryMenu";
 import { FilterEditor } from "./FilterEditor";
 import { PopItem, Popover } from "./Popover";
+import { translateWith } from "../../i18n/translator";
 
 type Props = {
   has: (field: string) => boolean;
@@ -145,7 +146,7 @@ export function FilterPills(props: Props) {
             <Show when={texts().icon}>
               {(op) => (
                 <span class="scr-pill-icon">
-                  <Icon name={`scr-op-${OPERATION_ICON[op()]}`} size={18} />
+                  <Icon name={`scr-op-${FILTER_OPS[op()].icon}`} size={18} />
                 </span>
               )}
             </Show>
@@ -344,7 +345,7 @@ export function FilterPills(props: Props) {
           />
           <Show when={inactiveCount() > 0 && activeCount() > 0}>
             <PopItem
-              title={`Remove ${inactiveCount()} inactive filter${inactiveCount() === 1 ? "" : "s"}`}
+              title={translateWith(inactiveCount() === 1 ? "Remove {0} inactive filter" : "Remove {0} inactive filters", inactiveCount())}
               onClick={() => {
                 screenerStore.update((s) => ({ ...s, filters: s.filters.filter(isActive) }));
                 close();

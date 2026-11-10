@@ -6,7 +6,7 @@ import { batch, createEffect, createMemo, createSignal, For, lazy, on, onCleanup
 import { HeaderToolbar } from "./window/header/HeaderToolbar";
 import { HeaderMenu } from "./window/header/HeaderMenu";
 import { buildIntervalMenu } from "./window/chart/custom-intervals";
-import { HEADER_MENUS } from "./window/header/header-menus/registry";
+import { HEADER_MENUS, type HeaderMenuDef } from "./window/header/header-menus/registry";
 import { SymbolSearchDialog } from "./window/header/SymbolSearchDialog";
 import { ChangeIntervalDialog } from "./window/chart/ChangeIntervalDialog";
 import { IndicatorsDialog } from "./window/header/IndicatorsDialog";
@@ -75,7 +75,6 @@ import { createChartEdits } from "./window/shell/chart-edits";
 import { installKeyboardShortcuts } from "./window/shell/keyboard-shortcuts";
 import { installAppRequests } from "./window/shell/app-requests";
 import { installLayoutSources } from "./window/shell/layout-sources";
-import { installSourceEdits } from "./window/shell/source-edits";
 import { ReplayToolbar } from "./window/replay/ReplayToolbar";
 import { replayEnabled, replayToolbarShown, setReplaySessionStore, setReplayTabSource } from "./data/replay";
 import { ReplaySettingsDialog } from "./window/replay/ReplaySettingsDialog";
@@ -383,33 +382,18 @@ function App() {
   appTabs.followCloseOnlyTypes();
   const drawingStore = createDrawingStore(appTabs, undo);
   const {
-    drawingKeyFor,
-    drawingsFor,
     drawings,
-    addDrawingToSymbol,
-    updateDrawingForSymbol,
-    removeDrawingForSymbol,
-    updateDrawingsForSymbol,
-    removeDrawingsForSymbol,
-    cloneDrawingForSymbol,
     updateDrawing,
     removeDrawing,
     cloneDrawing,
-    drawingSyncForSymbol,
-    setDrawingsSyncForSymbol,
     toggleHide,
     toggleLock,
     removeAllDrawings,
-    reorderDrawingForSymbol,
-    placeDrawingsForSymbol,
     moveDrawingToDisplayIndex,
   } = drawingStore;
   const chartEdits = createChartEdits(appTabs, undo, drawingStore);
   const {
-    removeIndicatorFromPane,
-    reorderIndicatorsForPane,
-    setIndicatorSettingsForPane,
-    setVisibleRangeForPane,
+    patchStudyInputs,
     addIndicator,
     toggleScriptOnChart,
     removeAllIndicators,
@@ -422,13 +406,6 @@ function App() {
     patchCompare,
     compareAdded,
     compareRecent,
-    setPaneOrderForPane,
-    setSeriesPaneForPane,
-    setSeriesScaleForPane,
-    setSourceOrderForPane,
-    setPaneLinkGroup,
-    toggleSeriesHidden,
-    toggleIndicatorsLegend,
   } = chartEdits;
   function removeAllObjects() {
     removeAllDrawings();
@@ -577,72 +554,65 @@ function App() {
   });
 
   // ── Header dropdowns ───────────────────────────────────────────────────
+  /** Snapshot menu rows (the link and tweet rows are cloud actions, not offered). "Open in new tab" opens the PNG
+   *  in the OS default viewer (temp file via the open_snapshot command). */
+  const snapshotRows: Record<string, () => void> = {
+    "save-chart-image": () => emitAppEvent("chart-snapshot", { action: "download" }),
+    "copy-chart-image": () => emitAppEvent("chart-snapshot", { action: "copy" }),
+    "open-image-in-new-tab": () => emitAppEvent("chart-snapshot", { action: "open" }),
+    "share-to-community": () => requestShare({ attach: true }),
+    "snapshot-to-community": () => requestShare({ snapshotOnly: true }),
+  };
+
+  /** Each header dropdown in one place: its rows when they come from live state (otherwise the registry entry), the
+   *  row shown as the current choice, and what picking a row does. A menu missing here only shows its rows. */
+  const headerMenus: Record<string, { build?: () => HeaderMenuDef; selected?: () => string | undefined; onSelect?: (rowId: string) => void }> = {
+    "chart-interval": { build: buildIntervalMenu, selected: interval, onSelect: setInterval },
+    candles: {
+      selected: chartType,
+      onSelect: (rowId) => {
+        if (CHART_TYPE_IDS.has(rowId as ChartTypeId)) setChartType(rowId as ChartTypeId);
+      },
+    },
+    "layout-setup": { selected: () => variantIdForLayout(layout()), onSelect: (rowId) => setLayout(layoutFromVariantId(rowId)) },
+    "save-load-menu": {
+      // Built from the live autosave state and the saved-layouts list.
+      build: () =>
+        buildSaveLoadMenu({
+          activeId: activeTab().savedLayoutId,
+          autosave: layoutAutosave(),
+          dirty: layoutDirty(),
+          summaryOf: layouts.summaryOfLayout,
+        }),
+      onSelect: (rowId) => layouts.onManageLayoutsSelect(rowId),
+    },
+    "take-a-snapshot": { onSelect: (rowId) => snapshotRows[rowId]?.() },
+    // A favourite row adds that study to the focused pane (one more instance when it is already on the chart).
+    "show-favorite-indicators": { build: buildFavoriteIndicatorsMenu, onSelect: (rowId) => addIndicator(rowId) },
+    "indicator-templates": {
+      build: buildIndicatorTemplatesMenu,
+      onSelect: (rowId) => {
+        if (rowId === SAVE_TEMPLATE_ROW_ID) setTemplateNameDialogOpen(true);
+        else if (rowId.startsWith(APPLY_TEMPLATE_PREFIX)) applyIndicatorTemplate(rowId.slice(APPLY_TEMPLATE_PREFIX.length));
+      },
+    },
+  };
+
   function onMenuSelect(rowId: string) {
-    const which = openMenu();
-    if (which === "chart-interval") {
-      setInterval(rowId);
-    } else if (which === "candles" && CHART_TYPE_IDS.has(rowId as ChartTypeId)) {
-      setChartType(rowId as ChartTypeId);
-    } else if (which === "layout-setup") {
-      setLayout(layoutFromVariantId(rowId));
-    } else if (which === "save-load-menu") {
-      layouts.onManageLayoutsSelect(rowId);
-    } else if (which === "take-a-snapshot") {
-      // Snapshot menu (the link and tweet rows are cloud actions, not
-      // offered). "Open in new tab" opens the PNG in the OS default viewer
-      // (temp file via the open_snapshot command).
-      if (rowId === "save-chart-image") {
-        emitAppEvent("chart-snapshot", { action: "download" });
-      } else if (rowId === "copy-chart-image") {
-        emitAppEvent("chart-snapshot", { action: "copy" });
-      } else if (rowId === "open-image-in-new-tab") {
-        emitAppEvent("chart-snapshot", { action: "open" });
-      } else if (rowId === "share-to-community") {
-        requestShare({ attach: true });
-      } else if (rowId === "snapshot-to-community") {
-        requestShare({ snapshotOnly: true });
-      }
-    } else if (which === "show-favorite-indicators") {
-      // A favourite row adds that study to the focused pane (one more
-      // instance when it is already on the chart).
-      addIndicator(rowId);
-    } else if (which === "indicator-templates") {
-      if (rowId === SAVE_TEMPLATE_ROW_ID) setTemplateNameDialogOpen(true);
-      else if (rowId.startsWith(APPLY_TEMPLATE_PREFIX))
-        applyIndicatorTemplate(rowId.slice(APPLY_TEMPLATE_PREFIX.length));
-    }
-    // Other menus: no-op for now.
+    const id = openMenu();
+    if (id) headerMenus[id]?.onSelect?.(rowId);
   }
 
-  /** Live menu def for the open dropdown — the "Manage layouts" menu is built
-   *  dynamically (live autosave state + saved-layouts list); the rest are the
-   *  static registry entries. */
-  function currentMenuDef() {
+  /** Rows of the open dropdown. */
+  function currentMenuDef(): HeaderMenuDef | undefined {
     const id = openMenu();
     if (!id) return undefined;
-    if (id === "save-load-menu") {
-      return buildSaveLoadMenu({
-        activeId: activeTab().savedLayoutId,
-        autosave: layoutAutosave(),
-        dirty: layoutDirty(),
-        summaryOf: layouts.summaryOfLayout,
-      });
-    }
-    // Live menus (the static registry entries for these ids are placeholders
-    // — the real rows come from the local stores).
-    if (id === "show-favorite-indicators")
-      return buildFavoriteIndicatorsMenu();
-    if (id === "indicator-templates") return buildIndicatorTemplatesMenu();
-    if (id === "chart-interval") return buildIntervalMenu();
-    return HEADER_MENUS[id];
+    return headerMenus[id]?.build?.() ?? HEADER_MENUS[id];
   }
 
   function selectedRowForOpenMenu(): string | undefined {
-    const which = openMenu();
-    if (which === "chart-interval") return interval();
-    if (which === "candles") return chartType();
-    if (which === "layout-setup") return variantIdForLayout(layout());
-    return undefined;
+    const id = openMenu();
+    return id ? headerMenus[id]?.selected?.() : undefined;
   }
 
   onMount(() => {
@@ -674,8 +644,6 @@ function App() {
     // Chart menus: sources added / applied to the entire layout, pasted
     // sources, "Move chart".
     onCleanup(installLayoutSources(appTabs, undo, drawingStore));
-    // Edits of one source (visual order, visibility, Move to, Pin to scale, settings): undo steps.
-    onCleanup(installSourceEdits(appTabs, undo));
 
     // Start the alert engine and surface fires as a transient toast. ONE
     // engine per app, not per window: detached chart windows load this same
@@ -870,26 +838,13 @@ function App() {
               theme={theme()}
               timeZone={timezone().iana}
               timeZoneLabel={timezone().label}
-              drawingsFor={drawingsFor}
-              drawingKeyForPane={(p) => drawingKeyFor(p, tabId)}
-              onRemoveIndicator={(i, id) => removeIndicatorFromPane(tabId, i, id)}
-              onReorderIndicators={(i, ids) => reorderIndicatorsForPane(tabId, i, ids)}
-              onIndicatorSettings={(i, id, st) => setIndicatorSettingsForPane(tabId, i, id, st)}
-              onCompareChange={(i, id, patch) => patchCompare(tabId, i, id, patch)}
-              onRemoveCompare={(i, id) => removeCompare(tabId, i, id)}
-              onPaneOrder={(i, order) => setPaneOrderForPane(tabId, i, order)}
-              onSeriesPane={(i, group) => setSeriesPaneForPane(tabId, i, group)}
-              onSeriesScale={(i, key) => setSeriesScaleForPane(tabId, i, key)}
-              onSourceOrder={(i, order) => setSourceOrderForPane(tabId, i, order)}
+              chartEdits={chartEdits}
+              drawingStore={drawingStore}
               onChangeCompareSymbol={(i, id) => {
                 setCompareTarget({ tabId, paneIndex: i, id });
                 openSymbolSearch(null);
               }}
-              onVisibleRange={(i, r) => setVisibleRangeForPane(tabId, i, r)}
               linkSyncVisible={tab().panes.length > 1 && (tab().sync.symbol || tab().sync.interval)}
-              onLinkGroup={(i, g) => setPaneLinkGroup(tabId, i, g)}
-              onToggleSeries={(i) => toggleSeriesHidden(tabId, i)}
-              onToggleIndicatorsLegend={(i) => toggleIndicatorsLegend(tabId, i)}
               onChangeInterval={() => setIntervalDialog({ initVal: interval(), selectOnInit: true })}
               onSetInterval={setInterval}
               onChangeSymbol={() => {
@@ -906,21 +861,11 @@ function App() {
               magnetMode={magnetMode()}
               magnetSnapsToIndicators={magnetSnapsToIndicators()}
               stayMode={stayMode()}
-              onPlaceToSymbol={addDrawingToSymbol}
               onDisarm={() => setArmedTool(null)}
               selectedDrawingId={selectedDrawingId()}
               selectedDrawingIds={selectedDrawingIds()}
               setSelectedDrawingId={setSelectedDrawingId}
               toggleSelectedDrawing={toggleSelectedDrawing}
-              updateDrawingForSymbol={updateDrawingForSymbol}
-              updateDrawingsForSymbol={updateDrawingsForSymbol}
-              cloneDrawingForSymbol={cloneDrawingForSymbol}
-              drawingSyncForSymbol={drawingSyncForSymbol}
-              setDrawingsSyncForSymbol={setDrawingsSyncForSymbol}
-              reorderDrawingForSymbol={reorderDrawingForSymbol}
-              placeDrawingsForSymbol={placeDrawingsForSymbol}
-              removeDrawingForSymbol={removeDrawingForSymbol}
-              removeDrawingsForSymbol={removeDrawingsForSymbol}
             />
               )}
             </Show>
@@ -968,7 +913,8 @@ function App() {
             properties={(id) => ((activePaneState().indicatorSettings?.[id]?.inputs as Record<string, unknown> | undefined)?.[PROPERTIES_INPUT] ?? {}) as Record<string, unknown>}
             onPatchProperties={(id, patch) => {
               const cur = ((activePaneState().indicatorSettings?.[id]?.inputs as Record<string, unknown> | undefined)?.[PROPERTIES_INPUT] ?? {}) as Record<string, unknown>;
-              emitAppEvent("chart-patch-study-inputs", { id, patch: { [PROPERTIES_INPUT]: { ...cur, ...patch } } });
+              const tab = activeTab();
+              patchStudyInputs(tab.id, tab.activePane, id, { [PROPERTIES_INPUT]: { ...cur, ...patch } });
             }}
             onSettings={(id, tab) => emitAppEvent("chart-open-study-settings", { id, tab })}
             onAddStrategy={() => emitAppEvent("chart-open-indicators")}

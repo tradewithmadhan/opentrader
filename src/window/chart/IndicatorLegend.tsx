@@ -20,11 +20,13 @@
  * editor (reference legend status for a script open in its editor).
  */
 import { Icon } from "../../components/Icon";
-import { For, Show, createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { For, Show, createSignal, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
+import { createPopover } from "../../components/popover";
 import type { IndicatorLegendRow } from "./indicators/indicator-controller";
 import type { StudyError } from "./indicators/indicator-layer";
 import { formatStudyValue } from "../../data/study-format";
+import { applyOpacity, parseColor } from "lightweight-charts-drawing/core/color";
 
 type Props = {
   rows: IndicatorLegendRow[];
@@ -75,18 +77,10 @@ export function splitTitle(title: string): { name: string; inputs: string } {
   return m ? { name: m[1], inputs: m[2] } : { name: title, inputs: "" };
 }
 
-/** Parse an "rgb()/#hex" colour + 0..100 opacity into an rgba() fill. */
-function rgbaFill(color: string | undefined, opacity: number | undefined): string | undefined {
+/** The chart background (hex or rgb/rgba) at `opacity` percent, its own alpha replaced. */
+function bgAt(color: string | undefined, opacity: number | undefined): string | undefined {
   if (!color || !opacity) return undefined;
-  const a = Math.max(0, Math.min(1, opacity / 100));
-  const m = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/.exec(color.trim());
-  if (m) return `rgba(${m[1]}, ${m[2]}, ${m[3]}, ${a})`;
-  const h = /^#([0-9a-f]{6})$/i.exec(color.trim());
-  if (h) {
-    const n = parseInt(h[1], 16);
-    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
-  }
-  return undefined;
+  return applyOpacity(parseColor(color).hex, Math.max(0, Math.min(100, opacity)));
 }
 
 // Action-button icons of the study legend, 18-viewBox. Factories: a JSX
@@ -165,23 +159,14 @@ function StudyStatusPanel(props: {
   text: string;
   action?: { label: string; onClick: () => void };
 }) {
-  let el: HTMLDivElement | undefined;
   const left = () => Math.max(4, Math.min(props.anchor.left - 15, window.innerWidth - 348));
-  onMount(() => {
-    const down = (e: MouseEvent) => {
-      const t = e.target as Element;
-      if (el?.contains(t) || t.closest?.("[data-qa-id=legend-source-item-status]")) return;
-      props.onClose();
-    };
-    const key = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
-    };
-    document.addEventListener("mousedown", down, true);
-    document.addEventListener("keydown", key, true);
-    onCleanup(() => {
-      document.removeEventListener("mousedown", down, true);
-      document.removeEventListener("keydown", key, true);
-    });
+  const el = createPopover(undefined, {
+    onClose: props.onClose,
+    placement: false,
+    press: "mousedown",
+    insideSelector: "[data-qa-id=legend-source-item-status]",
+    on: { target: "document", capture: true },
+    escape: "pass",
   });
   return (
     <Portal>
@@ -265,7 +250,7 @@ export function IndicatorLegend(props: Props) {
               data-qa-id="legend-source-item"
               data-entity-id={row.id}
               role="toolbar"
-              style={{ "background-color": rgbaFill(props.bgColor, props.bgOpacity) }}
+              style={{ "background-color": bgAt(props.bgColor, props.bgOpacity) }}
             >
               <Show when={row.compare}>
                 <span
@@ -416,7 +401,7 @@ function LegendToggler(p: { count: number; collapsed: boolean; bgColor?: string;
         type="button"
         class="ot-ind-legend-toggler"
         classList={{ "is-closed": p.collapsed, "is-single": p.count <= 1 }}
-        style={{ "background-color": withAlpha(p.bgColor, 0.8) }}
+        style={{ "background-color": bgAt(p.bgColor, 80) }}
         title={title()}
         aria-label={title()}
         data-qa-id="legend-toggler"
@@ -436,20 +421,4 @@ function LegendToggler(p: { count: number; collapsed: boolean; bgColor?: string;
       </button>
     </div>
   );
-}
-
-/** `#rrggbb` (or rgb()) at `alpha`; undefined when not parseable. */
-function withAlpha(color: string | undefined, alpha: number): string | undefined {
-  if (!color) return undefined;
-  const hex = /^#([0-9a-f]{6})$/i.exec(color.trim());
-  if (hex) {
-    const n = parseInt(hex[1], 16);
-    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
-  }
-  const rgb = /^rgba?\(([^)]+)\)$/i.exec(color.trim());
-  if (rgb) {
-    const [r, g, b] = rgb[1].split(",").map((x) => x.trim());
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-  }
-  return undefined;
 }

@@ -34,13 +34,13 @@ import { alertStore, type AlertRule, type Operand } from "../../data/alert-store
 import { watchlistStore, clearFiredForList } from "../../data/watchlist-store";
 import { AddAlertDialog } from "./AddAlertDialog";
 import { defaultAlertMessage, ruleConditions } from "../../data/alert-condition";
-import { resetRuleEvalState, setAlertWebhook } from "../../data/alert-engine";
 import { intervalLabel } from "../../data/datafeed";
 import { loadDrawings } from "../drawings/persistence";
 import { iconForKind } from "../drawings/labels";
 import * as kv from "../../data/kv";
 import { emitAppEvent } from "../../data/app-events";
 import { GLYPH, MenuAction, MenuSection, MenuSep, MenuSort, MenuToggle } from "./alerts-menu";
+import { createPopover } from "../../components/popover";
 
 type SortKey = "symbol" | "name" | "message" | "created" | "triggered";
 type Sort = { key: SortKey; desc: boolean };
@@ -201,8 +201,6 @@ function removeItem(i: Item) {
     clearFiredForList(i.list.listId);
     return;
   }
-  resetRuleEvalState(i.rule.id);
-  setAlertWebhook(i.rule.id, null);
   alertStore.remove(i.rule.id);
 }
 function setItemEnabled(i: Item, enabled: boolean) {
@@ -212,7 +210,6 @@ function setItemEnabled(i: Item, enabled: boolean) {
     watchlistStore.setAlertPaused(i.list.listId, !enabled);
     return;
   }
-  if (enabled && !i.rule.enabled) resetRuleEvalState(i.rule.id);
   alertStore.setEnabled(i.rule.id, enabled);
 }
 
@@ -274,12 +271,8 @@ export function OptionsButton(props: { name: string; count: number; pressed: boo
 /** Toolbar row of the Alerts view. */
 export function AlertRulesToolbar(props: { ctx: AlertListContext; onOpenSettings?: () => void }) {
   const [menu, setMenu] = createSignal<"sort" | "options" | null>(null);
-  let el: HTMLDivElement | undefined;
-  onMount(() => {
-    const onDown = (e: PointerEvent) => { if (el && !el.contains(e.target as Node)) setMenu(null); };
-    window.addEventListener("pointerdown", onDown);
-    onCleanup(() => window.removeEventListener("pointerdown", onDown));
-  });
+  // A press outside the toolbar (its menus included) closes the open menu.
+  const el = createPopover(undefined, { onClose: () => setMenu(null), placement: false, escape: "none", on: { target: "window", capture: false } });
   const toggle = (m: "sort" | "options") => setMenu((cur) => (cur === m ? null : m));
   const items = () => allItems();
   const shown = () => visibleItems(props.ctx);

@@ -23,7 +23,9 @@
  *
  * Tabs themselves stay in the frontend's localStorage (tabs.ts).
  */
+use opentrader_core::files;
 use serde::{Deserialize, Serialize};
+use opentrader_core::sync::LockExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -71,24 +73,16 @@ pub struct Session {
 
 impl Session {
     fn save_now(&self) {
-        let snapshot = self.file.lock().unwrap().clone();
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        match serde_json::to_string_pretty(&snapshot) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&self.path, json) {
-                    eprintln!("[window-session] write failed: {e}");
-                }
-            }
-            Err(e) => eprintln!("[window-session] encode failed: {e}"),
+        let snapshot = self.file.locked().clone();
+        if let Err(e) = files::save_json(&self.path, &snapshot) {
+            eprintln!("[window-session] write failed: {e}");
         }
     }
 }
 
 /// Label of the window the user focused last (None before the session is set up).
 pub fn focused(app: &AppHandle) -> Option<String> {
-    app.try_state::<Session>()?.file.lock().unwrap().focused.clone()
+    app.try_state::<Session>()?.file.locked().focused.clone()
 }
 
 /// Save now (before an update install, which exits without close events).
@@ -136,7 +130,7 @@ fn capture(window: &Window) -> Option<WindowState> {
 /// Record a window's state. A maximized window keeps its last normal bounds.
 fn record(session: &Session, window: &Window) {
     let Some(now) = capture(window) else { return };
-    let mut file = session.file.lock().unwrap();
+    let mut file = session.file.locked();
     match file.windows.iter_mut().find(|w| w.label == now.label) {
         Some(entry) => {
             entry.maximized = now.maximized;
@@ -167,18 +161,18 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         }
         WindowEvent::Focused(true) => {
             record(&session, window);
-            session.file.lock().unwrap().focused = Some(window.label().to_string());
+            session.file.locked().focused = Some(window.label().to_string());
             schedule_save(app);
         }
         WindowEvent::CloseRequested { .. } => {
             let open = app.webview_windows().len();
             {
-                let mut file = session.file.lock().unwrap();
+                let mut file = session.file.locked();
                 if open > 1 {
                     let label = window.label();
                     if let Some(i) = file.windows.iter().position(|w| w.label == label) {
                         let st = file.windows.remove(i);
-                        session.closed.lock().unwrap().insert(st.label.clone(), st);
+                        session.closed.locked().insert(st.label.clone(), st);
                     }
                     if file.focused.as_deref() == Some(label) {
                         file.focused = None;
@@ -236,10 +230,7 @@ pub fn init(app: &AppHandle) {
             return;
         }
     };
-    let saved: SessionFile = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    let saved: SessionFile = files::load_or_default(&path);
 
     let Some(main) = app.get_webview_window(MAIN) else {
         eprintln!("[window-session] main window missing");
@@ -327,7 +318,7 @@ pub fn open_devtools(window: tauri::WebviewWindow) {
 #[tauri::command]
 #[specta::specta]
 pub fn take_adopted_window(session: State<'_, Session>) -> Option<String> {
-    session.adopted.lock().unwrap().take()
+    session.adopted.locked().take()
 }
 
 /// Bounds of a window the user closed while others stayed open (once), for
@@ -335,7 +326,7 @@ pub fn take_adopted_window(session: State<'_, Session>) -> Option<String> {
 #[tauri::command]
 #[specta::specta]
 pub fn take_closed_window_bounds(session: State<'_, Session>, label: String) -> Option<WindowState> {
-    session.closed.lock().unwrap().remove(&label)
+    session.closed.locked().remove(&label)
 }
 
 /// Open a window at saved bounds ("Reopen closed window"). The frontend has
@@ -351,7 +342,7 @@ pub async fn open_window(app: AppHandle, state: WindowState) -> Result<(), Strin
     let _ = win.set_focus();
     if let Some(session) = app.try_state::<Session>() {
         // Its first events may have recorded it already.
-        let mut file = session.file.lock().unwrap();
+        let mut file = session.file.locked();
         if !file.windows.iter().any(|w| w.label == state.label) {
             file.windows.push(state);
         }

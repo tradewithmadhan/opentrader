@@ -23,6 +23,7 @@ pub mod table;
 pub mod technicals;
 
 use crate::data::gateway;
+use crate::sync::{LockExt, RwLockExt};
 use crate::data::market_rest::{self, MarketRow, RefTicker};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -94,7 +95,7 @@ pub struct Screener {
 
 impl Screener {
     pub fn table(&self) -> Arc<Table> {
-        self.inner.table.read().expect("screener table lock").clone().unwrap_or_else(|| Arc::new(Table::empty()))
+        self.inner.table.read_locked().clone().unwrap_or_else(|| Arc::new(Table::empty()))
     }
 
     pub fn status(&self) -> ScreenerStatus {
@@ -110,7 +111,7 @@ impl Screener {
 
     /// Register a panel; starts the poll task when it is the first one.
     pub fn open(&self, app: HostRef, owner: String) -> ScreenerStatus {
-        let mut owners = self.inner.owners.lock().expect("screener owners lock");
+        let mut owners = self.inner.owners.locked();
         owners.insert(owner);
         if !self.inner.running.swap(true, Ordering::SeqCst) {
             let inner = self.inner.clone();
@@ -124,7 +125,7 @@ impl Screener {
     /// columns join the table from its next update (the closes file is fetched first when needed).
     pub fn request_custom(&self, ids: Vec<String>) -> Vec<String> {
         let ok: Vec<String> = ids.into_iter().filter(|id| closes::custom_id(id).is_some()).collect();
-        self.inner.custom.lock().expect("screener custom lock").extend(ok.iter().cloned());
+        self.inner.custom.locked().extend(ok.iter().cloned());
         ok
     }
 
@@ -135,7 +136,7 @@ impl Screener {
 
     /// Unregister a panel; the task stops (and leaves the live feed) when none is left.
     pub fn close(&self, owner: &str) {
-        self.inner.owners.lock().expect("screener owners lock").remove(owner);
+        self.inner.owners.locked().remove(owner);
         self.inner.closed.notify_one();
     }
 }
@@ -185,6 +186,11 @@ struct Sources {
 }
 
 impl Sources {
+    /// The disk copies, read on a blocking thread.
+    async fn load() -> Self {
+        tokio::task::spawn_blocking(Self::from_cache).await.unwrap_or_default()
+    }
+
     fn from_cache() -> Self {
         let mut s = Sources { state: state::read_cache().map(Arc::new), ..Default::default() };
         if let Some((day, list)) = read_refs_cache() {
@@ -197,8 +203,8 @@ impl Sources {
     /// Start the downloads that are due: the reference list once per New York day, the daily state when missing
     /// or older than the last closed session, the closes of the state's session while custom lengths are asked for
     /// (both at most every STATE_RECHECK).
-    fn start(&mut self, today: Option<NaiveDate>, wanted: &[String], downloads: &progress::Downloads) {
-        let refs_retry = self.refs_failed.map_or(true, |t| t.elapsed() >= REFS_RETRY);
+    async fn start(&mut self, today: Option<NaiveDate>, wanted: &[String], downloads: &progress::Downloads) {
+        let refs_retry = self.refs_failed.is_none_or(|t| t.elapsed() >= REFS_RETRY);
         if self.refs_task.is_none() && self.refs_day != today && refs_retry {
             // Counted only when the table waits on it: no list held yet.
             let d = self.refs.is_empty().then(|| downloads.start("tickers"));
@@ -208,7 +214,13 @@ impl Sources {
                     d.finish();
                 }
                 match list {
-                    Ok(list) => Some(list),
+                    // The disk copy for the next start, written off the async threads.
+                    Ok(list) => tokio::task::spawn_blocking(move || {
+                        write_refs_cache(today, &list);
+                        list
+                    })
+                    .await
+                    .ok(),
                     Err(e) => {
                         eprintln!("[screener] reference tickers: {e:#}");
                         None
@@ -218,7 +230,7 @@ impl Sources {
         }
         let expected = clock::last_closed_session(chrono::Utc::now());
         let stale = self.state.as_ref().map(|s| s.asof) < expected;
-        if stale && self.state_task.is_none() && self.state_checked.map_or(true, |t| t.elapsed() >= STATE_RECHECK) {
+        if stale && self.state_task.is_none() && self.state_checked.is_none_or(|t| t.elapsed() >= STATE_RECHECK) {
             self.state_checked = Some(Instant::now());
             let d = downloads.start("state");
             self.state_task = Some(crate::rt::spawn(async move {
@@ -235,9 +247,9 @@ impl Sources {
             return;
         }
         if self.closes.is_none() {
-            self.closes = closes::read_cache().map(Arc::new);
+            self.closes = tokio::task::spawn_blocking(closes::read_cache).await.ok().flatten().map(Arc::new);
         }
-        let due = self.closes_checked.map_or(true, |t| t.elapsed() >= STATE_RECHECK);
+        let due = self.closes_checked.is_none_or(|t| t.elapsed() >= STATE_RECHECK);
         if self.closes.as_ref().map(|c| c.asof) != Some(asof) && self.closes_task.is_none() && due {
             self.closes_checked = Some(Instant::now());
             let d = downloads.start("closes");
@@ -273,7 +285,6 @@ impl Sources {
     fn apply(&mut self, arrived: Arrived, today: Option<NaiveDate>) {
         match arrived {
             Arrived::Refs(Some(list)) => {
-                write_refs_cache(today, &list);
                 self.refs = Arc::new(list);
                 self.refs_day = today;
             }
@@ -298,24 +309,27 @@ impl Sources {
     }
 
     /// The state the table joins: with the custom lengths' columns once the closes of its session are in.
-    fn table_state(&mut self, wanted: &[String]) -> Option<Arc<StateFile>> {
-        let s = self.state.as_ref()?;
-        match &self.closes {
+    async fn table_state(&mut self, wanted: &[String]) -> Option<Arc<StateFile>> {
+        let s = self.state.clone()?;
+        match self.closes.clone() {
             Some(c) if !wanted.is_empty() && c.asof == s.asof => {
-                let fresh = self.merged.as_ref().map_or(false, |(d, ids, _)| *d == s.asof && ids == wanted);
+                let fresh = self.merged.as_ref().is_some_and(|(d, ids, _)| *d == s.asof && ids == wanted);
                 if !fresh {
-                    self.merged = Some((s.asof, wanted.to_vec(), Arc::new(closes::with_custom(s, c, wanted))));
+                    // Each length runs over every ticker's closes: off the async threads.
+                    let (state, ids) = (s.clone(), wanted.to_vec());
+                    let merged = tokio::task::spawn_blocking(move || closes::with_custom(&state, &c, &ids)).await.ok()?;
+                    self.merged = Some((s.asof, wanted.to_vec(), Arc::new(merged)));
                 }
                 self.merged.as_ref().map(|(_, _, m)| m.clone())
             }
-            _ => Some(s.clone()),
+            _ => Some(s),
         }
     }
 }
 
 async fn run(app: HostRef, inner: Arc<Inner>) {
-    let mut version = inner.table.read().expect("screener table lock").as_ref().map_or(0, |t| t.version);
-    let mut src = Sources::from_cache();
+    let mut version = inner.table.read_locked().as_ref().map_or(0, |t| t.version);
+    let mut src = Sources::load().await;
     let feed_url = feed_url();
     let mut feed: Option<live::Feed> = None;
     // The feed holds a table not shown yet (just connected).
@@ -326,7 +340,7 @@ async fn run(app: HostRef, inner: Arc<Inner>) {
     let mut first_rest_download: Option<Arc<progress::Download>> = None;
 
     loop {
-        let none_left = inner.owners.lock().expect("screener owners lock").is_empty();
+        let none_left = inner.owners.locked().is_empty();
         if none_left {
             // Leaving the feed lets the gateway stop polling when no app is left.
             if let Some(f) = feed.take() {
@@ -334,7 +348,7 @@ async fn run(app: HostRef, inner: Arc<Inner>) {
             }
             inner.running.store(false, Ordering::SeqCst);
             // A panel opened during the close: carry on unless its task started.
-            let reopened = !inner.owners.lock().expect("screener owners lock").is_empty();
+            let reopened = !inner.owners.locked().is_empty();
             if reopened && !inner.running.swap(true, Ordering::SeqCst) {
                 continue;
             }
@@ -342,12 +356,12 @@ async fn run(app: HostRef, inner: Arc<Inner>) {
         }
         let started = Instant::now();
         let today = clock::ny_date_ms(chrono::Utc::now().timestamp_millis() as f64);
-        let wanted: Vec<String> = inner.custom.lock().expect("screener custom lock").iter().cloned().collect();
-        src.start(today, &wanted, &inner.downloads);
+        let wanted: Vec<String> = inner.custom.locked().iter().cloned().collect();
+        src.start(today, &wanted, &inner.downloads).await;
 
         // No table yet: the REST snapshot starts now and races the feed's connection. Either can take from 1 s to
         // over 25 s when the gateway is slow (measured 03/11/2026); the first to arrive fills the panel.
-        let no_table = inner.table.read().expect("screener table lock").is_none();
+        let no_table = inner.table.read_locked().is_none();
         if no_table && feed.is_none() && first_rest.is_none() && feed_url.is_some() {
             let d = inner.downloads.start("market");
             first_rest_download = Some(d.clone());
@@ -360,7 +374,7 @@ async fn run(app: HostRef, inner: Arc<Inner>) {
 
         // Live feed: connect when there is none and its retry time has come.
         let mut rest_rows: Option<anyhow::Result<Vec<MarketRow>>> = None;
-        if feed.is_none() && feed_retry.map_or(true, |t| Instant::now() >= t) {
+        if feed.is_none() && feed_retry.is_none_or(|t| Instant::now() >= t) {
             if let Some(url) = feed_url.as_deref() {
                 let connected = match first_rest.as_mut() {
                     Some(task) => tokio::select! {
@@ -377,7 +391,7 @@ async fn run(app: HostRef, inner: Arc<Inner>) {
                 }
                 match connected {
                     Some(Ok(f)) => {
-                        eprintln!("[screener] live feed connected ({} tickers)", f.table.len());
+                        eprintln!("[screener] live feed connected ({} tickers)", f.table.ticker_count());
                         feed = Some(f);
                         feed_fresh = true;
                         feed_retry = None;
@@ -441,7 +455,8 @@ async fn run(app: HostRef, inner: Arc<Inner>) {
         let update = match snap {
             Ok(rows) => {
                 version = version.wrapping_add(1);
-                let mut t = Table::build(version, rows, src.refs.clone(), src.table_state(&wanted));
+                let state = src.table_state(&wanted).await;
+                let mut t = Table::build(version, rows, src.refs.clone(), state);
                 t.complete = src.complete();
                 let t = Arc::new(t);
                 let update = ScreenerUpdate {
@@ -455,17 +470,17 @@ async fn run(app: HostRef, inner: Arc<Inner>) {
                 if t.complete {
                     inner.downloads.clear();
                 }
-                *inner.table.write().expect("screener table lock") = Some(t);
+                *inner.table.write_locked() = Some(t);
                 update
             }
             Err(e) => {
-                let t = inner.table.read().expect("screener table lock").clone();
+                let t = inner.table.read_locked().clone();
                 ScreenerUpdate {
                     version,
                     updated_ms: t.as_ref().and_then(|t| t.updated_ms),
                     total: t.as_ref().map_or(0, |t| t.rows.len() as u32),
                     state_asof: t.as_ref().and_then(|t| t.state_asof()).map(|d| d.to_string()),
-                    complete: t.as_ref().map_or(false, |t| t.complete),
+                    complete: t.as_ref().is_some_and(|t| t.complete),
                     error: Some(format!("{e:#}")),
                 }
             }
@@ -515,11 +530,7 @@ fn read_refs_cache() -> Option<(NaiveDate, Vec<RefTicker>)> {
 
 fn write_refs_cache(day: Option<NaiveDate>, list: &[RefTicker]) {
     let Some(day) = day else { return };
-    let path = refs_cache_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
     if let Ok(bytes) = serde_json::to_vec(&RefsCache { day, tickers: list.to_vec() }) {
-        let _ = std::fs::write(path, bytes);
+        let _ = crate::files::write_atomic(&refs_cache_path(), &bytes);
     }
 }

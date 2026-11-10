@@ -1,17 +1,16 @@
 /*
- * Shared context of a chart view's parts (view/*.ts). ChartView owns the
- * chart, its series and bars; each part is created with this context and adds
- * its own functions to it (attach), so the parts reach each other through it
- * without a creation order. The mutable fields are live accessors of the
- * view's state.
+ * Shared context of a chart view's parts (view/*.ts). ChartView keeps the
+ * chart's state in one plain core object; createChartCx creates every part
+ * with the context and adds its functions to it, all before any effect or
+ * handler of them runs, so the parts reach each other through it without
+ * optional calls.
  */
 import type { LegendValues } from "../ChartLegend";
 import type { SetStoreFunction } from "solid-js/store";
 import type { Accessor, Resource, Setter } from "solid-js";
-import type { IChartApi, IPriceScaleApi, MouseEventParams } from "lightweight-charts";
-import type { Drawing, NewDrawing } from "lightweight-charts-drawing/core/types";
+import type { IChartApi, MouseEventParams } from "lightweight-charts";
+import type { Drawing } from "lightweight-charts-drawing/core/types";
 import type { AnySeries, ChartTypeId, OHLC } from "../chart-types";
-import { setDataForType } from "../chart-types";
 import type { Candle } from "../../../bindings";
 import type { BarsResult, SessionId } from "../../../data/datafeed";
 import type { IndicatorController, IndicatorLegendRow } from "../indicators/indicator-controller";
@@ -20,9 +19,12 @@ import type { CtxNode } from "../ChartContextMenu";
 import type { CountdownPrimitive } from "../countdown";
 import type { HistoryEndPrimitive } from "../history-end-marker";
 import type { NewsLollipopPrimitive } from "../news-lollipop";
-import type { CrosshairLockViews } from "../crosshair-lock";
+import type { CrosshairLockAxisPrimitive, CrosshairLockViews } from "../crosshair-lock";
 import type { DialogTab } from "../IndicatorSettingsDialog";
-import type { CompareEntry, ComparePatch, PaneIndicatorSettings } from "../../shell/tabs";
+import type { CompareEntry, PaneIndicatorSettings } from "../../shell/tabs";
+import type { ChartEdits } from "../../shell/chart-edits";
+import type { DrawingStore } from "../../drawings/drawing-store";
+import type { PaneEdits } from "./pane-edits";
 import type { Draft } from "../../header/chart-settings";
 import { appearanceFrom } from "../../header/chart-settings";
 import { readChartTokens } from "../chart-tokens";
@@ -53,7 +55,12 @@ import type { SourceMenuApi } from "./source-menu";
 import type { ScalesApi } from "./scales";
 import type { ReplayApi } from "./replay";
 import type { TradingLinesApi } from "./trading-lines";
-import type { SyncMode } from "../../drawings/DrawingToolbar";
+import type { FutureAxisApi } from "./future-axis";
+import type { SeriesApi } from "./series";
+import type { TimeAxisApi } from "./time-axis";
+import type { StudySyncApi } from "./study-sync";
+import type { StudySettingsApi } from "./study-settings";
+import type { PriceScaleWatch } from "../scale-watch";
 
 export type ChartViewProps = {
   theme?: "dark" | "light";
@@ -76,10 +83,8 @@ export type ChartViewProps = {
   onWheelZoom?: (mod: boolean) => void;
   /** Main series hidden (legend eye; series `visible`). */
   seriesHidden?: boolean;
-  onToggleSeries?: () => void;
-  /** Indicators legend collapsed (its toggler), and the toggle. */
+  /** Indicators legend collapsed (its toggler). */
   indicatorsLegendCollapsed?: boolean;
-  onToggleIndicatorsLegend?: () => void;
   /** Legend symbol title clicked ("Change symbol"). */
   onChangeSymbol?: () => void;
   /** Legend interval clicked ("Change interval"). */
@@ -92,7 +97,6 @@ export type ChartViewProps = {
   magnetSnapsToIndicators?: boolean;
   stayMode?: boolean;
   drawings?: Drawing[];
-  onPlace?: (d: NewDrawing) => string | void;
   onDisarm?: () => void;
   selectedDrawingId?: string | null;
   /** Full multi-selection (ordered, last = primary). */
@@ -100,68 +104,34 @@ export type ChartViewProps = {
   setSelectedDrawingId?: (id: string | null) => void;
   /** Ctrl/Cmd+click membership toggle. */
   toggleSelectedDrawing?: (id: string) => void;
-  updateDrawing?: (d: Drawing, label?: string) => void;
-  /** Bulk replace (group drag/nudge) — one undo entry. */
-  updateDrawings?: (list: Drawing[]) => void;
-  cloneDrawing?: (id: string | string[]) => void;
-  /** Sync of a drawing of this pane (the scope it is kept in) and its change (drawing menu). */
-  drawingSync?: (id: string) => SyncMode | null;
-  setDrawingSync?: (ids: string[], mode: SyncMode) => void;
-  reorderDrawing?: (id: string, dir: "front" | "forward" | "backward" | "back") => void;
-  removeDrawing?: (id: string) => void;
-  /** Bulk delete (multi-select Delete) — one undo entry. */
-  removeDrawings?: (ids: string[]) => void;
   /** Ordered registry ids of indicators active on this chart. */
   indicators?: string[];
   /** Compared symbols (header "Compare symbols") of this pane. */
   compare?: CompareEntry[];
-  /** Patch one compared symbol (legend eye, Settings → Ok). */
-  onCompareChange?: (id: string, patch: ComparePatch) => void;
-  /** Remove one compared symbol (legend trash, More → Remove, Delete pane). */
-  onRemoveCompare?: (id: string) => void;
   /** Legend title of a compared symbol clicked ("Change symbol"). */
   onChangeCompareSymbol?: (id: string) => void;
   /** Persisted stacking order of the panes (study and compared-symbol ids,
    *  `_series` = the price pane). */
   paneOrder?: string[];
-  /** Pane controls moved a pane: the new stacking order. */
-  onPaneOrder?: (order: string[]) => void;
   /** Pane group of the study pane the main series was dragged into (absent
    *  = the series has a pane of its own). */
   seriesPane?: string;
-  /** The series joined a study pane (its group) or got a pane of its own (null). */
-  onSeriesPane?: (group: string | null) => void;
   /** Scale the main series is pinned to (series menu "Pin to scale"), absent = the scales side. */
   seriesScale?: string;
-  /** The series was pinned to a scale (null = back to the scales side). */
-  onSeriesScale?: (key: string | null) => void;
   /** Persisted drawing order of the sources, front first (Object tree). */
   sourceOrder?: string[];
-  /** The Object tree moved a source: the new drawing order. */
-  onSourceOrder?: (order: string[]) => void;
-  /** The Object tree moved a drawing: the pane's drawings in their new
-   *  order (front first) and the source each one sits in front of. */
-  placeDrawings?: (ids: string[], over: Record<string, string | null>) => void;
   /** When true, suppress all study layers without removing them from the active
    *  set (Hide-all dropdown's "Hide indicators"); restored when toggled off. */
   indicatorsHidden?: boolean;
   /** Lock indicators (Lock options): studies cannot be dragged on the chart. */
   indicatorsLocked?: boolean;
-  /** Remove an indicator (by registry id) — wired to the studies-legend trash. */
-  onRemoveIndicator?: (id: string) => void;
-  /** Persist this pane's study order (pane controls move up / down). */
-  onReorderIndicators?: (ids: string[]) => void;
   /** Persisted per-indicator settings (inputs/styles) for THIS pane, keyed by
    *  registry id. Seeded into the controller so studies render with the user's
    *  saved values on load. */
   indicatorSettings?: Record<string, PaneIndicatorSettings>;
-  /** Persist a study's edited inputs/styles (Settings dialog → Ok). */
-  onIndicatorSettings?: (id: string, settings: PaneIndicatorSettings) => void;
-  /** Chart syncing group (0..4, undefined = none), its legend button shown,
-   *  and the setter. */
+  /** Chart syncing group (0..4, undefined = none) and its legend button shown. */
   linkGroup?: number;
   linkSyncVisible?: boolean;
-  onLinkGroup?: (group: number | undefined) => void;
   /** IANA timezone for the time axis (crosshair label + tick marks). */
   timeZone?: string;
   /** The timezone row label ("Exchange", "(UTC-4) New York", …). */
@@ -173,8 +143,16 @@ export type ChartViewProps = {
   /** False while this pane's tab is hidden. App keeps every opened tab's grid
    *  mounted (each tab page stays alive), so a tab switch only shows it. */
   shown?: boolean;
-  /** The tab the pane is on (Bar Replay runs per tab). */
-  tabId?: string;
+  /** The tab the pane is on (Bar Replay runs per tab) and the pane's index in it. */
+  tabId: string;
+  paneIndex: number;
+  /** The stores the chart edits its pane and drawings through (view/pane-edits.ts), and the key its drawings are
+   *  kept under. */
+  chartEdits: ChartEdits;
+  drawingStore: DrawingStore;
+  drawingKey: string;
+  /** Focus this chart (acting on its drawings focuses it). */
+  onFocus?: () => void;
   /** Number of charts of the layout (the "entire layout" rows and "Move
    *  chart" need several). */
   layoutCount?: number;
@@ -194,10 +172,6 @@ export type ChartViewProps = {
   visibleLogicalRange?: { from: number; to: number; last?: number; barSpacing?: number; rightOffset?: number };
   /** First framing of a chart added by a larger template (see PaneChart). */
   initialScale?: { barSpacing: number; rightOffset: number };
-  /** Report this pane's visible logical range after the user scrolls/zooms, so
-   *  the anchor persists across tab switches + reloads. Debounced by the caller's
-   *  store write; ChartView emits the settled range. */
-  onVisibleRange?: (range: { from: number; to: number; last?: number; barSpacing?: number; rightOffset?: number }) => void;
 };
 
 /** An open chart menu: position, rows, and how it is anchored. */
@@ -206,16 +180,24 @@ export type ChartMenuState = { x: number; y: number; nodes: CtxNode[]; endX?: bo
 /** State and functions ChartView itself owns. */
 export interface ChartCore {
   props: ChartViewProps;
+  /** The chart's edits of its pane and drawings, bound to its tab and pane. */
+  edits: PaneEdits;
   /** Unique id of this view (sync bus, live slot, strategy reports). */
   paneId: number;
   activeType: ChartTypeId;
-  afterSeriesData: () => void;
   appearance: Accessor<ReturnType<typeof appearanceFrom>>;
+  /** The saved place of the series last applied to (or saved from) the controller. */
+  appliedSeriesPane: string | null;
   barWrap: HTMLDivElement;
   chart: IChartApi | null;
   chartReady: Accessor<number>;
   controller: IndicatorController | null;
+  /** Coords bridge for the drawings overlay; refreshed on every series rebuild. */
   coords: Accessor<Coords | null>;
+  setCoords: Setter<Coords | null>;
+  /** Bumped on visible-range and price-scale changes so the overlay re-projects drawings. */
+  coordEpoch: Accessor<number>;
+  setCoordEpoch: Setter<number>;
   countdown: CountdownPrimitive;
   crosshairActive: boolean;
   /** The crosshair is a sibling pane's, mirrored by Crosshair sync: the legend follows it, the data window does not. */
@@ -227,7 +209,6 @@ export interface ChartCore {
   crosshairPrice: number | null;
   ctxMenu: Accessor<ChartMenuState | null>;
   currentTokens: () => ReturnType<typeof readChartTokens>;
-  dataExtras: () => Parameters<typeof setDataForType>[4];
   fullSymbol: Accessor<string>;
   gotoWrap: HTMLDivElement;
   hidden: () => boolean;
@@ -239,58 +220,42 @@ export interface ChartCore {
   hoveredStudy: string | null;
   indLegend: () => IndicatorLegendRow[];
   lastLegendTime: number | undefined;
+  /** "Lock vertical cursor line by time" views (crosshair-lock.ts): the time label on the main series, the line
+   *  and padlock in every pane (created with the chart). */
   lockViews: CrosshairLockViews | null;
-  mainLastIndex: () => number | null;
-  /** Pane of the main series (the price pane; any position). */
-  mainPane: () => number;
-  /** Bumped when the price pane moves or the series changes pane or scale. */
-  mainPaneEpoch: Accessor<number>;
-  /** Price scale of the main series. */
-  mainScale: () => IPriceScaleApi | null;
-  /** Side of the main series' scale (the free side in a study pane it shares). */
-  mainSide: () => "left" | "right";
-  /** Width of the left price axis (0 when hidden). */
-  leftAxisWidth: () => number;
-  /** Show the price axes the series and the compared symbols use. */
-  syncScaleSides: () => void;
+  lockAxis: CrosshairLockAxisPrimitive | null;
   newsLollipop: NewsLollipopPrimitive;
-  /** Apply the price format again (the symbol's tick grid is known). */
-  applyPriceFormat: () => void;
   eventMarkers: EventMarkersPrimitive;
   onShownHooks: Set<() => void>;
   paneRoot: HTMLDivElement;
   pendingRangeSpan: string | null;
   pointerOverHost: boolean;
-  prevDayClose: (number | null)[];
   raw: OHLC[];
   rawDaily: Candle[];
   reloadTick: Accessor<number>;
   removeStudy: (id: string) => void;
   selectStudy: (id: string) => void;
   selectedStudy: Accessor<string | null>;
+  /** Price-scale changes (autoscale, axis drag, log / percent) of the main series: attached to it. */
+  scaleWatch: PriceScaleWatch;
   series: AnySeries | null;
-  seriesOnlyScale: () => string | null;
-  /** Scale key of the main series (pinned, else its side) and its library scale id. */
-  seriesKey: () => string;
-  seriesLibId: () => string;
-  /** Put the series on the scale it should be on. */
-  applySeriesScale: () => void;
   setCompareSettingsFor: Setter<string | null>;
   setCtxMenu: Setter<ChartMenuState | null>;
   setReloadTick: Setter<number>;
   setSelectedStudy: Setter<string | null>;
+  /** Study whose Settings dialog is open (null = closed) and the tab it opens on. */
+  settingsForId: Accessor<string | null>;
   setSettingsForId: Setter<string | null>;
+  settingsTab: Accessor<DialogTab | undefined>;
   setSettingsTab: Setter<DialogTab | undefined>;
   studySelectionBg: Accessor<ReturnType<typeof chartBackgroundAt>>;
   swapping: boolean;
   syncLockPanes: () => void;
   toggleSourceHidden: (id: string) => void;
-  updateSessionBreaks: () => void;
   whenShown: <T extends Event>(fn: (e: T) => void) => EventListener;
   flagPopup: Accessor<HTMLElement | null>;
   intervalText: Accessor<string>;
   legend: Accessor<LegendValues | null>;
-  legendPriceFormat: Accessor<((p: number) => string) | undefined>;
   rangePersistTimer: ReturnType<typeof setTimeout> | undefined;
   setFlagPopup: Setter<HTMLElement | null>;
   setIndLegendStore: SetStoreFunction<{ rows: IndicatorLegendRow[] }>;
@@ -323,10 +288,23 @@ export type ChartCx = ChartCore &
   SourceMenuApi &
   ScalesApi &
   ReplayApi &
-  TradingLinesApi;
+  TradingLinesApi &
+  FutureAxisApi &
+  SeriesApi &
+  TimeAxisApi &
+  StudySyncApi &
+  StudySettingsApi;
 
-/** Add a part's functions (and its state accessors) to the context. */
-export function attach<T extends object>(cx: ChartCx, api: T): T {
-  Object.defineProperties(cx, Object.getOwnPropertyDescriptors(api));
-  return api;
+type Part = (cx: ChartCx) => object;
+type Intersection<U> = (U extends unknown ? (u: U) => void : never) extends (i: infer I) => void ? I : never;
+
+/** The context of a chart view: `core` with every part added, created in the order given (their effects run in
+ *  that order). A part reads the others through the context only when called, so all of them are in it before any
+ *  effect or handler runs (Solid runs a component's effects after its body). The caller types the result as
+ *  ChartCx: a part left out is a compile error. */
+export function createChartCx<P extends Part[]>(core: ChartCore, ...parts: P): ChartCore & Intersection<ReturnType<P[number]>> {
+  const cx = core as ChartCore & Intersection<ReturnType<P[number]>>;
+  // Getters of a part's state (its mutable fields) stay getters on the context.
+  for (const part of parts) Object.defineProperties(cx, Object.getOwnPropertyDescriptors(part(cx as unknown as ChartCx)));
+  return cx;
 }

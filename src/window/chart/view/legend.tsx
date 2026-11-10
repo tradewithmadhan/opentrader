@@ -32,7 +32,8 @@ import { OAKSCRIPT_OPEN_EVENT } from "../indicators/user-scripts";
 import { editorScriptOfStudy, isOpenedInEditor } from "../../oakscript/editor-state";
 import { publishDataWindow, type DataWindowState } from "../../../data/data-window-store";
 import { type ChartCx } from "./context";
-import { indexOfTime, buildLegend } from "./helpers";
+import { buildLegend } from "./helpers";
+import { indexOfTime } from "../time-search";
 import { emitAppEvent } from "../../../data/app-events";
 import type { JSX } from "solid-js";
 
@@ -65,7 +66,7 @@ export function createLegend(cx: ChartCx): LegendApi {
     <IndicatorLegend
       rows={indLegend().filter((r) => r.pane === pane())}
       collapsed={!!props.indicatorsLegendCollapsed}
-      onToggleCollapsed={props.onToggleIndicatorsLegend}
+      onToggleCollapsed={cx.edits.toggleIndicatorsLegend}
       mainPane={pane() === (void cx.mainPaneEpoch(), cx.mainPane())}
       formatPrice={cx.legendPriceFormat()}
       showTitles={appearance().legendIndTitles}
@@ -206,7 +207,7 @@ export function createLegend(cx: ChartCx): LegendApi {
             statusSymbol={isEconomicSymbol(props.symbol) || isLocalSymbol(props.symbol) ? undefined : props.symbol}
             hideChangeValues={(props.chartType ?? "candle") === "hilo" || (props.chartType ?? "candle") === "svp"}
             seriesHidden={!!props.seriesHidden}
-            onToggleSeries={props.onToggleSeries}
+            onToggleSeries={cx.edits.toggleSeriesHidden}
             flagColor={(() => { const f = props.symbol ? flagOf(props.symbol) : null; return f ? FLAG_HEX[f] : null; })()}
             onFlag={(btn) => {
               // Reference marker click: an unflagged symbol is flagged in the
@@ -226,10 +227,10 @@ export function createLegend(cx: ChartCx): LegendApi {
             onLink={(r) => setSyncMenu(syncMenu() ? null : r)}
           />
           {/* Buy / Sell buttons (replay trading), under the series row. */}
-          {cx.TradingButtons?.()}
+          {cx.TradingButtons()}
           <Show when={syncMenu()}>
             {(r) => (
-              <ChartSyncMenu anchor={r()} group={props.linkGroup} onPick={(g) => props.onLinkGroup?.(g)} onClose={() => setSyncMenu(null)} />
+              <ChartSyncMenu anchor={r()} group={props.linkGroup} onPick={(g) => cx.edits.setLinkGroup(g)} onClose={() => setSyncMenu(null)} />
             )}
           </Show>
           <Show when={flagPopup()}>

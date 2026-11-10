@@ -25,6 +25,7 @@ import { isTransformType, setDataForType } from "../chart-types";
 import { type ChartCx } from "./context";
 import { toOHLC, barsSpan, MIN_VISIBLE_BARS, SYMBOL_CHANGE_MAX_BACK } from "./helpers";
 import type { Accessor, Setter } from "solid-js";
+import { lowerBound } from "../time-search";
 
 /** What createSymbolLoad adds to the chart context. */
 export interface SymbolLoadApi {
@@ -33,7 +34,7 @@ export interface SymbolLoadApi {
 }
 
 export function createSymbolLoad(cx: ChartCx): SymbolLoadApi {
-  const { afterSeriesData, currentTokens, dataExtras, history, mainLastIndex, props, updateSessionBreaks } = cx;
+  const { currentTokens, history, props } = cx;
   // Symbol/interval change → drop the previous series immediately so an
   // in-flight fetch can never leave another symbol's candles (or its last
   // price in the legend) on screen. The history effect below refills once the
@@ -166,9 +167,9 @@ export function createSymbolLoad(cx: ChartCx): SymbolLoadApi {
       cx.raw = [];
       cx.rawDaily = [];
       cx.liveVolBase = null;
-      setDataForType(cx.series, cx.activeType, cx.raw, currentTokens(), dataExtras());
-      afterSeriesData();
-      updateSessionBreaks();
+      setDataForType(cx.series, cx.activeType, cx.raw, currentTokens(), cx.dataExtras());
+      cx.afterSeriesData();
+      cx.updateSessionBreaks();
       if (!cx.crosshairActive) cx.refreshLegend();
       cx.controller?.renderAll();
       cx.renderCompareAll();
@@ -187,9 +188,9 @@ export function createSymbolLoad(cx: ChartCx): SymbolLoadApi {
     // Fresh series (possibly a new ADJ basis) — re-snap the 1W/1M live-volume
     // baseline from the reloaded bars on the next tick.
     cx.liveVolBase = null;
-    setDataForType(cx.series, cx.activeType, cx.raw, currentTokens(), dataExtras());
-      afterSeriesData();
-    updateSessionBreaks();
+    setDataForType(cx.series, cx.activeType, cx.raw, currentTokens(), cx.dataExtras());
+      cx.afterSeriesData();
+    cx.updateSessionBreaks();
     // Recompute every active study against the freshly-loaded bars BEFORE
     // framing: study series add their times to the time scale (with a
     // transform type their real times sit between the synthetic ones), so
@@ -207,7 +208,7 @@ export function createSymbolLoad(cx: ChartCx): SymbolLoadApi {
     // Price-based types: the view follows the last item (its index moves
     // when the item count changed since the save).
     if (saved && saved.last !== undefined && isTransformType(cx.activeType)) {
-      const last = mainLastIndex();
+      const last = cx.mainLastIndex();
       if (last != null) saved = { from: saved.from + last - saved.last, to: saved.to + last - saved.last, last };
     }
     // A saved view narrower than MIN_VISIBLE_BARS is the 1-bar collapse the old
@@ -245,16 +246,13 @@ export function createSymbolLoad(cx: ChartCx): SymbolLoadApi {
       if (isTransformType(cx.activeType)) {
         // Price-based types: same bar spacing and right offset, counted from
         // their own last item (no time of their own for a left edge).
-        const to = (mainLastIndex() ?? cx.raw.length - 1) + keep.rightOffset;
+        const to = (cx.mainLastIndex() ?? cx.raw.length - 1) + keep.rightOffset;
         ts.setVisibleLogicalRange({ from: to - barsSpan(ts.width(), keep.barSpacing), to });
         framed = `keep bs=${keep.barSpacing.toFixed(2)} ro=${keep.rightOffset.toFixed(1)}`;
       } else if (keep.leftTime !== undefined) {
         // Left edge kept: the first bar at / after the old left-edge time
         // stays at the left edge, same bar spacing.
-        let lo = 0;
-        let hi = cx.raw.length;
-        while (lo < hi) { const mid = (lo + hi) >> 1; if ((cx.raw[mid].time as number) < keep.leftTime) lo = mid + 1; else hi = mid; }
-        const from = lo;
+        const from = lowerBound(cx.raw, keep.leftTime);
         ts.setVisibleLogicalRange({ from, to: from + barsSpan(ts.width(), keep.barSpacing) });
         framed = `keep-left bs=${keep.barSpacing.toFixed(2)} left=${keep.leftTime}`;
       } else {
@@ -278,7 +276,7 @@ export function createSymbolLoad(cx: ChartCx): SymbolLoadApi {
       // source bar count.
       let to = cx.raw.length;
       if (isTransformType(cx.activeType)) {
-        const last = mainLastIndex();
+        const last = cx.mainLastIndex();
         if (last != null) to = last + 1;
       }
       if (view !== null && cx.raw.length > view) {
