@@ -1,3 +1,4 @@
+import { translateWith } from "../../i18n/translator";
 /*
  * SelectedToolbar — floating action strip above the selected drawing.
  *
@@ -20,6 +21,7 @@ import { type Drawing, type LineStyle } from "lightweight-charts-drawing/core/ty
 import { factoryStyleFor } from "lightweight-charts-drawing/core/specs";
 import { clearKindDefault, saveKindDefault, type DrawingTemplate } from "./templates";
 import { Icon } from "../../components/Icon";
+import { startEdge } from "../../components/reading-direction";
 import { ColorPopover, FontSizePopover, HIGHLIGHTER_WIDTHS, StylePopover, TemplatesMenu, WidthPopover } from "./DrawingStylePopovers";
 import { groupValue, sameColor, toolbarGroups, visibleColors, type ColorButton, type Group } from "./toolbar-groups";
 import * as kv from "../../data/kv";
@@ -669,7 +671,7 @@ export function SelectedToolbar(props: Props) {
           type="button"
           class="selected-toolbar-btn selected-toolbar-btn-remove"
           data-name="remove"
-          title={isGroup() ? `Remove ${groupTargets().length} drawings` : "Remove"}
+          title={isGroup() ? translateWith("Remove {0} drawings", groupTargets().length) : "Remove"}
           aria-label="Remove"
           onClick={removeSelection}
         >
@@ -688,7 +690,8 @@ export function SelectedToolbar(props: Props) {
             aria-expanded={openPopover() === "more"}
             onClick={(e) => {
               const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-              setMoreAt({ x: r.left, y: r.bottom });
+              // Under the button, start edges aligned (fitToWindow).
+              setMoreAt({ x: startEdge(r), y: r.bottom });
               toggle("more");
             }}
           >

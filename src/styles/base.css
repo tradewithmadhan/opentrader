@@ -219,3 +219,11 @@ html.theme-dark {
   font-size: 16px;
   cursor: pointer;
 }
+
+/* Icons that point along the reading direction (back, send, submenu chevrons, tree expanders, collapse arrows, pagers,
+   flags) turn around when the text runs right to left; undo and redo swap places but keep their look, as replay,
+   logos and drawing tools do (#290). Not for icons on the chart, which keeps its left-to-right layout. Also mirrors
+   a control drawn along the direction (an opacity slider). */
+.ot-flip-rtl:dir(rtl) {
+  transform: scaleX(-1);
+}

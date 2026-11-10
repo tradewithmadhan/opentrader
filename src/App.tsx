@@ -699,8 +699,9 @@ function App() {
       </Show>
       {/* Main layout (header toolbar + chart area) | screener split view.
           The split view takes its width from the right; in its fullscreen
-          mode the main layout is hidden (kept mounted). */}
-      <div class="flex flex-1 flex-row" style={{ "min-height": 0, "min-width": 0, position: "relative" }}>
+          mode the main layout is hidden (kept mounted). The panels keep their
+          places right to left (ot-panel-row, styles/rtl.css). */}
+      <div class="ot-panel-row flex flex-1 flex-row" style={{ "min-height": 0, "min-width": 0, position: "relative" }}>
       <div
         class="flex flex-1 flex-col"
         style={{
@@ -750,7 +751,7 @@ function App() {
           Mirrors the mock's `.chart-area` (App.tsx) so the right rail spans
           the full height and the bottom bar lives inside the chart-pane. */}
       <div
-        class="flex flex-1 flex-row"
+        class="ot-panel-row flex flex-1 flex-row"
         style={{
           "min-height": 0,
           "min-width": 0,
@@ -804,8 +805,7 @@ function App() {
             // 4px gutters framing the chart on the left (drawing toolbar) and
             // right (watchlist rail) — same #2e2e2e seam as the top. Bottom is
             // the window edge (no gutter). Mirrors mock `.chart-pane`.
-            "border-left": "4px solid var(--color-widget-border)",
-            "border-right": "4px solid var(--color-widget-border)",
+            "border-inline": "4px solid var(--color-widget-border)",
             // Painted so the 2px seam above the bottom bar (its margin-top)
             // and the rounded chart-card corners show the window background.
             "background-color": "var(--color-widget-border)",

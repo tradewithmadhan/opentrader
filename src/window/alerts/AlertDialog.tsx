@@ -1,3 +1,5 @@
+import { translateWith } from "../../i18n/translator";
+import { dateText } from "../../i18n/format";
 /*
  * AlertDialog — create or edit a single alert rule.
  *
@@ -75,6 +77,7 @@ import { appendPlaceholder, placeholderGroups, type PlaceholderGroup } from "../
 import { messageOutputs } from "../../data/alert-outputs";
 import { studyOperandValue } from "../../data/alert-studies";
 import { stepAmountText } from "../../data/study-format";
+import { priceFieldProps } from "../../i18n/price-field";
 import { getIndicatorEntry } from "../chart/indicators/registry";
 import type { SessionId } from "../../data/session/symbol-sessions";
 import { isFullSymbol, isSupportedResolution, toFullSymbol } from "../../data/datafeed";
@@ -137,7 +140,7 @@ const STUDY_FREQUENCIES: { key: AlertFrequency; label: string; desc: string }[] 
 function shortDateTime(ms: number): string {
   const d = new Date(ms);
   const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.toLocaleString("en-US", { month: "short" })} ${d.getDate()}, ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `${dateText(d, { month: "short", day: "numeric" })}, ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 /** datetime-local value of a time. */
@@ -870,7 +873,7 @@ export function AlertDialog(props: Props) {
     const n = notify.values();
     const on = [n.popup && "Notification", n.toast && "Toasts", n.webhookOn && "Webhook", n.sound && "Sound"].filter(Boolean).join(", ");
     if (!on) return "None";
-    return n.schedule ? `Scheduled: ${on}` : on;
+    return n.schedule ? translateWith("Scheduled: {0}", on) : on;
   };
   const openMessage = () => {
     msg.open(preview(), isCallsOnly());
@@ -889,15 +892,19 @@ export function AlertDialog(props: Props) {
   /** One step up / down of a number field, in its last decimal. */
   const stepped = (text: string, dir: 1 | -1) => stepAmountText(text, dir);
   /** A number field with its up / down steppers. */
-  const valueBox = (get: () => string, set: (v: string) => void, label: string) => (
-    <span class="ad-number">
-      <input class="ad-input" type="text" inputmode="decimal" aria-label={label} value={get()} onInput={(e) => set(e.currentTarget.value)} placeholder="0.00" />
-      <span class="ad-steppers">
-        <button type="button" tabIndex={-1} aria-label="Increase" onClick={() => set(stepped(get(), 1))}>{arrow("m5 11 4-4 4 4")}</button>
-        <button type="button" tabIndex={-1} aria-label="Decrease" onClick={() => set(stepped(get(), -1))}>{arrow("m5 7 4 4 4-4")}</button>
+  const valueBox = (get: () => string, set: (v: string) => void, label: string) => {
+    // Shown and typed in the interface language's marks ("1 234,5"), kept in English ones.
+    const field = priceFieldProps(get, set);
+    return (
+      <span class="ad-number">
+        <input class="ad-input" type="text" inputmode="decimal" aria-label={label} value={field.value} onFocus={field.onFocus} onBlur={field.onBlur} onInput={(e) => set(e.currentTarget.value)} placeholder="0.00" />
+        <span class="ad-steppers">
+          <button type="button" tabIndex={-1} aria-label="Increase" onClick={() => set(stepped(get(), 1))}>{arrow("m5 11 4-4 4 4")}</button>
+          <button type="button" tabIndex={-1} aria-label="Decrease" onClick={() => set(stepped(get(), -1))}>{arrow("m5 7 4 4 4-4")}</button>
+        </span>
       </span>
-    </span>
-  );
+    );
+  };
   /** What a bound can be: a value, the studies with plots (not the source itself), and the drawing with two bounds
    *  the dialog was opened for (picking it makes the drawing the level). The price is not a bound. */
   const boundOptions = (): MenuOption[] => [
@@ -939,7 +946,7 @@ export function AlertDialog(props: Props) {
             <Show when={sel() === "value"}>{valueBox(value, (v) => { setFields("boundsEdited", true); setValue(v); }, title)}</Show>
           </div>
           <Show when={sel().startsWith("ind:") && studyPlots(sel().slice(4)).length >= 2}>
-            <AdMenu variant="box" label={`${title} plot`} value={String(plot())} options={plotOptions(sel().slice(4))} onPick={(v) => setPlot(Number(v))} />
+            <AdMenu variant="box" label={translateWith("{0} plot", title)} value={String(plot())} options={plotOptions(sel().slice(4))} onPick={(v) => setPlot(Number(v))} />
           </Show>
         </div>
       </div>
@@ -970,8 +977,9 @@ export function AlertDialog(props: Props) {
       <path stroke="currentColor" stroke-width="1.2" fill="none" d="m1.5 1.5 15 15m0-15-15 15" />
     </svg>
   );
-  const arrow = (d: string) => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18" width="18" height="18" aria-hidden="true">
+  /** `along`: the arrow points back or forward along the reading direction (turned around right to left). */
+  const arrow = (d: string, along = false) => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18" width="18" height="18" aria-hidden="true" class={along ? "ot-flip-rtl" : undefined}>
       <path stroke="currentColor" stroke-width="1.2" fill="none" d={d} />
     </svg>
   );
@@ -1144,7 +1152,7 @@ export function AlertDialog(props: Props) {
   const subHeader = (title: string) => (
     <header class="ad-header" data-dialog-title>
       <button type="button" class="ad-icon-btn" data-name="back" aria-label="Back" onClick={() => setView("main")}>
-        {arrow("M11 3.5 5.5 9l5.5 5.5")}
+        {arrow("M11 3.5 5.5 9l5.5 5.5", true)}
       </button>
       <span class="ad-title">{title}</span>
       <span class="ad-spacer" />
@@ -1260,14 +1268,14 @@ export function AlertDialog(props: Props) {
                 <span class="ad-label">Message</span>
                 <button type="button" class="ad-link" data-name="alert-message-button" onClick={openMessage}>
                   <span class="ad-link-text">{isCallsOnly() ? msg.values().name || preview() : <>{msg.values().name ? `${msg.values().name}: ` : ""}{msg.values().message || preview()}</>}</span>
-                  {arrow("m7 4.5 4 4.5-4 4.5")}
+                  {arrow("m7 4.5 4 4.5-4 4.5", true)}
                 </button>
               </div>
               <div class="ad-row ad-row--text">
                 <span class="ad-label">Notifications</span>
                 <button type="button" class="ad-link" data-name="alert-notifications-button" onClick={openNotifications}>
                   <span class="ad-link-text">{notificationsText()}</span>
-                  {arrow("m7 4.5 4 4.5-4 4.5")}
+                  {arrow("m7 4.5 4 4.5-4 4.5", true)}
                 </button>
               </div>
             </div>
@@ -1305,7 +1313,7 @@ export function AlertDialog(props: Props) {
             <header class="ad-header" data-dialog-title>
               {/* Back keeps an edited condition, drops a new one. */}
               <button type="button" class="ad-icon-btn" data-name="back" aria-label="Back" onClick={() => (draft()?.saved ? applyDraft() : abortDraft())}>
-                {arrow("M11 3.5 5.5 9l5.5 5.5")}
+                {arrow("M11 3.5 5.5 9l5.5 5.5", true)}
               </button>
               <span class="ad-title">{draft()?.saved ? "Edit condition" : "Add condition"}</span>
               <span class="ad-spacer" />
@@ -1425,7 +1433,7 @@ export function AlertDialog(props: Props) {
                       <div class="ad-sched-pop" role="dialog" aria-label="Custom schedule" data-name="custom-schedule-popover">
                         <div class="ad-sched-pop-head">
                           <button type="button" class="ad-icon-btn" aria-label="Back" onClick={() => notify.setCustomSchedule(null)}>
-                            {arrow("M11 3.5 5.5 9l5.5 5.5")}
+                            {arrow("M11 3.5 5.5 9l5.5 5.5", true)}
                           </button>
                           <span class="ad-sched-pop-title">Custom schedule</span>
                         </div>

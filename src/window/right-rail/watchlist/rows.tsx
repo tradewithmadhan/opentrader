@@ -174,8 +174,9 @@ export function createRows(cx: WatchlistCx): RowsApi {
           // cellFor → lastForRow → quoteFor, so live ticks re-render the cell.
           const cell = () => cellFor(r, c.key);
           return (
-            <div class={`watchlist-cell ${cell().tint ?? ""}`} style={{ "text-align": "right" }}>
-              {cell().text}
+            <div class={`watchlist-cell ${cell().tint ?? ""}`} style={{ "text-align": "end" }}>
+              {/* A value: kept whole right to left (styles/rtl.css). */}
+              <span class="ot-value">{cell().text}</span>
             </div>
           );
         }}

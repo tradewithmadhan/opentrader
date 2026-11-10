@@ -47,6 +47,7 @@ import type { Drawing } from "lightweight-charts-drawing/core/types";
 import { consumeDataWindowRequest, dataWindow } from "../../data/data-window-store";
 import { emitAppEvent } from "../../data/app-events";
 import { translateWith } from "../../i18n/translator";
+import { dateText, localNumber } from "../../i18n/format";
 
 type View = "tree" | "data-window";
 
@@ -84,13 +85,7 @@ function fmtVal(v: number): string {
   return v.toFixed(2);
 }
 function fmtDate(timeSec: number, tz?: string): string {
-  return new Intl.DateTimeFormat("en-US", {
-    ...(tz ? { timeZone: tz } : {}),
-    weekday: "short",
-    day: "2-digit",
-    month: "short",
-    year: "2-digit",
-  }).format(new Date(timeSec * 1000));
+  return dateText(timeSec * 1000, { weekday: "short", day: "2-digit", month: "short", year: "2-digit" }, tz);
 }
 function fmtTime(timeSec: number, tz?: string): string {
   return new Intl.DateTimeFormat("en-US", {
@@ -103,6 +98,7 @@ function fmtTime(timeSec: number, tz?: string): string {
 
 /** One label/value line in the data window. `dir` tints up/down; `color`
  *  overrides (indicator plot colour). */
+/** A row of the data window; its number in the marks of the interface language (the formats here write English). */
 function DwRow(props: { label: string; value: string; dir?: "up" | "down"; color?: string }) {
   return (
     <div class="data-window-row">
@@ -111,7 +107,7 @@ function DwRow(props: { label: string; value: string; dir?: "up" | "down"; color
         class={`data-window-value${props.dir ? ` ${props.dir}` : ""}`}
         style={props.color ? { color: props.color } : undefined}
       >
-        {props.value}
+        {localNumber(props.value)}
       </span>
     </div>
   );

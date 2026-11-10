@@ -12,7 +12,7 @@ import { IconButton } from "../../../components/IconButton";
 import { api, type ContactMessage, type QueueItem } from "../../../data/community/api";
 import { me } from "../../../data/community/session";
 import { Age, Author, ErrorBanner, ReasonForm, errorText } from "../../../community-shared/parts";
-import { translateWith } from "../../../i18n/translator";
+import { translatePlural, translateWith } from "../../../i18n/translator";
 
 const REASON_LABELS: Record<string, string> = {
   spam: "Spam",
@@ -61,7 +61,7 @@ export function ModQueue(props: { onBack: () => void; onOpenPost: (id: string) =
   return (
     <div class="cm-post-view">
       <div class="cm-subheader">
-        <IconButton aria-label="Back" onClick={() => props.onBack()}><Icon name="community-back" size={28} /></IconButton>
+        <IconButton aria-label="Back" onClick={() => props.onBack()}><Icon name="community-back" size={28} class="ot-flip-rtl" /></IconButton>
         <span class="cm-subheader-title is-static">Moderation queue</span>
       </div>
       <div class="cm-scroll">
@@ -77,8 +77,8 @@ export function ModQueue(props: { onBack: () => void; onOpenPost: (id: string) =
                   <Show when={m.user_name}><span class="cm-dot">·</span><Author name={m.user_name} /></Show>
                 </div>
                 <div class="cm-queue-body">{m.body}</div>
-                <Show when={m.url}><div class="cm-meta">Link: {m.url}</div></Show>
-                <Show when={m.email}><div class="cm-meta">Reply to: {m.email}</div></Show>
+                <Show when={m.url}><div class="cm-meta">{translateWith("Link: {0}", m.url ?? "")}</div></Show>
+                <Show when={m.email}><div class="cm-meta">{translateWith("Reply to: {0}", m.email ?? "")}</div></Show>
                 <div class="cm-actions">
                   <button type="button" class="cm-action" onClick={() => handled(m)}>Mark handled</button>
                 </div>
@@ -96,7 +96,7 @@ export function ModQueue(props: { onBack: () => void; onOpenPost: (id: string) =
                     <span class="cm-badge">{item.target_type}</span>
                     <span>{item.community_id.replace(/^t:/, "$").replace(/^c:/, "")}</span>
                     <span class="cm-dot">·</span>
-                    <span>{translateWith(item.reports === 1 ? "{0} report" : "{0} reports", item.reports)}</span>
+                    <span>{translatePlural(item.reports, { one: "{0} report", other: "{0} reports" }, item.reports)}</span>
                     <span class="cm-dot">·</span>
                     <Age at={item.first_at} />
                   </div>
@@ -122,7 +122,7 @@ export function ModQueue(props: { onBack: () => void; onOpenPost: (id: string) =
                       </div>
                     }
                   >
-                    <ReasonForm title={`Remove this ${item.target_type}`} action="Remove" danger onCancel={() => setRemoving(null)} onSubmit={(r) => act(item, "remove", r)} />
+                    <ReasonForm title={item.target_type === "post" ? "Remove this post" : "Remove this comment"} action="Remove" danger onCancel={() => setRemoving(null)} onSubmit={(r) => act(item, "remove", r)} />
                   </Show>
                 </div>
               )}

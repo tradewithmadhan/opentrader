@@ -50,3 +50,32 @@ too, put its body in `opentrader_core::commands`, add its name to `SERVED` there
 - Commit only the files you changed (no `git add -A`): other work may be in the tree.
 - Cherry-picking upstream commits: strip the trailing `(#NNN)` PR reference from the message
   (`git cherry-pick -n`, then re-commit) so the push does not cross-reference and ping the upstream PR.
+
+## Languages
+
+The components keep their English text; `src/i18n/translator.ts` translates the page as it appears from a dictionary
+keyed by the English text (`src/i18n/<lang>.json`). `src/i18n/catalog.json` lists every text to translate, generated
+from the code, the built-in studies and `src/i18n/tools/run-time-texts.ts`.
+
+- A text: write it whole. Values go through `translateWith("{0} bars of {1}", n, sym)`, counts through
+  `translatePlural(n, { one: "{0} bar", other: "{0} bars" })`, dates and numbers through `src/i18n/format.ts`; never
+  join words to values (`"Undo " + name`, a test fails). A word with two meanings takes a sense (`data-i18n-sense`,
+  `translateAs`). Then `npm run i18n:extract` and add the new entries to each dictionary.
+- A language: one entry in `src/i18n/languages.ts` (name, plural locale, formats, direction, `partial` while it is
+  being translated) and its `<lang>.json`; `src/i18n/glossary/<lang>.json` holds its terms.
+- `npm run i18n:report` gives each language's coverage; `npm run i18n:missing -- <lang>` writes the missing texts with
+  their context and glossary terms to `.tmp/i18n/<lang>-missing.json`, `npm run i18n:merge -- <lang> <file>` merges
+  the filled file back (checked); `npm run i18n:prune` removes the entries the catalog lost. In the dev build,
+  `window.__i18nMisses()` lists the texts left in English on screen.
+- The pseudo-language "Pseudo" (`en-XA`, dev builds' language menu, `src/i18n/pseudo.ts`) shows every catalog text
+  accented, a third longer and between markers ⟦…⟧: text without them is left in English. With the dev app running
+  with CDP, `npm run i18n:walk -- 9231` walks its screens, menus, dialogs and panels in it and writes the English left
+  on screen, the cut text and the misses to `.tmp/i18n-walk/` (report.md, screenshots), then puts the app back.
+- Right to left: the page's `dir` is the language's. CSS uses start/end (`margin-inline-start`, `inset-inline-end`,
+  `text-align: start`); left/right only for what keeps its side: the panels' places and their outer edges and resize
+  handles, the chart and what sits over it (`src/styles/rtl.css` holds those rules). Code that places a menu or
+  popover uses `src/components/reading-direction.ts` (`fitToWindow` and `createPopover` already do). An icon that
+  points along the reading direction (back, submenu chevron, expander) takes `ot-flip-rtl`; undo/redo, replay, logos
+  and drawing tools don't. A value shown inside text (price, percent, volume, time) is isolated: the `ot-value`
+  class (`src/styles/rtl.css`). Check with the dev build's pseudo-language "English, right to left (test)"
+  (`en-XB`, `src/i18n/pseudo-rtl.ts`): the English words in right-to-left order inside ⟦ ⟧.

@@ -24,6 +24,7 @@ import type {
 import type { ProviderCapabilities } from "../../bindings";
 import type { DataSource, MarketSessionDef, SourceSeeds } from "../sources/types";
 import type { SymbolRow, SymbolCategoryId, TypeFilter } from "../symbol-search";
+import { translateWith } from "../../i18n/translator";
 
 /** Session served by the sample feed (NSE equities). */
 const SESSION: MarketSessionDef = {
@@ -1066,7 +1067,7 @@ export function sampleLatestNews(symbol: string, limit: number): NewsItem[] {
     publisher: "Sample Wire",
     published: now - i * 6 * 3600000,
     url: null,
-    description: `${title}. Synthetic headline for backend development.`,
+    description: translateWith("{0}. Synthetic headline for backend development.", title),
   }));
 }
 

@@ -1,3 +1,4 @@
+import { translateWith } from "../i18n/translator";
 /*
  * The Alerts log's "Webhook status" line: what an event's webhook came to, in
  * the reference app's words ("Webhook successfully delivered", "Webhook
@@ -5,7 +6,8 @@
  */
 import type { WebhookOutcome } from "./alert-store";
 
-const STATUS_TEXT: Record<number, string> = {
+/** The phrase after a status code ("404 Not Found"), a piece of the failure line. */
+const REASON_PHRASES: Record<number, string> = {
   400: "Bad Request",
   401: "Unauthorized",
   403: "Forbidden",
@@ -26,7 +28,7 @@ const STATUS_TEXT: Record<number, string> = {
 };
 
 function httpError(code: number): string {
-  const text = STATUS_TEXT[code] ?? (code >= 400 && code < 500 ? "Client Error" : code >= 500 && code < 600 ? "Server Error" : "");
+  const text = REASON_PHRASES[code] ?? (code >= 400 && code < 500 ? "Client Error" : code >= 500 && code < 600 ? "Server Error" : "");
   return text ? `${code} ${text}` : String(code);
 }
 
@@ -42,5 +44,5 @@ export function webhookStatus(w: WebhookOutcome | undefined): WebhookStatus | nu
   if (w.httpCode == null && w.error == null) return null;
   const why = w.error ?? httpError(w.httpCode!);
   const cut = why.length <= MAX_ERROR ? `${why}.` : `${why.slice(0, MAX_ERROR - 1).trim()}…`;
-  return { ok: false, text: `Webhook delivery failed — ${cut}` };
+  return { ok: false, text: translateWith("Webhook delivery failed — {0}", cut) };
 }

@@ -14,7 +14,7 @@ import { chartBridge } from "../../../data/community/chart-share";
 import { shortIntervalLabel } from "../../chart/interval-favorites";
 import { Age, Author, AuthorRecord, BanForm, BotBadge, ErrorBanner, ExternalLink, IdeaLevels, MarkdownBody, PostState, ReasonForm, ReportForm, TypeBadges, errorText } from "../../../community-shared/parts";
 import { KINDS, KIND_LABEL, createPostThread, type FormKind } from "../../../community-shared/post-thread";
-import { translateWith } from "../../../i18n/translator";
+import { translatePlural, translateWith } from "../../../i18n/translator";
 
 const REASONS: { id: Reason; label: string }[] = [
   { id: "thesis", label: "Clear thesis" },
@@ -69,7 +69,7 @@ function SharedChartBlock(props: { imagePath: string | null; chart: SharedChart 
     try {
       const n = await b.open(props.chart);
       const [symbol, interval] = [props.chart.symbol, shortIntervalLabel(props.chart.interval)];
-      setDone(n ? translateWith(n === 1 ? "Opened {0}, {1} with {2} drawing." : "Opened {0}, {1} with {2} drawings.", symbol, interval, n) : translateWith("Opened {0}, {1}.", symbol, interval));
+      setDone(n ? translatePlural(n, { one: "Opened {0}, {1} with {2} drawing.", other: "Opened {0}, {1} with {2} drawings." }, symbol, interval, n) : translateWith("Opened {0}, {1}.", symbol, interval));
     } catch (e) {
       setFailed(errorText(e));
     }
@@ -92,7 +92,7 @@ function SharedChartBlock(props: { imagePath: string | null; chart: SharedChart 
       <Show when={props.chart}>
         <div class="cm-actions">
           <span class="cm-muted">
-            {props.chart!.symbol} · {shortIntervalLabel(props.chart!.interval)} · {translateWith(drawings() === 1 ? "{0} drawing" : "{0} drawings", drawings())}
+            {props.chart!.symbol} · {shortIntervalLabel(props.chart!.interval)} · {translatePlural(drawings(), { one: "{0} drawing", other: "{0} drawings" }, drawings())}
           </span>
           <Show
             when={chartBridge()}
@@ -174,12 +174,12 @@ export function PostView(props: Props) {
           <span class="cm-dot">·</span>
           <Age at={c().created_at} />
           <Show when={c().edited_at}><span class="cm-muted"> (edited)</span></Show>
-          <Show when={isCollapsed()}><span class="cm-muted"> · {kids().length ? translateWith(kids().length === 1 ? "{0} reply" : "{0} replies", kids().length) : ""}</span></Show>
+          <Show when={isCollapsed()}><span class="cm-muted"> · {kids().length ? translatePlural(kids().length, { one: "{0} reply", other: "{0} replies" }, kids().length) : ""}</span></Show>
         </div>
         <Show when={!isCollapsed()}>
           <Show when={c().removed}>
             <div class="cm-removed">
-              Removed by moderators{c().removed_reason ? `: ${c().removed_reason}` : ""}
+              {c().removed_reason ? translateWith("Removed by moderators: {0}", c().removed_reason!) : "Removed by moderators"}
               <Show when={c().own}> <button type="button" class="cm-action is-inline" onClick={() => toggle(c().id, "appeal")}>Appeal</button></Show>
             </div>
             <Show when={is("appeal")}>
@@ -194,7 +194,7 @@ export function PostView(props: Props) {
           </Show>
           <div class="cm-actions">
             <button type="button" class={"cm-action" + (c().my_useful ? " is-on" : "")} aria-pressed={c().my_useful} disabled={c().own || c().deleted || c().removed} onClick={() => useful(c())}>
-              {c().useful_count} useful
+              {translateWith("{0} useful", c().useful_count)}
             </button>
             <Show when={post.p?.own && post.p?.type === "question" && !c().own && !c().deleted && cp.depth === 0}>
               <button type="button" class="cm-action" onClick={() => markAnswer(c())}>{post.p?.answer_id === c().id ? "Unmark answer" : "Mark as the answer"}</button>
@@ -238,7 +238,7 @@ export function PostView(props: Props) {
   return (
     <div class="cm-post-view">
       <div class="cm-subheader">
-        <IconButton aria-label="Back" onClick={() => props.onBack()}><Icon name="community-back" size={28} /></IconButton>
+        <IconButton aria-label="Back" onClick={() => props.onBack()}><Icon name="community-back" size={28} class="ot-flip-rtl" /></IconButton>
         <Show when={post.p}>
           <button type="button" class="cm-subheader-title" onClick={() => props.onOpenCommunity(post.p!.community.id)}>{post.p!.community.title.replace(/^\$/, "")}</button>
         </Show>
@@ -264,7 +264,7 @@ export function PostView(props: Props) {
                   </div>
                   <Show when={p().removed}>
                     <div class="cm-removed">
-                      Removed by moderators{p().removed_reason ? `: ${p().removed_reason}` : ""}
+                      {p().removed_reason ? translateWith("Removed by moderators: {0}", p().removed_reason!) : "Removed by moderators"}
                       <Show when={p().own}> <button type="button" class="cm-action is-inline" onClick={() => toggle("post", "appeal")}>Appeal</button></Show>
                     </div>
                     <Show when={isPost("appeal")}>
@@ -284,7 +284,7 @@ export function PostView(props: Props) {
                   <Show when={!p().deleted && !p().removed}>
                     <div class="cm-rate">
                       <div class="cm-muted">
-                        {p().own ? "What readers found useful" : "Useful? Say why"} · {p().useful_count} found it useful{p().flag_count ? ` · ${p().flag_count} flagged` : ""}
+                        {p().own ? "What readers found useful" : "Useful? Say why"}{" · "}{translateWith("{0} found it useful", p().useful_count)}{p().flag_count ? ` · ${translateWith("{0} flagged", p().flag_count)}` : ""}
                       </div>
                       <div class="cm-rate-btns">
                         <For each={REASONS}>
