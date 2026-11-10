@@ -2240,6 +2240,8 @@ fn tick_of(symbol: &str, q: &OaQuote) -> Option<TradeTick> {
         source: Some("live".into()),
         trade_price: None,
         trade_time: None,
+        trade_high: None,
+        trade_low: None,
     })
 }
 
