@@ -38,6 +38,25 @@ export function fitToWindow(el: HTMLElement, x: number, y: number, endX = false,
   el.style.top = `${Math.max(0, Math.min(y, H - h))}px`;
 }
 
+/** Ref callback for a `position: fixed` toolbar flyout (the drawing toolbar's): beside its parent's right edge
+ *  (physical: the toolbar stays on the left right to left), 1 px apart, tops aligned; moved up when it would cross
+ *  the window's bottom edge, given the window height and scrolled when taller, as fitToWindow does. Fixed, as the
+ *  toolbar scrolls and clips what it holds (#297). */
+export function placeFlyout(el: HTMLElement): void {
+  queueMicrotask(() => {
+    const anchor = el.parentElement!.getBoundingClientRect();
+    const H = document.documentElement.clientHeight;
+    let h = el.getBoundingClientRect().height;
+    if (h > H) {
+      el.style.maxHeight = `${H}px`;
+      el.style.overflowY = "auto";
+      h = H;
+    }
+    el.style.left = `${anchor.right + 1}px`;
+    el.style.top = `${Math.max(0, Math.min(anchor.top, H - h))}px`;
+  });
+}
+
 /** Ref callback that keeps a menu fitted whenever its requested position
  *  changes (runs after the element is in the document). */
 export function fitMenuRef(pos: () => { x: number; y: number; endX?: boolean; endY?: boolean }) {

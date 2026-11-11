@@ -2,9 +2,12 @@
 import "./styles.css";
 import { hydrateKv } from "./data/kv";
 import { installOverflowTooltip } from "./components/overflow-tooltip";
+import { installBrowserMenuBlock } from "./components/browser-menu";
 
 // A tooltip on menu labels only when they are cut.
 installOverflowTooltip();
+// No web-view menu (Back, Reload, Save as…) on a right-click.
+installBrowserMenuBlock();
 
 // Hydrate the persistence layer BEFORE App (and its module graph) loads: many
 // modules seed signals/stores from kv synchronously at import time, so the
@@ -20,7 +23,7 @@ void hydrateKv().finally(async () => {
   initAppUpdate();
   // The interface language, before anything is drawn.
   const { startTranslation } = await import("./i18n/language");
-  await startTranslation();
+  await startTranslation().finally(() => document.getElementById("splash")?.classList.add("is-translated"));
   const { render } = await import("solid-js/web");
   // The screener's own window (placement "Separate window") holds the screener only.
   if (new URLSearchParams(location.search).get("view") === "screener") {

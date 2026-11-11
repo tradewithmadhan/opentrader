@@ -327,6 +327,8 @@ export const commands: {
   readFiling(symbol: string, accn: string, section: string | null, offset: number | null): Promise<CommandResult<FilingText>>;
   marketPassSet(pass: string | null, exp: number | null): void;
   marketPassResume(): void;
+  readNoteImage(name: string): Promise<CommandResult<string>>;
+  openSnapshot(pngBase64: string): Promise<CommandResult<void>>;
   [key: string]: any;
 } = new Proxy(
   {},
@@ -375,6 +377,8 @@ export const commands: {
   readFiling(symbol: string, accn: string, section: string | null, offset: number | null): Promise<CommandResult<FilingText>>;
   marketPassSet(pass: string | null, exp: number | null): void;
   marketPassResume(): void;
+  readNoteImage(name: string): Promise<CommandResult<string>>;
+  openSnapshot(pngBase64: string): Promise<CommandResult<void>>;
   [key: string]: any;
 };
 

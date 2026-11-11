@@ -5,6 +5,7 @@
 @import "./styles/base.css";
 @import "./styles/tabs.css";
 @import "./styles/toolbar-button.css";
+@import "./styles/scroll-strip.css";
 @import "./styles/header-toolbar.css";
 @import "./styles/tooltip.css";
 @import "./styles/chart-event-hint.css";
@@ -37,6 +38,7 @@
 @import "./styles/object-tree-panel.css";
 @import "./styles/watchlist.css";
 @import "./styles/watchlist-detail.css";
+@import "./styles/symbol-notes.css";
 @import "./styles/bottom-bar.css";
 @import "./styles/chart-grid.css";
 @import "./styles/chart-legend.css";

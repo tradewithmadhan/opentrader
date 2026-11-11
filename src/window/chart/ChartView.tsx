@@ -16,6 +16,7 @@
 import { Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount, untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import { CrosshairMode, createChartEx, type IChartApi, type MouseEventParams } from "lightweight-charts";
+import { trackPendingRange } from "./pending-range";
 import { readChartTokens, readFontFamily } from "./chart-tokens";
 import { chartNumberOptions, localizeLibraryNumbers } from "./price-format";
 import { chartBackgroundAt } from "./selection-markers";
@@ -58,7 +59,7 @@ import { ChartContextMenu } from "./ChartContextMenu";
 import { type Coords } from "../drawings/coords";
 import { DrawingsOverlay } from "../drawings/DrawingsOverlay";
 import { cursorForMode } from "../drawings/cursors";
-import { createChartCx, type ChartCore, type ChartCx, type ChartMenuState, type ChartViewProps } from "./view/context";
+import { createChartCx, type ChartCore, type ChartCx, type ChartMenuState, type ChartViewProps, type ShownSeries } from "./view/context";
 import { appearanceOptions } from "./view/helpers";
 import { createNavigation } from "./view/navigation";
 import { createMenus } from "./view/menus";
@@ -198,6 +199,7 @@ export function ChartView(props: ChartViewProps) {
    *  clears the drawing selection and selecting a drawing clears it. Delete /
    *  Backspace remove it, Escape or a click on the empty chart clear it. */
   const [selectedStudy, setSelectedStudy] = createSignal<string | null>(null);
+  const [shownSeries, setShownSeries] = createSignal<ShownSeries | null>(null);
   /** Legend flag colour popup (its flag button), null = closed. */
   const [flagPopup, setFlagPopup] = createSignal<HTMLElement | null>(null);
   /** Legend "Chart syncing" menu (its button rect), null = closed. */
@@ -319,6 +321,8 @@ export function ChartView(props: ChartViewProps) {
     setReloadTick,
     chartReady,
     swapping: false,
+    shownSeries,
+    setShownSeries,
     pendingRangeSpan: null,
     rangePersistTimer: undefined,
     coords,
@@ -394,6 +398,7 @@ export function ChartView(props: ChartViewProps) {
     }) as IChartApi;
     // The indexed-to-100 scale's values in the language's marks ("103,25").
     localizeLibraryNumbers(chart);
+    trackPendingRange(chart);
     cx.chart = chart;
     cx.lockViews = new CrosshairLockViews(chart, () => {
       const t = currentTokens();
