@@ -17,6 +17,7 @@
 import { Show, createSignal, type JSX } from "solid-js";
 import { Tooltip } from "../../components/Tooltip";
 import { localNumber } from "../../i18n/format";
+import { translateAs } from "../../i18n/translator";
 import { STATUS_ITEMS, pillStatus } from "./legend-status";
 import { LegendStatusPopup } from "./LegendStatusPopup";
 
@@ -260,7 +261,7 @@ export function ChartLegend(props: Props) {
                     </span>
                   </Show>
                   <Show when={props.showTitle ?? true}>
-                    <span class="ot-legend-symbol">{titleText()}</span>
+                    <span class="ot-legend-symbol" data-no-translate>{titleText()}</span>
                   </Show>
                 </span>
               </Tooltip>
@@ -271,6 +272,7 @@ export function ChartLegend(props: Props) {
                     class="ot-legend-title-piece ot-legend-dot ot-legend-with-action"
                     onMouseDown={(e) => { if (props.onChangeSymbol) e.stopPropagation(); }}
                     onClick={(e) => { if (!props.onChangeSymbol) return; e.stopPropagation(); props.onChangeSymbol(); }}
+                    data-no-translate
                   >
                     {props.description}
                   </span>
@@ -287,11 +289,11 @@ export function ChartLegend(props: Props) {
               </Tooltip>
               <Show
                 when={EXCHANGE_TITLES[props.exchange.toUpperCase()]}
-                fallback={<span class="ot-legend-title-piece ot-legend-dot">{props.exchange}</span>}
+                fallback={<span class="ot-legend-title-piece ot-legend-dot" data-no-translate>{props.exchange}</span>}
               >
                 {(t) => (
                   <Tooltip text={t()} side="bottom">
-                    <span class="ot-legend-title-piece ot-legend-dot">{props.exchange}</span>
+                    <span class="ot-legend-title-piece ot-legend-dot" data-no-translate>{props.exchange}</span>
                   </Tooltip>
                 )}
               </Show>
@@ -376,10 +378,10 @@ export function ChartLegend(props: Props) {
                       <span class={`ot-legend-value-value ot-legend-${valueDir()}`}>{price(v().close)}</span>
                     }
                   >
-                    <ValueItem letter="O" value={price(v().open)} dir={v().barDir} />
-                    <ValueItem letter="H" value={price(v().high)} dir={v().barDir} />
-                    <ValueItem letter="L" value={price(v().low)} dir={v().barDir} />
-                    <ValueItem letter="C" value={price(v().close)} dir={v().barDir} />
+                    <ValueItem letter={translateAs("O", "legend")} value={price(v().open)} dir={v().barDir} />
+                    <ValueItem letter={translateAs("H", "legend")} value={price(v().high)} dir={v().barDir} />
+                    <ValueItem letter={translateAs("L", "legend")} value={price(v().low)} dir={v().barDir} />
+                    <ValueItem letter={translateAs("C", "legend")} value={price(v().close)} dir={v().barDir} />
                   </Show>
                 </Show>
                 <Show when={(props.showBarChange ?? true) && !props.hideChangeValues}>

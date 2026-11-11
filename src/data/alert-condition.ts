@@ -21,7 +21,8 @@ import { conditionMessage } from "./alert-study-conditions";
 import { tickerOf } from "./symbol-name";
 import { groupThousands } from "../window/chart/price-format";
 import { formatStudyValue } from "./study-format";
-import { translate, translatePlural, translateWith } from "../i18n/translator";
+import { formatted, translate, translatePlural, translateWith } from "../i18n/translator";
+import { localNumber } from "../i18n/format";
 
 export const OPERATOR_LABELS: Record<AlertOperator, string> = {
   crossing: "Crossing",
@@ -578,6 +579,11 @@ export function alertAmountText(symbol: string | undefined, left: Operand, v: nu
 /** Human-readable condition: "Price Crossing Up 150", "Price Moving Up 1%
  *  in 3 bars", "Price Entering Channel (Upper Bound: 12, Lower Bound: 10)". */
 export function describeCondition(rule: Pick<AlertRule, "left" | "op" | "right" | "bars"> & { right2?: Operand; symbol?: string }): string {
+  // Its words translated one by one, joined with the values: shown as it is.
+  return formatted(conditionText(rule));
+}
+
+function conditionText(rule: Pick<AlertRule, "left" | "op" | "right" | "bars"> & { right2?: Operand; symbol?: string }): string {
   // A study's own condition: "MACD (close, 12, 26, 9): Rising to falling".
   if (rule.op === "alert_condition") {
     const title = rule.left.kind === "indicator" ? rule.left.condition?.title : undefined;
@@ -590,12 +596,12 @@ export function describeCondition(rule: Pick<AlertRule, "left" | "op" | "right" 
   // A strategy's condition: "MA Cross (9, 21): Order fills only".
   if (isStrategyOperator(rule.op)) return `${operandLabel(rule.left)}: ${translate(OPERATOR_LABELS[rule.op])}`;
   const left = translate(messageOperand(rule.left));
-  // A number is written as the left operand's values are ("3.50", "0.0000").
-  const side = (o: Operand) => (o.kind === "value" ? alertAmountText(rule.symbol, rule.left, o.value) : translate(messageOperand(o)));
+  // A number is written as the left operand's values are ("3.50", "0.0000"), in the interface language's marks.
+  const side = (o: Operand) => (o.kind === "value" ? localNumber(alertAmountText(rule.symbol, rule.left, o.value)) : translate(messageOperand(o)));
   if (isMovingOperator(rule.op)) {
     const v = rule.right.kind === "value" ? rule.right.value : 0;
     const n = rule.bars ?? 1;
-    const amount = isPercentOperator(rule.op) ? `${v}%` : alertAmountText(rule.symbol, rule.left, v);
+    const amount = localNumber(isPercentOperator(rule.op) ? `${v}%` : alertAmountText(rule.symbol, rule.left, v));
     const label = rule.op === "moving_up_pct" ? OPERATOR_LABELS.moving_up : rule.op === "moving_down_pct" ? OPERATOR_LABELS.moving_down : OPERATOR_LABELS[rule.op];
     return translatePlural(n, { one: "{0} {1} {2} in {3} bar", other: "{0} {1} {2} in {3} bars" }, left, translate(label), amount, n);
   }
@@ -668,6 +674,10 @@ export function conditionHasIntervalRow(rule: Pick<AlertRule, "left" | "op" | "r
  *  message the study declares; for a script's alert() calls, the condition
  *  (each fire has the call's message). */
 export function defaultAlertMessage(rule: Pick<AlertRule, "symbol" | "resolution" | "left" | "op" | "right" | "bars"> & { right2?: Operand; and?: AlertCondition[] }): string {
+  return formatted(alertMessageText(rule));
+}
+
+function alertMessageText(rule: Pick<AlertRule, "symbol" | "resolution" | "left" | "op" | "right" | "bars"> & { right2?: Operand; and?: AlertCondition[] }): string {
   // Several conditions: each one's message, joined by " AND " (empty ones left out).
   if (rule.and?.length) {
     return ruleConditions(rule)
