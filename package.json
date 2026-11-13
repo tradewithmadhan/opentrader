@@ -1,6 +1,6 @@
 {
   "name": "opentrader",
-  "version": "0.4.22",
+  "version": "0.4.23",
   "description": "Free, open-source desktop charting and trading app (Rust + SolidJS).",
   "private": true,
   "type": "module",
@@ -42,12 +42,13 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-store": "^2",
+    "acorn": "^8.19.0",
     "fancy-canvas": "^2.1.0",
     "flag-icons": "^7.5.0",
     "lightweight-charts": "^5.3.0",
-    "lightweight-charts-indicators": "^0.23.1",
+    "lightweight-charts-indicators": "^0.24.0",
     "monaco-editor": "^0.55.1",
-    "oakscriptjs": "^0.17.1",
+    "oakscriptjs": "^0.18.0",
     "solid-js": "^1.9.3"
   },
   "devDependencies": {

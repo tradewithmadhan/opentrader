@@ -16,6 +16,8 @@ import { Watchlist } from "./Watchlist";
 import { WatchlistDetail } from "./WatchlistDetail";
 import { ObjectTreePanel } from "./ObjectTreePanel";
 import { AlertsPanel } from "./AlertsPanel";
+import { ScriptLogsPanel } from "../oakscript/logs/ScriptLogsPanel";
+import { SCRIPT_LOGS_PANEL } from "../oakscript/logs/script-logs";
 import { CommunityPanel } from "./community/CommunityPanel";
 import { CommunityNotifier } from "./community/CommunityNotifier";
 import { shareRequest } from "../../data/community/share";
@@ -35,6 +37,8 @@ type Props = {
   onAddCompare?: (tickers: string[]) => void;
   /** Active chart interval — threaded to the watchlist for per-symbol alerts. */
   interval?: string;
+  /** The focused chart's time zone (IANA): the times of the script logs. */
+  timeZone?: string;
   /** Set the active chart's interval (an alert row click shows the alert's symbol and interval). */
   onIntervalSelect?: (interval: string) => void;
   drawings: Drawing[];
@@ -188,6 +192,7 @@ export function RightRail(props: Props) {
     <div
       ref={containerRef}
       class="right-rail-container ot-panel-row"
+      classList={{ "has-panel": !!props.activeTab && fits() }}
       style={{ display: "flex", position: "relative", "--ot-rail-width": `${shownWidth()}px` }}
     >
       <div class="rail-width-handle" role="separator" aria-orientation="vertical" onPointerDown={beginWidthResize} />
@@ -244,6 +249,10 @@ export function RightRail(props: Props) {
               }}
               onOpenSettings={props.onOpenAlertSettings}
             />
+          </Match>
+          {/* Script logs (#323): a panel without a rail button, opened from the editor or a study's menu. */}
+          <Match when={props.activeTab === SCRIPT_LOGS_PANEL}>
+            <ScriptLogsPanel timeZone={props.timeZone} onClose={() => props.setActiveTab(null)} />
           </Match>
           <Match when={props.activeTab === "community" && COMMUNITY_ENABLED}>
             <CommunityPanel symbol={props.activeSymbol} />

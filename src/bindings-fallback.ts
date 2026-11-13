@@ -248,6 +248,231 @@ export type LocalSeries = {
   source?: LocalSeriesSource | null;
 };
 
+// ── Plugins (mirrors src-tauri/src/plugins: mod.rs, package.rs and
+//    crates/core/src/plugins/manifest.rs) ─────────────────────────────────────
+
+/** What a plugin provides: symbols, bars and live ticks, or an account. */
+export type Capability = "datafeed" | "broker";
+
+/** How a plugin runs: a program of the package the app starts and stops, or one
+ *  inside another application that connects by itself. */
+export type Runtime =
+  | { type: "process"; entry: string; args: string[] }
+  | { type: "external"; connectionFile: string | null };
+
+export type FolderTarget = { title: string; suggest: string | null; expect: string | null };
+export type InstallStep = { copy: string; to: FolderTarget };
+export type SettingKind = "text" | "number" | "bool" | "select";
+export type SettingOption = { value: string; label: string };
+/** One field of the plugin's settings form; values travel as text. */
+export type SettingField = {
+  key: string;
+  label: string;
+  type: SettingKind;
+  default: string | null;
+  options: SettingOption[];
+  help: string | null;
+};
+export type Manifest = {
+  id: string;
+  name: string;
+  version: string;
+  publisher: string;
+  description: string;
+  /** The Plugin API version the plugin speaks. */
+  api: number;
+  provides: Capability[];
+  /** A data plugin's symbols are `<exchange>:<ticker>`. */
+  exchange: string | null;
+  runtime: Runtime;
+  install: InstallStep[];
+  settings: SettingField[];
+  /** What the user does in the other application, shown after installation. */
+  setup: string | null;
+  homepage: string | null;
+  /** `windows`, `macos`, `linux`; empty: all. */
+  platforms: string[];
+};
+
+/** One installed plugin, as Settings shows it. */
+export type PluginInfo = {
+  manifest: Manifest;
+  /** The package's signature checked against the app's release key. */
+  verified: boolean;
+  enabled: boolean;
+  connected: boolean;
+  /** A `process` plugin's program is running. */
+  running: boolean;
+  /** The version the plugin gave when it connected. */
+  connectedVersion: string | null;
+  settings: Record<string, string>;
+  /** The files the installation copied outside the plugin's folder. */
+  copied: string[];
+  /** A broker plugin's tickers for chart symbols ("NASDAQ:AAPL" → "AAPL.US"). */
+  symbolMap: Record<string, string>;
+  /** Runs on this computer. */
+  supported: boolean;
+};
+/** The local Plugin API: its port, whether it listens, and the installed plugins. */
+export type PluginsStatus = { port: number; listening: boolean; error: string | null; plugins: PluginInfo[] };
+/** A package chosen by hand, before it is installed. */
+export type PackagePreview = { path: string; manifest: Manifest; verified: boolean; replaces: string | null };
+/** One entry of the plugin catalog. */
+export type CatalogEntry = {
+  id: string;
+  name: string;
+  version: string;
+  publisher: string;
+  description: string;
+  provides: Capability[];
+  api: number;
+  platforms: string[];
+  homepage: string | null;
+  url: string;
+  sha256: string;
+  /** The package's minisign signature (base64). */
+  signature: string;
+};
+
+// ── Broker plugins (#315; mirrors crates/core/src/plugins/broker.rs and
+//    src-tauri/src/plugins/broker.rs; serde camelCase keys) ───────────────────
+
+export type Side = "buy" | "sell";
+export type OrderType = "market" | "limit" | "stop" | "stopLimit";
+export type OrderStatus = "placing" | "working" | "inactive" | "filled" | "cancelled" | "rejected";
+/** Netting: one position per symbol. Hedging: several, each closed on its own. */
+export type PositionMode = "netting" | "hedging";
+export type AccountRef = { id: string; name: string };
+export type AccountValue = { label: string; value: string; currency: string | null };
+/** The selected account (the account manager's header and Account summary tab). */
+export type Account = {
+  id: string;
+  name: string;
+  currency: string;
+  /** A demo / paper account: the app shows DEMO, else LIVE. */
+  isDemo: boolean;
+  balance: number | null;
+  equity: number | null;
+  unrealizedPnl: number | null;
+  realizedPnl: number | null;
+  marginUsed: number | null;
+  marginFree: number | null;
+  /** Everything else the broker reports, as label / value rows. */
+  values: AccountValue[];
+};
+/** What the plugin's broker supports; the order ticket and the chart offer only that. */
+export type BrokerCapabilities = {
+  orderTypes: OrderType[];
+  /** Take profit / stop loss on a new order. */
+  brackets: boolean;
+  /** Take profit / stop loss on an open position. */
+  positionBrackets: boolean;
+  /** Close part of a position. */
+  partialClose: boolean;
+  /** Modify a working order's price or quantity. */
+  modifyOrders: boolean;
+};
+export type Position = {
+  id: string;
+  ticker: string;
+  side: Side;
+  /** Absolute quantity, units. */
+  qty: number;
+  avgPrice: number;
+  last: number | null;
+  unrealizedPnl: number | null;
+  realizedPnl: number | null;
+  takeProfit: number | null;
+  stopLoss: number | null;
+};
+export type Order = {
+  id: string;
+  ticker: string;
+  side: Side;
+  type: OrderType;
+  qty: number;
+  filledQty: number;
+  limitPrice: number | null;
+  stopPrice: number | null;
+  takeProfit: number | null;
+  stopLoss: number | null;
+  avgFillPrice: number | null;
+  status: OrderStatus;
+  /** "day", "gtc"… as the broker names it. */
+  duration: string | null;
+  message: string | null;
+  updatedMs: number | null;
+};
+export type Execution = {
+  id: string;
+  orderId: string | null;
+  ticker: string;
+  side: Side;
+  qty: number;
+  price: number;
+  timeMs: number;
+  commission: number | null;
+  realizedPnl: number | null;
+};
+/** The plugin's whole account state (`broker.state`), sent again whenever a part changes. */
+export type BrokerState = {
+  /** The plugin is connected to its broker (logged in). */
+  connected: boolean;
+  accounts: AccountRef[];
+  account: Account | null;
+  positionMode: PositionMode;
+  capabilities: BrokerCapabilities;
+  positions: Position[];
+  orders: Order[];
+  executions: Execution[];
+};
+/** What the order ticket sends (`broker.place`, and `broker.modify` with `orderId`). */
+export type OrderTicket = {
+  ticker: string;
+  side: Side;
+  type: OrderType;
+  qty: number;
+  limitPrice: number | null;
+  stopPrice: number | null;
+  takeProfit: number | null;
+  stopLoss: number | null;
+};
+/** An enabled broker plugin, as the status lists it. */
+export type BrokerPlugin = { id: string; name: string; connected: boolean };
+export type BrokerNotice = { timeMs: number; /** "info" | "warn" | "error" */ level: string; message: string };
+/** The trading side as the window reads it; sent again (`broker-status`) whenever it changes. */
+export type BrokerStatus = {
+  version: number;
+  /** The enabled broker plugins. */
+  brokers: BrokerPlugin[];
+  /** The broker plugin the user connected. */
+  active: string | null;
+  activeName: string | null;
+  /** The active plugin is connected to the app. */
+  pluginConnected: boolean;
+  /** The exchange of the active plugin's own symbols when it is a data plugin too: its symbols trade as they are. */
+  dataExchange: string | null;
+  tradingEnabled: boolean;
+  /** Its account, as the plugin last sent it. */
+  state: BrokerState | null;
+  notices: BrokerNotice[];
+};
+/** An order notification (`broker.order-event`): the toasts. */
+export type BrokerEvent = {
+  /** "placed" | "executed" | "modified" | "cancelled" | "rejected" */
+  kind: string;
+  ticker: string;
+  side: Side;
+  type: OrderType;
+  qty: number;
+  price: number | null;
+  message: string | null;
+};
+/** The Tauri event's payload wrapper. */
+export type BrokerOrderEvent = { event: BrokerEvent };
+/** Bid / ask / last of a ticker the order ticket watches (`broker.quote`). */
+export type BrokerQuote = { ticker: string; bid: number | null; ask: number | null; last: number | null };
+
 // ── Runtime stubs (reject / no-op outside the Tauri shell) ──────────────────
 
 function missing(name: string): () => Promise<never> {
@@ -329,6 +554,32 @@ export const commands: {
   marketPassResume(): void;
   readNoteImage(name: string): Promise<CommandResult<string>>;
   openSnapshot(pngBase64: string): Promise<CommandResult<void>>;
+  pluginsStatus(): Promise<PluginsStatus>;
+  pluginsSetPort(port: number): Promise<CommandResult<PluginsStatus>>;
+  pluginCatalog(): Promise<CommandResult<CatalogEntry[]>>;
+  pluginInstallCatalog(id: string): Promise<CommandResult<PluginsStatus>>;
+  pluginPickFile(): Promise<CommandResult<PackagePreview | null>>;
+  pluginInstallFile(path: string): Promise<CommandResult<PluginsStatus>>;
+  pluginSetEnabled(id: string, on: boolean): Promise<CommandResult<PluginsStatus>>;
+  pluginSetSettings(id: string, settings: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
+  pluginNewToken(id: string): Promise<CommandResult<PluginsStatus>>;
+  pluginRemove(id: string): Promise<CommandResult<PluginsStatus>>;
+  pluginFolderCandidates(id: string, step: number): Promise<CommandResult<string[]>>;
+  pluginPickFolder(title: string): Promise<CommandResult<string | null>>;
+  pluginCopyFiles(id: string, step: number, folders: string[]): Promise<CommandResult<PluginsStatus>>;
+  pluginLogs(id: string): Promise<string[]>;
+  brokerStatus(): Promise<BrokerStatus>;
+  brokerSetActive(id: string | null): Promise<CommandResult<BrokerStatus>>;
+  brokerSetTradingEnabled(enabled: boolean): Promise<CommandResult<BrokerStatus>>;
+  brokerSelectAccount(account: string): Promise<CommandResult<void>>;
+  brokerResolveSymbol(symbol: string): Promise<CommandResult<string | null>>;
+  brokerPlace(ticket: OrderTicket): Promise<CommandResult<string>>;
+  brokerModify(orderId: string, ticket: OrderTicket): Promise<CommandResult<void>>;
+  brokerCancel(orderId: string): Promise<CommandResult<void>>;
+  brokerClosePosition(positionId: string, qty: number | null): Promise<CommandResult<void>>;
+  brokerSetPositionBrackets(positionId: string, takeProfit: number | null, stopLoss: number | null): Promise<CommandResult<void>>;
+  brokerWatchQuotes(tickers: string[]): Promise<CommandResult<void>>;
+  brokerSetSymbolMap(id: string, map: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
   [key: string]: any;
 } = new Proxy(
   {},
@@ -379,11 +630,40 @@ export const commands: {
   marketPassResume(): void;
   readNoteImage(name: string): Promise<CommandResult<string>>;
   openSnapshot(pngBase64: string): Promise<CommandResult<void>>;
+  pluginsStatus(): Promise<PluginsStatus>;
+  pluginsSetPort(port: number): Promise<CommandResult<PluginsStatus>>;
+  pluginCatalog(): Promise<CommandResult<CatalogEntry[]>>;
+  pluginInstallCatalog(id: string): Promise<CommandResult<PluginsStatus>>;
+  pluginPickFile(): Promise<CommandResult<PackagePreview | null>>;
+  pluginInstallFile(path: string): Promise<CommandResult<PluginsStatus>>;
+  pluginSetEnabled(id: string, on: boolean): Promise<CommandResult<PluginsStatus>>;
+  pluginSetSettings(id: string, settings: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
+  pluginNewToken(id: string): Promise<CommandResult<PluginsStatus>>;
+  pluginRemove(id: string): Promise<CommandResult<PluginsStatus>>;
+  pluginFolderCandidates(id: string, step: number): Promise<CommandResult<string[]>>;
+  pluginPickFolder(title: string): Promise<CommandResult<string | null>>;
+  pluginCopyFiles(id: string, step: number, folders: string[]): Promise<CommandResult<PluginsStatus>>;
+  pluginLogs(id: string): Promise<string[]>;
+  brokerStatus(): Promise<BrokerStatus>;
+  brokerSetActive(id: string | null): Promise<CommandResult<BrokerStatus>>;
+  brokerSetTradingEnabled(enabled: boolean): Promise<CommandResult<BrokerStatus>>;
+  brokerSelectAccount(account: string): Promise<CommandResult<void>>;
+  brokerResolveSymbol(symbol: string): Promise<CommandResult<string | null>>;
+  brokerPlace(ticket: OrderTicket): Promise<CommandResult<string>>;
+  brokerModify(orderId: string, ticket: OrderTicket): Promise<CommandResult<void>>;
+  brokerCancel(orderId: string): Promise<CommandResult<void>>;
+  brokerClosePosition(positionId: string, qty: number | null): Promise<CommandResult<void>>;
+  brokerSetPositionBrackets(positionId: string, takeProfit: number | null, stopLoss: number | null): Promise<CommandResult<void>>;
+  brokerWatchQuotes(tickers: string[]): Promise<CommandResult<void>>;
+  brokerSetSymbolMap(id: string, map: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
   [key: string]: any;
 };
 
-// Any `events.<anything>.listen(...)` resolves to a no-op unlisten handle.
-export const events: any = new Proxy(
+// Any `events.<anything>.listen(...)` resolves to a no-op unlisten handle; the
+// broker channels are typed so the new listeners read their payloads directly
+// (the older listeners still annotate `(e: any)` themselves).
+type EventListen<P> = { listen(fn: (ev: { payload: P }) => void): Promise<() => void> };
+export const events = new Proxy(
   {},
   {
     get: (_t, prop: string) => {
@@ -391,4 +671,8 @@ export const events: any = new Proxy(
       return { listen: () => Promise.resolve(() => {}) };
     },
   },
-);
+) as {
+  brokerStatus: EventListen<BrokerStatus>;
+  brokerOrderEvent: EventListen<BrokerOrderEvent>;
+  brokerQuote: EventListen<BrokerQuote>;
+} & Record<string, EventListen<any>>;

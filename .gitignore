@@ -73,3 +73,5 @@ indicators/
 
 # Personal agent tooling for OpenCode (skills that load the app's MCP guides)
 .opencode/
+
+plugins/*/dist/
