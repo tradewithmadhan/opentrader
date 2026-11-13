@@ -1,5 +1,6 @@
 /* Messages between the window and the study workers (study-calc.ts). */
 import type { Bar } from "oakscriptjs";
+import { isPacked, noValue, packPoints, packedPrefix } from "./packed-points";
 
 /** Accessors of the chart context a study may call (StudyCalcContext). */
 export const ACCESSORS = ["bars", "symbolInfo", "lowerBars", "chartEvents", "fundamentals"] as const;
@@ -164,8 +165,8 @@ function samePoint(a: unknown, b: unknown): boolean {
 export function encodeDelta(next: unknown, prev: unknown, depth = 0, bound?: { from: number; bars: number }): unknown {
   if (Array.isArray(next) && Array.isArray(prev)) {
     const n = Math.min(next.length, prev.length, bound && next.length === bound.bars ? bound.from : Infinity);
-    let k = 0;
-    while (k < n && samePoint(next[k], prev[k])) k++;
+    let k = packedPrefix(next, prev, n) ?? 0;
+    if (!isPacked(prev)) while (k < n && samePoint(next[k], prev[k])) k++;
     // A short shared prefix is not worth it.
     return k < 32 ? next : ({ [TAIL]: k, items: next.slice(k) } satisfies Tail);
   }
@@ -183,13 +184,69 @@ export function encodeDelta(next: unknown, prev: unknown, depth = 0, bound?: { f
  * (markers, labels: a run may change one in place); the points of the per-bar arrays are bounded by `from` instead.
  */
 export function deltaSnapshot(result: unknown, bars: number, depth = 0): unknown {
-  if (Array.isArray(result)) return result.length === bars ? result.slice() : result.map((p) => (isPlain(p) ? { ...p } : p));
+  // A list of one point per bar packed (packed-points.ts): the worker keeps it until the next update. A long list of
+  // points of another length (a plot that starts a few bars late) too: packing copies its points' fields.
+  if (Array.isArray(result)) {
+    if (result.length === bars || isPacked(result)) return packPoints(result.slice());
+    const packed = packPoints(result);
+    return packed !== result ? packed : result.map((p) => (isPlain(p) ? { ...p } : p));
+  }
   if (depth < 3 && isPlain(result)) {
     const out: Record<string, unknown> = {};
     for (const k in result) out[k] = deltaSnapshot(result[k], bars, depth + 1);
     return out;
   }
   return result;
+}
+
+/**
+ * `result` with its plots that have no value on any bar (a switched-off option: an RSI's bands, an SMA's smoothing)
+ * as empty lists: they held one point per bar in the worker and in the window, more than half of a study's result
+ * (12/11/2026, .tmp/memory-proto). The readers take a missing point as no value. A new object when one changed.
+ */
+export function withoutEmptyPlots<T>(result: T): T {
+  const plots = (result as { plots?: Record<string, unknown[]> } | null)?.plots;
+  if (!plots || typeof plots !== "object") return result;
+  let out: Record<string, unknown[]> | null = null;
+  for (const [id, points] of Object.entries(plots)) {
+    if (!Array.isArray(points) || points.length === 0 || !noValue(points)) continue;
+    out ??= { ...plots };
+    out[id] = [];
+  }
+  return out ? { ...result, plots: out } : result;
+}
+
+/** One string per text: a reply comes through the worker boundary with its own copy of every string, so a colour
+ *  given on each bar (a gradient, a coloured volume) was held as many times as there are bars. */
+const strings = new Map<string, string>();
+const STRINGS_KEPT = 10_000;
+function one(s: string): string {
+  if (s.length > 64) return s;
+  const kept = strings.get(s);
+  if (kept !== undefined) return kept;
+  if (strings.size >= STRINGS_KEPT) strings.clear();
+  strings.set(s, s);
+  return s;
+}
+
+/** The short strings of `v` (arrays of strings, fields of plain objects and of their arrays' points, `depth` levels
+ *  down) replaced by one copy each, in place. */
+export function shareStrings(v: unknown, depth = 4): void {
+  if (depth < 0 || v === null || typeof v !== "object") return;
+  if (Array.isArray(v)) {
+    for (let i = 0; i < v.length; i++) {
+      const x = v[i];
+      if (typeof x === "string") v[i] = one(x);
+      else if (x !== null && typeof x === "object") shareStrings(x, depth - 1);
+    }
+    return;
+  }
+  if (!isPlain(v)) return;
+  for (const k in v) {
+    const x = v[k];
+    if (typeof x === "string") v[k] = one(x);
+    else if (x !== null && typeof x === "object") shareStrings(x, depth - 1);
+  }
 }
 
 /** The result `delta` (encodeDelta) describes from `prev`. Its arrays are those of `prev`, changed in place (a copy

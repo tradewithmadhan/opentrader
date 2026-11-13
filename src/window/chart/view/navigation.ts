@@ -21,6 +21,9 @@ import {
   type GroupId,
 } from "../control-bar";
 import { barsSpan, projectionBars } from "./helpers";
+import { pendingRange } from "../pending-range";
+import { isTransformType } from "../chart-types";
+import { lowerBound } from "../time-search";
 import { type ChartCx } from "./context";
 import type { Accessor } from "solid-js";
 
@@ -93,13 +96,28 @@ export function createNavigation(cx: ChartCx): NavigationApi {
    *  configured right margin. Falls back to 10 bars when that margin is
    *  negative. */
   let gotoAnim: number | null = null;
-  const scrollToRealtime = () => {
-    if (!cx.chart) return;
-    const ts = cx.chart.timeScale();
+  const realtimeTarget = (chart: NonNullable<typeof cx.chart>) => {
     let target = currentTokens().rightOffset;
     if (target < 0) target = 10;
     // the margin counts from the last bar: a projection after it (Ichimoku's cloud) stays cut at the edge (reference)
-    target -= projectionBars(cx.chart, cx.mainLastIndex());
+    return target - projectionBars(chart, cx.mainLastIndex());
+  };
+  const scrollToRealtime = () => {
+    if (!cx.chart) return;
+    // A window of past bars (a Go to far back): the latest bars are loaded
+    // again, framed at their end. No animation: it would start from the
+    // window's place, which the chart still answers until the next frame.
+    if (cx.pastWindowEnd !== null) {
+      cx.returnToLive(() => cx.chart?.timeScale().scrollToPosition(realtimeTarget(cx.chart), false));
+      return;
+    }
+    const ts = cx.chart.timeScale();
+    // The chart was given a slice of older bars (bar-slice.ts): the newest ones now, at the end at once.
+    if (cx.sliceToEnd()) {
+      ts.scrollToPosition(realtimeTarget(cx.chart), false);
+      return;
+    }
+    const target = realtimeTarget(cx.chart);
     const from = ts.scrollPosition();
     if (gotoAnim !== null) cancelAnimationFrame(gotoAnim);
     const started = performance.now();
@@ -178,8 +196,10 @@ export function createNavigation(cx: ChartCx): NavigationApi {
   const scrollToFirstBar = () => {
     if (!cx.chart || cx.raw.length === 0) return;
     const ts = cx.chart.timeScale();
-    const r = ts.getVisibleLogicalRange();
+    const r = pendingRange(cx.chart) ?? ts.getVisibleLogicalRange();
     if (!r) return;
+    // The oldest loaded bars on the chart (a slice of newer ones before: bar-slice.ts).
+    cx.sliceToStart();
     ts.setVisibleLogicalRange({ from: 0, to: r.to - r.from });
   };
 
@@ -195,6 +215,11 @@ export function createNavigation(cx: ChartCx): NavigationApi {
    *  price scale untouched. */
   const resetTimeScale = () => {
     if (!cx.chart) return;
+    if (cx.pastWindowEnd !== null) {
+      cx.returnToLive(resetTimeScale);
+      return;
+    }
+    cx.sliceToEnd();
     if (zoomAnim !== null) cancelAnimationFrame(zoomAnim);
     if (gotoAnim !== null) cancelAnimationFrame(gotoAnim);
     if (scrollAnim !== null) {
@@ -228,6 +253,7 @@ export function createNavigation(cx: ChartCx): NavigationApi {
   /** Time-scale reset available: bar spacing or right offset off default. */
   const timeScaleOffDefault = () => {
     if (!cx.chart) return false;
+    if (cx.pastWindowEnd !== null || !cx.sliceAtEnd()) return true;
     const bs = liveBarSpacing(cx.chart);
     // Derived from width/span, so sub-pixel drift is expected; 0.05px of bar
     // spacing is far below anything a user could set deliberately.
@@ -246,6 +272,14 @@ export function createNavigation(cx: ChartCx): NavigationApi {
    *  when the chart/data isn't ready (the caller retries after load). */
   function applyRangeSpan(id: string): boolean {
     if (!cx.chart || cx.raw.length === 0) return false;
+    // The presets count back from the latest bar: the latest bars load again
+    // (false: the caller keeps the preset for the load to frame).
+    if (cx.pastWindowEnd !== null) {
+      cx.returnToLive();
+      return false;
+    }
+    // The presets count back from the newest bar: the chart is given it (bar-slice.ts).
+    cx.sliceToEnd();
     const ts = cx.chart.timeScale();
     if (id === "All") {
       // The bars, not the future bars the time scale goes on with.
@@ -275,7 +309,11 @@ export function createNavigation(cx: ChartCx): NavigationApi {
       from = to - span * 86400;
     }
     try {
-      ts.setVisibleRange({ from: from as UTCTimestamp, to: to as UTCTimestamp });
+      // Price-based types have times of their own. The others go by bar index:
+      // right after a load the time scale may still place dates on the bars
+      // before (the latest bars after a window of past bars landed in the future).
+      if (isTransformType(cx.activeType)) ts.setVisibleRange({ from: from as UTCTimestamp, to: to as UTCTimestamp });
+      else ts.setVisibleLogicalRange({ from: lowerBound(cx.raw, from), to: cx.raw.length - 1 });
     } catch {
       return false;
     }
@@ -287,7 +325,8 @@ export function createNavigation(cx: ChartCx): NavigationApi {
     // The centred group bar and the bottom-right "Scroll to the most recent
     // bar" button (see control-bar.ts for the shared geometry). The rules:
     //   • the goto button shows only while `rightOffset < 0`, i.e. the last bar
-    //     has left the right edge. Empty right margin still reads as realtime.
+    //     has left the right edge, or in a window of past bars. Empty right
+    //     margin still reads as realtime.
     //   • both also need the Navigation setting to allow it: `alwaysOn` pins
     //     them on, `alwaysOff` off, and the default consults a box padded 100px
     //     around each wrapper (73px on top). Each bar tests its OWN box. A held
@@ -311,7 +350,10 @@ export function createNavigation(cx: ChartCx): NavigationApi {
         const left = anchor.centre(groupsWidth(fits));
         setBarLeft(left);
       }
-      setGotoShown(canShow(behavior, nearGoto) && cx.chart.timeScale().scrollPosition() + projectionBars(cx.chart, cx.mainLastIndex()) < 0);
+      setGotoShown(
+        canShow(behavior, nearGoto) &&
+          (cx.pastWindowEnd !== null || !cx.sliceAtEnd() || cx.chart.timeScale().scrollPosition() + projectionBars(cx.chart, cx.mainLastIndex()) < 0),
+      );
       setBarShown(canShow(behavior, nearBar));
       setResetAvailable(scalesOffDefault());
     };

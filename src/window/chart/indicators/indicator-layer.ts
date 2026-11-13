@@ -53,8 +53,10 @@ import { isLibraryEntry } from './registry';
 import { translatedPlotConfig, translatedStudyResult } from '../../../i18n/study-text';
 import { isUserIndicatorId } from './user-scripts';
 import { calculateInWorker, studyWorkersAvailable } from './study-worker-host';
-import { ACCESSORS, applyDelta, callKey, jobChanges, type SentState, type StudyCall, type StudyJob } from './study-worker-types';
+import { ACCESSORS, applyDelta, callKey, jobChanges, shareStrings, type SentState, type StudyCall, type StudyJob } from './study-worker-types';
 import { indexOfTime, lastAtOrBefore, lowerBound } from '../time-search';
+import { windowResult, type DrawWindow } from './draw-window';
+import { fromPost, packPlots, withField } from './packed-points';
 
 type PlotPoint = { time: number; value: number; color?: string };
 type PlotStyle = NonNullable<PlotConfig['style']>;
@@ -79,7 +81,8 @@ function withPaletteColors(entry: IndicatorRegistryEntry, result: any, styles: I
     const opacity = 100 - (p.paletteTransparency ?? 0);
     const shaded = colors.map((c) => (c.startsWith("#") && c.length === 7 ? applyOpacity(c, opacity) : c));
     if (out === result) out = { ...result, plots: { ...result.plots } };
-    out.plots[p.id] = pts.map((d) => (d.paletteIndex != null && shaded[d.paletteIndex] ? { ...d, color: shaded[d.paletteIndex] } : d));
+    // A packed plot takes a colour column of its own: no point is made.
+    out.plots[p.id] = withField(pts, 'color', 'paletteIndex', (ix) => (ix != null ? shaded[ix as number] || undefined : undefined));
   }
   return out;
 }
@@ -429,6 +432,15 @@ export class IndicatorLayer {
     this.visibleRange = range;
   }
 
+  /** Bars the study draws (null: all), set by the controller as the view moves. */
+  private drawWindow: DrawWindow | null = null;
+  /** Draw in another window; `redraw`: the last result now, keeping the series drawn (no calculation). */
+  setDrawWindow(win: DrawWindow | null, redraw = true): void {
+    if (win === this.drawWindow) return;
+    this.drawWindow = win;
+    if (redraw && this.entry && this.lastResult && this.lastDraw) this.inPreservedPane(() => this.draw(true));
+  }
+
   /** The chart shows Volume Candles: column plots take the widths of the candles (applied at the next draw). */
   private volumeCandles = false;
   setVolumeCandles(on: boolean): void {
@@ -541,6 +553,11 @@ export class IndicatorLayer {
   ): void {
     this.inPreservedPane(() => {
       const drewBefore = this.lastDraw && this.entry === entry;
+      // Same study and settings, other bars (a load, a page of history, a Go to): the series drawn take the new
+      // points. Removing and adding them again rebuilt the time scale over every bar each time, seconds on a long
+      // history (.tmp/goto-window, 12/11/2026).
+      const settings = draw ? JSON.stringify([inputs, styles]) : null;
+      const sameSettings = drewBefore && draw && settings === this.drawnSettings;
       this.entry = entry;
       this.lastInputs = inputs;
       this.lastStyles = styles;
@@ -552,10 +569,13 @@ export class IndicatorLayer {
       else { this.lastResult = null; this.error = null; this.loading = false; }
       // A live update while the worker calculates: the result drawn stays as it is.
       if (live && drewBefore && draw && this.workerResult !== null && this.workerResult === this.drawnWorkerResult) return;
-      this.draw(live);
+      this.draw(live || sameSettings);
       this.drawnWorkerResult = draw ? this.workerResult : null;
+      this.drawnSettings = settings;
     });
   }
+  /** Inputs and styles of the last drawn render (null: not drawn). */
+  private drawnSettings: string | null = null;
 
   /** The last render did not calculate. */
   private stale = false;
@@ -669,12 +689,18 @@ export class IndicatorLayer {
       // The worker holds this job's state now, unless it did not take it: the next job sends everything again.
       if (reply.retry) { off.sent.stateId = null; off.version = null; off.raw = null; }
       else off.sent.stateId = reply.id;
+      // The new points only (a delta) or the whole result: each text once (also in the columns of the packed lists
+      // it carries), the packed lists made again.
+      shareStrings(reply.result, 6);
+      reply.result = fromPost(reply.result);
       if (reply.base != null) {
         reply.result = reply.base === off.version && off.raw !== null ? applyDelta(reply.result, off.raw) : undefined;
         // The result it changed is not the one held here: ask again for a whole one.
         if (reply.result === undefined) { reply.retry = true; off.version = null; off.raw = null; }
       }
       if (!reply.retry && !reply.error && !reply.pending && reply.result !== undefined) {
+        // Held packed (packed-points.ts): a plot sent whole is packed, one packed before took its changes in place.
+        reply.result = packPlots(reply.result);
         off.version = reply.id;
         off.raw = reply.result;
       }
@@ -820,6 +846,8 @@ export class IndicatorLayer {
         restoreTimes(result, seen, bars);
         restored.add(result);
       }
+      // A result calculated here is held packed too (a worker's is packed when it comes).
+      if (!offThread) result = packPlots(result);
       return withPaletteColors(entry, result, styles);
     } catch (err) {
       // Bars of other symbols still loading: the chart calculates the study again when they arrive.
@@ -842,9 +870,9 @@ export class IndicatorLayer {
     this.removeExtras();
     this.plotSeries = [];
     const entry = this.entry;
-    const result = this.lastResult;
+    const full = this.lastResult;
     const renderer = this.rendererFor();
-    if (!entry || !result || !this.lastDraw) {
+    if (!entry || !full || !this.lastDraw) {
       renderer.clear();
       // A study in its own pane that draws nothing (eye off, or off its
       // Visibility intervals) keeps its pane and status line. The library
@@ -856,7 +884,8 @@ export class IndicatorLayer {
       return;
     }
 
-    const bars = this.lastBars;
+    // On a long history only the bars around the view are drawn (draw-window.ts).
+    const { bars, result } = this.drawWindow ? windowResult(this.lastBars, full, this.drawWindow) : { bars: this.lastBars, result: full };
     const styles = this.lastStyles;
     const ownScale = !!(entry.metadata as OwnScaleMeta | undefined)?.ownScaleId && !this.scalePinned;
     const overrides: Record<string, PlotOverride> = {};

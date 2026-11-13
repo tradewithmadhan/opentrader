@@ -44,15 +44,21 @@ function createRun() {
   };
 }
 
-vi.mock("lightweight-charts-indicators", () => ({
-  indicatorRegistry: [
+/** The bars each calculation of "seen-sum" was given. */
+const seenBars: Bar[][] = vi.hoisted(() => []);
+
+vi.mock("lightweight-charts-indicators/loader", () => {
+  const entries = [
     { id: "run-sum", calculate: (bars: Bar[]) => full(bars), createRun },
     { id: "plain-sum", calculate: (bars: Bar[]) => full(bars) },
-  ],
-}));
+    { id: "seen-sum", calculate: (bars: Bar[]) => (seenBars.push(bars), full(bars)) },
+  ];
+  return { setPackedSeries: () => {}, loadIndicator: async (id: string) => entries.find((e) => e.id === id) ?? null };
+});
 
 const { calculateStudy } = await import("../study-calc");
 const { applyDelta, jobChanges } = await import("../study-worker-types");
+const { fromPost } = await import("../packed-points");
 
 /** The window's side of the protocol (as IndicatorLayer.runOffThread): changes only, results rebuilt from deltas. */
 function client(entryId: string, study: string) {
@@ -69,6 +75,7 @@ function client(entryId: string, study: string) {
         const job = structuredClone({ kind: "study" as const, id: ++id + Math.floor(Math.random() * 1e6) * 100, entryId, study, base: version, restamp: false, inputs: {}, ctx: {}, accessors: [], sources: {}, ...changes });
         jobBytes.push(JSON.stringify(job.bars).length);
         const reply = structuredClone(await calculateStudy(job));
+        reply.result = fromPost(reply.result);
         if (reply.retry) { sent.stateId = null; version = null; raw = null; continue; }
         sent.stateId = reply.id;
         if (reply.base != null) reply.result = applyDelta(reply.result, raw);
@@ -111,5 +118,32 @@ describe("study worker: changed bars only, results as full runs", () => {
     await b.update(bars);
     bars[bars.length - 1] = { ...bars[bars.length - 1]!, close: 99 };
     expect(await a.update(bars)).toEqual(full(bars));
+  });
+
+  it("the studies on a chart read the same bar objects", async () => {
+    const bars = Array.from({ length: 300 }, (_, i) => bar(i, 50 + i));
+    const a = client("seen-sum", "chart|shared-a");
+    const b = client("seen-sum", "chart|shared-b");
+    seenBars.length = 0;
+    expect(await a.update(bars)).toEqual(full(bars));
+    expect(await b.update(bars)).toEqual(full(bars));
+    const [x, y] = seenBars;
+    expect(x).not.toBe(y);
+    expect(x!.every((q, i) => q === y![i])).toBe(true);
+    // a live tick: the forming bar is the new one, the others still shared
+    bars[bars.length - 1] = { ...bars[bars.length - 1]!, close: 7 };
+    seenBars.length = 0;
+    expect(await a.update(bars)).toEqual(full(bars));
+    expect(await b.update(bars)).toEqual(full(bars));
+    expect(seenBars[1]![299]).toBe(seenBars[0]![299]);
+    expect(seenBars[1]![299]!.close).toBe(7);
+    expect(seenBars[1]![10]).toBe(x![10]);
+    // a study sent other bars reads its own
+    const c = client("seen-sum", "chart|shared-c");
+    const other = bars.map((q, i) => (i === 5 ? { ...q, close: -1 } : q));
+    seenBars.length = 0;
+    expect(await c.update(other)).toEqual(full(other));
+    expect(seenBars[0]![5]!.close).toBe(-1);
+    expect(seenBars[0]![6]).toBe(x![6]);
   });
 });

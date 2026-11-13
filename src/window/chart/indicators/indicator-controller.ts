@@ -15,6 +15,7 @@
  * studies drawn over it. study-scales.ts picks each study's price scale.
  */
 import { pendingRange } from "../pending-range";
+import { nextDrawWindow, type DrawWindow } from "./draw-window";
 import { type IChartApi, type ISeriesApi, type SeriesType, type Time } from 'lightweight-charts';
 import type { Bar } from 'oakscriptjs';
 import type { StudyChart } from './script-chart';
@@ -121,6 +122,9 @@ export interface IndicatorHost {
   readonly chartId: string;
   /** Bars the studies run on (read on demand, so a recalculation always sees the freshest set). */
   bars(): Bar[];
+  /** Bars the chart is given, whose indices the view's are (a slice of `bars` on a long history, bar-slice.ts);
+   *  default `bars`. */
+  chartBars?(): Bar[];
   /** The newest bar is still forming (a realtime bar for strategies). */
   lastBarOpen(): boolean;
   /** The chart's main price series (study markers and bar colours). */
@@ -214,9 +218,46 @@ export class IndicatorController {
     if (this.visibleTimer) clearTimeout(this.visibleTimer);
     this.visibleTimer = setTimeout(() => {
       this.visibleTimer = null;
+      this.followView();
       this.renderVisibleRangeStudies();
     }, VISIBLE_RANGE_DELAY_MS);
   };
+
+  /** Bars the studies draw on a long history (draw-window.ts); null: all. */
+  private drawWindow: DrawWindow | null = null;
+  /** The window for the view now; true when it changed. */
+  private updateDrawWindow(): boolean {
+    const view = pendingRange(this.chart) ?? this.chart.timeScale().getVisibleLogicalRange();
+    if (!view) return false;
+    const all = this.host.bars();
+    const chart = this.host.chartBars?.() ?? all;
+    let next = nextDrawWindow(chart, view, this.drawWindow);
+    // A slice of the bars: the studies draw on it only (their points on bars the chart does not have would move
+    // its bars' indices).
+    if (chart !== all && chart.length > 0) {
+      const lo = chart[0] !== all[0] ? (chart[0].time as number) : -Infinity;
+      const hi = chart[chart.length - 1] !== all[all.length - 1] ? (chart[chart.length - 1].time as number) : Infinity;
+      const w = next ?? { from: -Infinity, to: Infinity };
+      const clipped = { from: Math.max(w.from, lo), to: Math.min(w.to, hi) };
+      const cur = this.drawWindow;
+      next = cur && cur.from === clipped.from && cur.to === clipped.to ? cur : clipped.from === -Infinity && clipped.to === Infinity ? null : clipped;
+    }
+    if (next === this.drawWindow) return false;
+    this.drawWindow = next;
+    return true;
+  }
+  /** The chart was given other bars of the loaded ones (bar-slice.ts): the studies draw on them now. */
+  followChart(): void {
+    if (!this.updateDrawWindow()) return;
+    for (const inst of this.instances.values()) if (!inst.owner) inst.layer.setDrawWindow(this.drawWindow);
+  }
+  /** The view settled near an edge of the window: the studies draw the bars around it (their results are kept). */
+  private followView(): void {
+    if (!this.updateDrawWindow()) return;
+    this.keepView(() => {
+      for (const inst of this.instances.values()) if (!inst.owner) inst.layer.setDrawWindow(this.drawWindow);
+    });
+  }
 
   /** Bars of the other symbols the studies read; keys that moved wait here for one recalculation. */
   private readonly otherSymbols: OtherSymbolBars;
@@ -476,6 +517,8 @@ export class IndicatorController {
    *  the newest bars changed (a live update), the studies keep their series. */
   renderAll(live = false): void {
     const bars = this.host.bars();
+    // Other bars (a load, a page of history): the window is found again for them.
+    if (!live) this.updateDrawWindow();
     if (!live) this.otherSymbols.setChartSpan(bars[0]?.time as number | undefined, intervalSeconds(this.scriptChart?.timeframe ?? '1D'), this.scriptChart?.timeframe ?? '1D');
     for (const [id, inst] of this.instances) {
       const entry = getIndicatorEntry(id);
@@ -594,6 +637,7 @@ export class IndicatorController {
     inst.layer.setDetachedScale(det?.id ?? null, det?.axis ?? false, !!o.scale);
     const drawn = !this.hidden.has(id) && this.onInterval(id);
     const inputs = this.effectiveInputs(id, entry);
+    inst.layer.setDrawWindow(this.drawWindow, false);
     // The studies it reads that were not calculated (hidden) calculate now.
     this.ensureSources(id, entry, inputs);
     // Not drawn: nothing shows its values (legend, data window, export), so it does not calculate, except a strategy

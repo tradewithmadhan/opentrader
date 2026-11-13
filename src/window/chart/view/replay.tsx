@@ -229,6 +229,14 @@ export function createReplay(cx: ChartCx): ReplayApi {
     if (feed) {
       cx.raw = feed.full;
       open = feed.fullOpen;
+    } else if (cx.pastWindowEnd !== null) {
+      // A window of past bars (Go to far back): its newer bars load as the replay moves on.
+      open = true;
+      fullFrom = cx.pastWindowEnd;
+    } else if (!cx.sliceAtEnd() && cx.raw.length > 0) {
+      // The chart is given a slice of older bars (bar-slice.ts): the bars after it load as the replay moves on.
+      open = true;
+      fullFrom = (cx.raw[cx.raw.length - 1].time as number) + 1;
     }
     feed = null;
     loading = null;

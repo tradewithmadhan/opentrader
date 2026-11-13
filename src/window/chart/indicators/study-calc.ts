@@ -11,14 +11,15 @@
  */
 import { setSourceResolver, type Bar } from "oakscriptjs";
 import { MissingSymbolDataError } from "oakscriptjs/script";
-import type { IndicatorRegistryEntry } from "lightweight-charts-indicators";
-import { ACCESSORS, callKey, deltaSnapshot, encodeDelta, type StudyCall, type StudyJob, type StudyReply } from "./study-worker-types";
+import type { LoadedIndicator } from "lightweight-charts-indicators/loader";
+import { ACCESSORS, callKey, deltaSnapshot, encodeDelta, isBarList, withoutEmptyPlots, type StudyCall, type StudyJob, type StudyReply } from "./study-worker-types";
+import { forPost } from "./packed-points";
 import { restoreTimes, scriptBars } from "../../../backtester/oakscript";
 
 /** A run of a library study (lightweight-charts-indicators `createRun`, on the ported studies): `update` gives the
  *  result of `calculate` on these bars, calculated from bar `from` (the newest bars on a live update). */
 type IndicatorRun = { update(bars: Bar[], chart?: unknown): object & { from: number }; readonly fullRunReason: string | null };
-type RunEntry = IndicatorRegistryEntry & { createRun?: (inputs?: Record<string, unknown>, chart?: unknown) => IndicatorRun };
+type RunEntry = Omit<LoadedIndicator, "createRun"> & { createRun?: (inputs?: Record<string, unknown>, chart?: unknown) => IndicatorRun };
 
 /** What the worker holds for a study between its jobs. */
 type StudyState = {
@@ -33,14 +34,62 @@ type StudyState = {
   runInputs: string;
   /** Last result sent (deltaSnapshot) and its job: the next reply is the changes from it. */
   sent: { id: number; result: unknown } | null;
+  /** The bar pools its bars and bar lists are from. */
+  pools: Set<string>;
 };
 
 /** The studies calculated the least recently are dropped past STATES_KEPT (a removed study sends no more jobs). */
 const states = new Map<string, StudyState>();
 const STATES_KEPT = 48;
 
-/** The library, loaded with the first study job (a worker running backtests only does not load it). */
-let registry: Promise<Map<string, RunEntry>> | null = null;
+/**
+ * The bar objects the states hold, one set per series (a chart's bars, a bar list an accessor read): every job brings
+ * its own copies (a message is a copy), so each study on a chart held the chart's bars once more. A bar equal to the
+ * one held at its index is replaced by it; the studies' runs keep their own copy of the values they compare.
+ */
+const barPools = new Map<string, Bar[]>();
+
+/** Bars with the same fields and values (a study reads the bar it was sent). */
+function sameBar(a: Bar, b: Bar): boolean {
+  if (!Object.is(a.time, b.time) || !Object.is(a.close, b.close)) return false;
+  const x = a as unknown as Record<string, unknown>;
+  const y = b as unknown as Record<string, unknown>;
+  for (const k in x) if (!Object.is(x[k], y[k])) return false;
+  for (const k in y) if (!(k in x)) return false;
+  return true;
+}
+
+/** `bars` (the series' bars from index `from`) with the held bar objects where they are equal; the held ones are then
+ *  these bars, up to their end. */
+function shareBars(pool: string, bars: Bar[], from: number): Bar[] {
+  let held = barPools.get(pool);
+  if (!held) barPools.set(pool, (held = []));
+  if (held.length < from) held.length = from;
+  for (let k = 0; k < bars.length; k++) {
+    const h = held[from + k];
+    if (h !== undefined && sameBar(h, bars[k]!)) bars[k] = h;
+    else held[from + k] = bars[k]!;
+  }
+  held.length = from + bars.length;
+  return bars;
+}
+
+/** The series of the chart's bars a job brings. */
+const chartPool = (job: StudyJob) => `chart|${job.ctx.tickerid}|${job.ctx.timeframe}|${job.ctx.sessionType}`;
+
+/** Drop the held bars no state reads any more (studies removed, a symbol changed). */
+function dropUnusedPools(): void {
+  const used = new Set<string>();
+  for (const st of states.values()) for (const p of st.pools) used.add(p);
+  for (const p of barPools.keys()) if (!used.has(p)) barPools.delete(p);
+}
+
+/** The library's loader (lightweight-charts-indicators/loader), loaded with the first study job (a worker running
+ *  backtests only does not load it): it loads the code of the studies the worker calculates, not the whole library
+ *  (~20 MB of script, held in every worker). */
+let loader: Promise<typeof import("lightweight-charts-indicators/loader")> | null = null;
+/** The library's packed mode switch (set with the loader: its runs read the loader's own). */
+let setPackedSeries: (on: boolean) => void = () => {};
 
 export function isStudyJob(m: unknown): m is StudyJob {
   return (m as { kind?: unknown } | null)?.kind === "study";
@@ -52,39 +101,54 @@ function stateOf(job: StudyJob): StudyState | null {
   const held = states.get(job.study);
   states.delete(job.study);
   let st: StudyState;
+  const pool = chartPool(job);
   if (job.prev === null) {
+    const pools = new Set([pool]);
     const data: Record<string, unknown> = {};
-    for (const [k, c] of Object.entries(job.data)) if ("value" in c) data[k] = c.value;
-    const seen = job.restamp ? scriptBars(job.bars, job.ctx) : job.bars;
-    st = { id: job.id, bars: job.bars, seen, data, run: null, runInputs: "", sent: held?.sent ?? null };
+    for (const [k, c] of Object.entries(job.data)) {
+      if (!("value" in c)) continue;
+      if (isBarList(c.value)) pools.add(`data|${k}`);
+      data[k] = isBarList(c.value) ? shareBars(`data|${k}`, c.value, 0) : c.value;
+    }
+    const bars = shareBars(pool, job.bars, 0);
+    const seen = job.restamp ? scriptBars(bars, job.ctx) : bars;
+    st = { id: job.id, bars, seen, data, run: null, runInputs: "", sent: held?.sent ?? null, pools };
   } else {
     if (!held || held.id !== job.prev) return null;
     st = held;
     st.id = job.id;
     // The new bars from barsFrom, restamped like the others.
+    const bars = shareBars(pool, job.bars, job.barsFrom);
     st.bars.length = job.barsFrom;
-    for (const b of job.bars) st.bars.push(b);
+    for (const b of bars) st.bars.push(b);
     if (st.seen !== st.bars) {
       st.seen.length = job.barsFrom;
-      for (const b of scriptBars(job.bars, job.ctx)) st.seen.push(b);
+      for (const b of scriptBars(bars, job.ctx)) st.seen.push(b);
     }
     for (const [k, c] of Object.entries(job.data)) {
-      if ("value" in c) st.data[k] = c.value;
-      else {
-        const list = st.data[k] as unknown[];
+      if ("value" in c) {
+        if (isBarList(c.value)) st.pools.add(`data|${k}`);
+        st.data[k] = isBarList(c.value) ? shareBars(`data|${k}`, c.value, 0) : c.value;
+      } else {
+        const list = st.data[k] as Bar[];
         list.length = c.from;
-        for (const x of c.items) list.push(x);
+        for (const x of shareBars(`data|${k}`, c.items as Bar[], c.from)) list.push(x);
       }
     }
   }
   states.set(job.study, st);
   if (states.size > STATES_KEPT) states.delete(states.keys().next().value as string);
+  // A state made again (other bars, a symbol changed) or dropped may leave a pool no state reads.
+  if (job.prev === null || states.size === STATES_KEPT) dropUnusedPools();
   return st;
 }
 
 export async function calculateStudy(job: StudyJob): Promise<StudyReply> {
-  registry ??= import("lightweight-charts-indicators").then((m) => new Map(m.indicatorRegistry.map((e) => [e.id, e as RunEntry])));
-  const entry = (await registry).get(job.entryId);
+  loader ??= import("lightweight-charts-indicators/loader").then((m) => {
+    setPackedSeries = m.setPackedSeries;
+    return m;
+  });
+  const entry = (await (await loader).loadIndicator(job.entryId)) as RunEntry | null;
   const missing: StudyCall[] = [];
   if (!entry) return { id: job.id, error: `Unknown study ${job.entryId}`, missing, ms: 0 };
   const st = stateOf(job);
@@ -108,7 +172,14 @@ export async function calculateStudy(job: StudyJob): Promise<StudyReply> {
     if (entry.createRun) {
       const inputs = JSON.stringify(job.inputs);
       if (!st.run || st.runInputs !== inputs) {
-        st.run = entry.createRun(job.inputs, ctx);
+        // The run holds its per-bar outputs as numbers (lightweight-charts-indicators packed mode): kept here between
+        // updates, as objects they were most of a long history's memory in the workers.
+        setPackedSeries(true);
+        try {
+          st.run = entry.createRun(job.inputs, ctx);
+        } finally {
+          setPackedSeries(false);
+        }
         st.runInputs = inputs;
       }
       const { from: first, ...out } = st.run.update(st.seen, ctx) as { from: number };
@@ -118,14 +189,16 @@ export async function calculateStudy(job: StudyJob): Promise<StudyReply> {
       result = (entry.calculate as (b: Bar[], i: Record<string, unknown>, c: unknown) => unknown)(st.seen, job.inputs, ctx);
     }
     if (st.seen !== st.bars && result && typeof result === "object") restoreTimes(result, st.seen, st.bars);
+    // Before the snapshot, so the next reply's changes are counted from what this one sent.
+    result = withoutEmptyPlots(result);
     const prev = st.sent;
     const snapshot = deltaSnapshot(result, st.bars.length);
     st.sent = { id: job.id, result: snapshot };
     const ms = performance.now() - t0;
     if (prev && prev.id === job.base) {
-      return { id: job.id, base: prev.id, result: encodeDelta(result, prev.result, 0, from > 0 ? { from, bars: st.bars.length } : undefined), missing, ms };
+      return { id: job.id, base: prev.id, result: forPost(encodeDelta(result, prev.result, 0, from > 0 ? { from, bars: st.bars.length } : undefined)), missing, ms };
     }
-    return { id: job.id, result, missing, ms };
+    return { id: job.id, result: forPost(result), missing, ms };
   } catch (err) {
     // A run that stopped halfway is not resumed: the next job makes a new one.
     st.run = null;
