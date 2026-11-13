@@ -187,6 +187,9 @@ pub async fn ticker_info(app: &AppHandle, r: &Route) -> Result<TickerInfo, Strin
         symbol_type: Some(i.kind.clone()).filter(|k| !k.is_empty()),
         security_type: Some(i.kind.clone()).filter(|k| !k.is_empty()),
         icon_url: None,
+        // A data plugin's symbols have no contract multiplier; the fork's
+        // OpenAlgo provider maps its lot size here.
+        point_value: None,
     })
 }
 
