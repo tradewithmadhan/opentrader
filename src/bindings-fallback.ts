@@ -450,8 +450,10 @@ export type BrokerStatus = {
   activeName: string | null;
   /** The active plugin is connected to the app. */
   pluginConnected: boolean;
-  /** The exchange of the active plugin's own symbols when it is a data plugin too: its symbols trade as they are. */
+  /** The exchange of the active plugin's own symbols when it is a data plugin too that is spoken to with bare tickers. */
   dataExchange: string | null;
+  /** All exchanges a multi-exchange data plugin serves; its own symbols are spoken to whole ("NSE:RELIANCE"). */
+  dataExchanges: string[];
   tradingEnabled: boolean;
   /** Its account, as the plugin last sent it. */
   state: BrokerState | null;
