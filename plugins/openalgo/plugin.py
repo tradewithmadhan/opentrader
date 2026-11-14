@@ -649,7 +649,7 @@ class OpenAlgoSource:
         hour = tables["hours"].get(1)
         if hour:
             try:
-                return self._days_of(self._window(exchange, symbol, hour, False, frm, to, 0, 0), count_back)
+                return self._days_of(self._window(exchange, symbol, hour, False, frm, to, 0, 0, 365), count_back)
             except PluginError as e:
                 self.log(f"history {exchange}:{symbol} {interval}: synthesizing from {hour} failed ({e}); the day bar alone", "warn")
                 return bars
@@ -685,6 +685,36 @@ class OpenAlgoSource:
     def _window(self, exchange, symbol, interval, daily, frm, to, count_back, depth):
         """A history window, split in half and retried when the source answers only part of it
         (OpenAlgo caps a window's bars; the halves reach past the cap)."""
+    def _window(self, exchange, symbol, interval, daily, frm, to, count_back, depth, max_days=None):
+        """History window with date-chunking (per-request caps) + split-retry on 5xx."""
+        if max_days is None:
+            if interval.upper() in ("D", "W", "M"):
+                max_days = 365
+            elif interval.lower().endswith("s"):
+                max_days = 3
+            else:
+                max_days = 30
+        if depth > 0 or (to - frm) // 86400 + 1 <= max_days:
+            return self._window_one(exchange, symbol, interval, daily, frm, to, count_back, depth)
+        out = []
+        start = frm
+        while start <= to:
+            end = min(start + (max_days - 1) * 86400, to)
+            out += self._window_one(exchange, symbol, interval, daily, start, end, 0, 0)
+            start = end + 86400
+        seen = set()
+        merged = []
+        for b in sorted(out, key=lambda x: x[0]):
+            if b[0] in seen:
+                continue
+            seen.add(b[0])
+            merged.append(b)
+        if count_back and len(merged) > count_back:
+            merged = merged[-count_back:]
+        return merged
+
+    def _window_one(self, exchange, symbol, interval, daily, frm, to, count_back, depth):
+        """A single history window (one per-request call), split in half and retried on 5xx."""
         if depth > 10:
             return []
         body = {
