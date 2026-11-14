@@ -47,6 +47,16 @@ def ist_date(ts):
     return datetime.fromtimestamp(ts, TZ_IST).strftime("%Y-%m-%d")
 
 
+def in_market_hours():
+    """Whether the Indian market can move right now: the pre-open and regular session on a weekday
+    (IST). A holiday polls a few calls that answer stale quotes — harmless."""
+    now = datetime.now(TZ_IST)
+    if now.weekday() >= 5:
+        return False
+    minute = now.hour * 60 + now.minute
+    return 9 * 60 <= minute <= 15 * 60 + 40
+
+
 def local_app_data():
     if sys.platform == "win32":
         return os.environ["LOCALAPPDATA"]
@@ -323,7 +333,10 @@ class OpenAlgoSource:
         self.ws_subscribed = set()  # what the stream last subscribed (compared with `subscribed`)
         self.subscribed = set()
         self.last_rest_poll = 0.0  # REST quote polling cadence (the WebSocket is the primary source)
+        self.last_ws_tick = 0.0  # when the last market_data message with a price arrived
         self.ws_shape_warned = False  # the "no price read" warn says its piece only once
+        self.ws_quiet_warned = False  # the "connected but no tick" warn says its piece only once
+        self._daily_cache = {}  # (exchange, symbol, interval, start date, end date) → a folded year of day bars
         # the account, as the books last answered
         self.funds = None
         self.positions = []
@@ -635,11 +648,12 @@ class OpenAlgoSource:
         """A day window's bars. Deployments whose D endpoint answers only its last day (verified live: this one
         answers a single row for every window) get their days synthesized from the intraday bars it serves
         fully — hourly when the intervals table has one, else the finest minute table, chunked."""
-        # A huge countBack (e.g. 7560) makes both the D call and any synthesis
-        # slow; cap the window to a year up front — the deployment only serves
-        # about a year of intraday history anyway.
         if to - frm > 365 * 86400:
-            frm = to - 365 * 86400
+            # The app asks every open day-chart for 7560 bars (decades). Serving only the window's
+            # last year made the host walk back a year at a time, re-fetching and re-synthesizing
+            # the same years on every step and every reload. Fold whole years here instead —
+            # cached — and stop where the source's intraday history ends.
+            return self._daily_long(exchange, symbol, interval, frm, to, count_back)
         bars = self._window(exchange, symbol, interval, True, frm, to, count_back, 0)
         if len(bars) >= 2 or to - frm <= 3 * 86400:
             return bars
@@ -665,6 +679,44 @@ class OpenAlgoSource:
         except PluginError as e:
             self.log(f"history {exchange}:{symbol} {interval}: synthesizing from {tables['minutes'][minute]} failed ({e}); the day bar alone", "warn")
             return bars
+
+    def _daily_long(self, exchange, symbol, interval, frm, to, count_back):
+        """A window longer than a year: year chunks walked back from `to`, each folded and cached, until
+        `frm`, enough bars, or the source's intraday history ends (an empty chunk, or an older one with
+        only a stray row or two — this deployment echoes one row per window, that is not history)."""
+        out = []
+        end = to
+        first = True
+        while end >= frm and (not count_back or len(out) < count_back):
+            start = max(frm, end - 365 * 86400 + 1)
+            bars = self._daily_chunk(exchange, symbol, interval, start, end)
+            if not bars:
+                if start > frm:
+                    self.log(f"history {exchange}:{symbol} {interval}: the source has no intraday rows "
+                             f"before {ist_date(end)} — daily history stops there")
+                break
+            if not first and len(bars) < 10:
+                self.log(f"history {exchange}:{symbol} {interval}: {len(bars)} day bar(s) in the year to "
+                         f"{ist_date(end)} — the source's daily history ends there")
+                break
+            first = False
+            out = bars + out
+            end = start - 86400
+        return out[-count_back:] if count_back else out
+
+    def _daily_chunk(self, exchange, symbol, interval, frm, to):
+        """One ≤365-day daily window, folded and cached per (symbol, interval, the window's IST dates)."""
+        key = (exchange, symbol, interval, ist_date(frm), ist_date(to))
+        with self.lock:
+            cached = self._daily_cache.get(key)
+        if cached is not None:
+            return cached
+        bars = self._daily(exchange, symbol, interval, frm, to, 0)
+        with self.lock:
+            if len(self._daily_cache) > 600:
+                self._daily_cache.clear()
+            self._daily_cache[key] = bars
+        return bars
 
     def _days_of(self, intraday, count_back):
         """Intraday bars folded into days: open the first, close the last, high/low the extremes, volume
@@ -779,6 +831,11 @@ class OpenAlgoSource:
         return bar
 
     # ── broker ──
+    def has_quotes(self):
+        """Whether any subscribed ticker has a cached price (the watchlist is not blank)."""
+        with self.lock:
+            return any(self.quotes.get(t) for t in self.subscribed)
+
     def poll_quotes_rest(self):
         """Refresh the quote cache from REST /quotes (fallback when the WebSocket is
         not connected), mirroring the built-in provider's poller."""
@@ -1294,6 +1351,7 @@ class OpenAlgoSource:
                 self.log("stream: a market_data message arrived without a price (run with OPENALGO_DEBUG=1 "
                          "to see the raw traffic)", "warn")
             return
+        self.last_ws_tick = time.time()  # the socket feeds prices; the REST fallback stands down
         ts = num(first_of(r, "ltt", "timestamp", "ts", "time"))
         t = int(ts) if ts and ts < 1e12 else (int(ts / 1000) if ts else int(time.time()))
         prev = num(first_of(r, "prev_close", "previous_close")) or num(first_of(r, "close"))
@@ -1518,14 +1576,29 @@ class Plugin:
                         q = self.source.quote(t)
                         if q:
                             quotes.append(q)
-                # REST quote poll every 5 s, but only when the WebSocket is not connected
-                # (the WebSocket is the primary source; REST is the fallback, mirroring the
-                # built-in provider's poller which runs only without OPENALGO_WS).
+                # REST quote poll every 5 s when the WebSocket is not connected (the WebSocket is the
+                # primary source; REST is the fallback, mirroring the built-in provider's poller). A
+                # connected-but-quiet socket falls back too, throttled: this deployment subscribes
+                # all-or-nothing, so one symbol it rejects silences every tick, and after a weekend
+                # restart the price cache starts empty — without this the watchlist stays blank.
+                # With quotes already cached, the refresh waits for the session (a quiet socket off
+                # hours is just the market being shut).
                 now = time.time()
-                ws_connected = self.source.ws is not None
-                if not ws_connected and now - self.source.last_rest_poll >= 5.0:
-                    self.source.last_rest_poll = now
-                    self.source.poll_quotes_rest()
+                if self.source.ws is None:
+                    if now - self.source.last_rest_poll >= 5.0:
+                        self.source.last_rest_poll = now
+                        self.source.poll_quotes_rest()
+                elif self.source.subscribed and now - self.source.last_rest_poll >= 10.0:
+                    have = self.source.has_quotes()
+                    quiet = now - self.source.last_ws_tick > (90.0 if not have else 300.0)
+                    if quiet and (not have or in_market_hours()):
+                        self.source.last_rest_poll = now
+                        if not self.source.ws_quiet_warned:
+                            self.source.ws_quiet_warned = True  # once: the quiet-socket warn says its piece
+                            self.log("stream: the WebSocket is connected but quiet — polling REST quotes "
+                                     "as a fallback (the subscribe frame may have been rejected; run with "
+                                     "OPENALGO_DEBUG=1 to see it)", "warn")
+                        self.source.poll_quotes_rest()
                 events = self.source.on_tick()
                 for q in quotes:
                     if q["ticker"] in self.tickers:
