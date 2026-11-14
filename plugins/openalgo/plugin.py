@@ -337,6 +337,7 @@ class OpenAlgoSource:
         self.ws_shape_warned = False  # the "no price read" warn says its piece only once
         self.ws_quiet_warned = False  # the "connected but no tick" warn says its piece only once
         self._daily_cache = {}  # (exchange, symbol, interval, start date, end date) → a folded year of day bars
+        self._holidays = {}  # (exchange, year) → (IST day fetched, [YYYYMMDD closed days])
         # the account, as the books last answered
         self.funds = None
         self.positions = []
@@ -532,7 +533,9 @@ class OpenAlgoSource:
         return out
 
     def symbol_info(self, ticker):
-        """The symbol's shape: description, type, currency, sessions, tick size, the intervals served."""
+        """The symbol's shape: description, type, currency, sessions, tick size, the point value
+        (the contract's lot size — the app prices positions with it), the trading holidays and
+        the intervals served."""
         row = self._instrument_row(ticker)
         if row is None:
             raise PluginError(f"Unknown symbol {ticker}", -32602)
@@ -540,15 +543,69 @@ class OpenAlgoSource:
         tick = num(first_of(row, "tick_size", "ticksize")) or 0.05
         pricescale = max(2, round(1 / tick)) if tick < 1 else 100
         return {
-            "description": row.get("name") or ticker.partition(":")[2],
+            "description": display_name(row.get("name") or ticker.partition(":")[2], row),
             "type": self._kind_of(exchange, row),
             "currency": "INR",
             "timezone": "Asia/Kolkata",
             "session": SESSIONS.get(exchange, SESSIONS["_"]),
             "pricescale": pricescale,
             "minmov": 1,
+            "pointValue": num(first_of(row, "lotsize", "lot_size")) or 1.0,
+            "holidays": self._holidays_for(exchange),
             "intervals": self._served_intervals(),
         }
+
+    def _holidays_for(self, exchange):
+        """The exchange's full-day trading holidays of this and next year, comma-joined `YYYYMMDD`
+        (the app's session grammar, src/data/session/spec.ts). Day-cached per exchange and year,
+        like the instrument master."""
+        base = exchange.strip().upper()
+        # An index venue follows its cash market in the calendar (the app provider's rule):
+        # the /market/holidays rows name NSE, not NSE_INDEX.
+        base = base[:-6] if base.endswith("_INDEX") and len(base) > 6 else base
+        today = datetime.now(TZ_IST).date()
+        out = []
+        for year in (today.year, today.year + 1):
+            with self.lock:
+                hit = self._holidays.get((base, year))
+                days = hit[1] if hit is not None and hit[0] == today else None
+            if days is None:
+                days = self._fetch_holidays(base, year)
+                with self.lock:
+                    self._holidays[(base, year)] = (today, days)
+            out.extend(days)
+        return ",".join(sorted(set(out)))
+
+    def _fetch_holidays(self, exchange, year):
+        """One year's closed days for `exchange` from /market/holidays. Only rows that list the
+        exchange in `closed_exchanges` close it (the app provider's rule: special and settlement
+        sessions and unmentioned exchanges keep trading) — and the plugin serves no special
+        session timings, so its static session stands those days. A failed answer logs and caches
+        as empty for the day: a holiday calendar must not take symbol info down."""
+        try:
+            data = self._post("/api/v1/market/holidays", {"year": year})
+        except PluginError as e:
+            self.log(f"holiday calendar {exchange} {year}: {e}; the static session stands", "warn")
+            return []
+        # `_post` already unwraps the answer's `data`; the whole shape is accepted too, just in case.
+        rows = data if isinstance(data, list) else (data.get("data") if isinstance(data, dict) else None)
+        if not isinstance(rows, list):
+            return []
+        days = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            # Row dates must read "YYYY-MM-DD" (the source's own guard, mirroring the app provider).
+            date = str(row.get("date") or "").strip()
+            if len(date) != 10 or not all(c.isdigit() or c == "-" for c in date):
+                continue
+            closed = row.get("closed_exchanges")
+            if not isinstance(closed, list):
+                continue
+            if exchange not in [str(e).strip().upper() for e in closed]:
+                continue
+            days.append(date.replace("-", ""))  # YYYY-MM-DD → YYYYMMDD, the app's holiday grammar
+        return days
 
     def _served_intervals(self):
         """The resolutions the plugin maps straight onto the source (the app builds the others)."""

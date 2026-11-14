@@ -48,6 +48,10 @@ pub struct Info {
     pub extended: Option<String>,
     #[serde(default)]
     pub holidays: String,
+    /// The profit of a 1-point move in one unit (the plugin's `pointValue`): the fork's
+    /// OpenAlgo plugin maps its contract's lot size here, like the built-in provider does.
+    #[serde(default)]
+    pub point_value: Option<f64>,
     pub pricescale: u32,
     #[serde(default = "one")]
     pub minmov: u32,
@@ -221,9 +225,8 @@ pub async fn ticker_info(app: &AppHandle, r: &Route) -> Result<TickerInfo, Strin
         symbol_type: Some(i.kind.clone()).filter(|k| !k.is_empty()),
         security_type: Some(i.kind.clone()).filter(|k| !k.is_empty()),
         icon_url: None,
-        // A data plugin's symbols have no contract multiplier; the fork's
-        // OpenAlgo provider maps its lot size here.
-        point_value: None,
+        // The plugin's `pointValue` (its lot size); None when it does not say.
+        point_value: i.point_value,
     })
 }
 
@@ -661,5 +664,21 @@ mod tests {
         let bars = parse_bars(&v).unwrap();
         assert_eq!(bars.iter().map(|b| b.time).collect::<Vec<_>>(), vec![60.0, 120.0]);
         assert_eq!(bars[0].volume, 0.0);
+    }
+
+    #[test]
+    fn symbol_info_reads_the_plugins_point_value() {
+        // The OpenAlgo plugin maps its contract's lot size into `pointValue`; a plugin
+        // that does not say (the field is defaulted) keeps None.
+        let info: Info = serde_json::from_str(
+            r#"{"timezone":"Asia/Kolkata","session":"0915-1530","pricescale":10,"pointValue":65}"#,
+        )
+        .unwrap();
+        assert_eq!(info.point_value, Some(65.0));
+        let bare: Info = serde_json::from_str(
+            r#"{"timezone":"Asia/Kolkata","session":"0915-1530","pricescale":10}"#,
+        )
+        .unwrap();
+        assert_eq!(bare.point_value, None);
     }
 }
