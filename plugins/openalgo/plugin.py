@@ -156,6 +156,13 @@ PRICE_KINDS = {  # the source's price type → the wire's (sl-m / sl-l are some 
 }
 
 
+
+# Index names that live on the *_INDEX segments, not on NSE/BSE themselves. A watchlist that still
+# carries the stale "NSE:BANKNIFTY" form must not be sent to the broker (it breaks the whole subscribe
+# frame and takes every other symbol's ticks down with it) — drop it from the subscription.
+_INDEX_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "NIFTY50",
+                "SENSEX", "BANKEX", "SENSEX50", "NIFTY100", "NIFTY200", "NIFTY500"}
+
 class Instruments:
     """The instrument master, one pull per exchange per day (an in-memory cache backed by a disk cache:
     the master files are big and the plugin restarts often)."""
@@ -427,11 +434,17 @@ class OpenAlgoSource:
         self.log(f"instruments {exchange}: {len(rows)} rows")
         return rows
 
-    # ── market data ──
     def known(self, ticker):
         """True when `ticker` ("NSE:SBIN-EQ") is one of the plugin's symbols."""
         exchange, sep, symbol = ticker.partition(":")
-        return bool(sep and symbol) and exchange in self.exchanges
+        if not (sep and symbol) or exchange not in self.exchanges:
+            return False
+        # stale index entries ("NSE:BANKNIFTY") are not real NSE/BSE symbols and must not be
+        # subscribed to the broker — they break the whole subscribe frame and take every
+        # other symbol's ticks down with them
+        if exchange in ("NSE", "BSE") and symbol.upper() in _INDEX_NAMES:
+            return False
+        return True
 
     def tick(self, ticker):
         """One price step of `ticker`, from the master's tick size (the ticket's bid/ask spread)."""
@@ -1351,11 +1364,14 @@ class Plugin:
             self.source.configure(p.get("settings", {}))
             self.forward_subscription()
         elif method == "data.subscribe":
-            self.tickers = set(p.get("tickers", []))
+            self.tickers = {t for t in p.get("tickers", []) if self.source.known(t)}
+            dropped = len(p.get("tickers", [])) - len(self.tickers)
+            if dropped:
+                self.log(f"data.subscribe: dropped {dropped} stale symbol(s) (e.g. NSE:BANKNIFTY -> use NSE_INDEX:BANKNIFTY)")
             self.log(f"data.subscribe: {len(self.tickers)} tickers")
             self.forward_subscription()
         elif method == "broker.watchQuote":
-            self.watched = set(p.get("tickers", []))
+            self.watched = {t for t in p.get("tickers", []) if self.source.known(t)}
             self.log(f"broker.watchQuote: {len(self.watched)} tickers")
             self.forward_subscription()
 
