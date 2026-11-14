@@ -558,16 +558,24 @@ class OpenAlgoSource:
             "months": ["M"],
         }
         if isinstance(data, dict):
-            def table_of(v):
+            def table_of(v, unit):
+                """mult → token, either shape: a dict ({'1': '1m'}) or a list of tokens whose numbers are
+                the multipliers of `unit` (['1m', '3m', …] — verified live)."""
                 if isinstance(v, dict):
                     return {int(k): str(x) for k, x in v.items() if str(x).strip()}
-                return {}
+                out = {}
+                if isinstance(v, list):
+                    for token in v:
+                        token = str(token).strip()
+                        if token[:-1].isdigit() and token[-1:].lower() == unit:
+                            out[int(token[:-1])] = token
+                return out
             if data.get("minutes"):
-                tables["minutes"] = table_of(data["minutes"])
+                tables["minutes"] = table_of(data["minutes"], "m")
             if data.get("hours"):
-                tables["hours"] = table_of(data["hours"])
+                tables["hours"] = table_of(data["hours"], "h")
             if data.get("seconds"):
-                tables["seconds"] = {int(k): str(x) for k, x in data["seconds"].items()}
+                tables["seconds"] = table_of(data["seconds"], "s")
             for key in ("days", "weeks", "months"):
                 if isinstance(data.get(key), list) and data[key]:
                     tables[key] = [str(x) for x in data[key]]
@@ -603,12 +611,57 @@ class OpenAlgoSource:
         """`[time, o, h, l, c, v]` oldest first; times UNIX seconds, a daily bar at its trading day's midnight."""
         exchange, _, symbol = ticker.partition(":")
         interval = self._interval_for(resolution)
-        daily = interval in ("D", "W", "M")
         try:
-            return self._window(exchange, symbol, interval, daily, frm, to, count_back, 0)
+            if interval in ("D", "W", "M"):
+                return self._daily(exchange, symbol, interval, frm, to, count_back)
+            return self._window(exchange, symbol, interval, False, frm, to, count_back, 0)
         except PluginError as e:
             self.log(f"history {ticker} {interval}: {e}", "warn")  # the chart only says "no data"; the log says why
             raise
+
+    def _daily(self, exchange, symbol, interval, frm, to, count_back):
+        """A day window's bars. Deployments whose D endpoint answers only its last day (verified live: this one
+        answers a single row for every window) get their days synthesized from the intraday bars it serves
+        fully — hourly when the intervals table has one, else the finest minute table, chunked."""
+        bars = self._window(exchange, symbol, interval, True, frm, to, count_back, 0)
+        if len(bars) >= 2 or to - frm <= 3 * 86400:
+            return bars
+        tables = self._interval_tables()
+        hour = tables["hours"].get(1)
+        if hour:
+            try:
+                return self._days_of(self._window(exchange, symbol, hour, False, frm, to, 0, 0), count_back)
+            except PluginError as e:
+                self.log(f"history {exchange}:{symbol} {interval}: synthesizing from {hour} failed ({e}); the day bar alone", "warn")
+                return bars
+        minute = min(tables["minutes"], default=0)
+        if not minute:
+            return bars
+        try:
+            intraday, start = [], frm
+            chunk = 30 * 86400  # the source's minute range cap (the app provider's, mirrored)
+            while start <= to:
+                end = min(start + chunk, to)
+                intraday += self._window(exchange, symbol, tables["minutes"][minute], False, start, end, 0, 0)
+                start = end + 1
+            return self._days_of(intraday, count_back)
+        except PluginError as e:
+            self.log(f"history {exchange}:{symbol} {interval}: synthesizing from {tables['minutes'][minute]} failed ({e}); the day bar alone", "warn")
+            return bars
+
+    def _days_of(self, intraday, count_back):
+        """Intraday bars folded into days: open the first, close the last, high/low the extremes, volume
+        summed; a day bar sits at its trading day's midnight in the market's clock."""
+        days = []
+        for b in sorted(intraday, key=lambda x: x[0]):
+            day = ist_midnight(int(b[0]))
+            if days and days[-1][0] == day:
+                days[-1][2] = max(days[-1][2], b[2])
+                days[-1][3] = min(days[-1][3], b[3])
+                days[-1][4], days[-1][5] = b[4], (days[-1][5] or 0) + (b[5] or 0)
+            else:
+                days.append([day, b[1], b[2], b[3], b[4], b[5] or 0])
+        return days[-count_back:] if count_back else days
 
     def _window(self, exchange, symbol, interval, daily, frm, to, count_back, depth):
         """A history window, split in half and retried when the source answers only part of it
