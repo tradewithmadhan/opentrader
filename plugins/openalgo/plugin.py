@@ -435,18 +435,15 @@ class OpenAlgoSource:
         self.log(f"instruments {exchange}: {len(rows)} rows")
         return rows
 
-    def _alias_ticker(self, ticker):
-        """Stale index entries ('NSE:BANKNIFTY') are not real NSE/BSE symbols; map them
-        to their *_INDEX venue so REST quotes still work (WS ticks are dropped for them)."""
-        exchange, sep, symbol = ticker.partition(":")
-        if sep and exchange in ("NSE", "BSE") and symbol.upper() in _INDEX_NAMES:
-            return "%s_INDEX:%s" % (exchange, symbol)
-        return ticker
-
     def known(self, ticker):
         """True when `ticker` ("NSE:SBIN-EQ") is one of the plugin's symbols."""
         exchange, sep, symbol = ticker.partition(":")
-        return bool(sep and symbol) and exchange in self.exchanges
+        if not (sep and symbol) or exchange not in self.exchanges:
+            return False
+        # stale index entries ("NSE:BANKNIFTY") are not real NSE/BSE symbols
+        if exchange in ("NSE", "BSE") and symbol.upper() in _INDEX_NAMES:
+            return False
+        return True
 
     def tick(self, ticker):
         """One price step of `ticker`, from the master's tick size (the ticket's bid/ask spread)."""
@@ -782,17 +779,13 @@ class OpenAlgoSource:
         return bar
 
     # ── broker ──
-    def poll_quotes_rest(self, tickers=None):
-        """Refresh the quote cache from REST /quotes (the WebSocket is primary; this covers
-        non-market hours and any gap in the stream, mirroring the built-in provider's poller).
-        `tickers` are the app's subscribed symbols; stale index entries are aliased to their
-        *_INDEX venue for the REST call but stored under the original ticker."""
-        to_poll = set(self.subscribed)
-        if tickers:
-            to_poll |= set(tickers)
-        for ticker in list(to_poll):
-            broker_sym = self._alias_ticker(ticker)
-            exchange, _, symbol = broker_sym.partition(":")
+    def poll_quotes_rest(self):
+        """Refresh the quote cache from REST /quotes (fallback when the WebSocket is
+        not connected), mirroring the built-in provider's poller."""
+        for ticker in list(self.subscribed):
+            if not self.known(ticker):
+                continue
+            exchange, _, symbol = ticker.partition(":")
             try:
                 answer = self._post("/api/v1/quotes", {"symbol": symbol, "exchange": exchange})
             except PluginError:
@@ -818,7 +811,6 @@ class OpenAlgoSource:
                 if answer.get("volume") is not None:
                     q["volume"] = num(answer.get("volume"))
                 self.quotes[ticker] = q
-
 
     def resolve_symbol(self, symbol, ticker):
         """The plugin's ticker of a chart symbol, or None. Its own symbols trade as they are."""
@@ -1434,11 +1426,11 @@ class Plugin:
             self.source.configure(p.get("settings", {}))
             self.forward_subscription()
         elif method == "data.subscribe":
-            self.tickers = set(p.get("tickers", []))
-            stale = [t for t in self.tickers if self.source._alias_ticker(t) != t]
-            if stale:
-                self.log("data.subscribe: %d stale symbol(s) polled via REST (use NSE_INDEX:... for live WS ticks): %s"
-                         % (len(stale), ", ".join(stale[:5])))
+            raw = p.get("tickers", [])
+            self.tickers = {t for t in raw if self.source.known(t)}
+            dropped = len(raw) - len(self.tickers)
+            if dropped:
+                self.log("data.subscribe: dropped %d stale symbol(s) (e.g. NSE:BANKNIFTY -> use NSE_INDEX:BANKNIFTY)" % dropped)
             self.log("data.subscribe: %d tickers" % len(self.tickers))
             self.forward_subscription()
         elif method == "broker.watchQuote":
@@ -1447,10 +1439,8 @@ class Plugin:
             self.forward_subscription()
 
     def forward_subscription(self):
-        """The stream's subscription is the union of the data symbols and the ticket's,
-        minus stale index entries (those are polled via REST instead)."""
-        ws_tickers = {t for t in (self.tickers | self.watched) if self.source._alias_ticker(t) == t}
-        self.source.subscribed = ws_tickers
+        """The stream's subscription is the union of the data symbols and the ticket's."""
+        self.source.subscribed = self.tickers | self.watched
 
     # ── streaming: live prices, the ticket's bid / ask, the books ──
     def stream(self):
@@ -1462,12 +1452,14 @@ class Plugin:
                         q = self.source.quote(t)
                         if q:
                             quotes.append(q)
-                # REST quote poll every 5 s (the WebSocket is primary; this covers
-                # non-market hours and stream gaps, mirroring the built-in provider).
+                # REST quote poll every 5 s, but only when the WebSocket is not connected
+                # (the WebSocket is the primary source; REST is the fallback, mirroring the
+                # built-in provider's poller which runs only without OPENALGO_WS).
                 now = time.time()
-                if now - self.source.last_rest_poll >= 5.0:
+                ws_connected = self.source.ws is not None
+                if not ws_connected and now - self.source.last_rest_poll >= 5.0:
                     self.source.last_rest_poll = now
-                    self.source.poll_quotes_rest(self.tickers | self.watched)
+                    self.source.poll_quotes_rest()
                 events = self.source.on_tick()
                 for q in quotes:
                     if q["ticker"] in self.tickers:
