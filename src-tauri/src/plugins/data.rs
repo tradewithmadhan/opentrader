@@ -333,11 +333,16 @@ fn span(days: u32) -> f64 {
 
 /// The last `days` trading days of `unit` bars.
 pub async fn recent(app: &AppHandle, r: &Route, unit: &str, mult: u32, days: u32) -> Result<Vec<Candle>, String> {
-    // A plugin's daily history is shallow (the broker's D endpoint answers one
-    // row and synthesis covers about a year), so cap the request the same way
-    // the built-in OpenAlgo provider does — asking for 7560 days (the app's
-    // default) makes every chart open slow.
-    let days = if unit == "day" { days.min(365) } else { days };
+    // A plugin's history is shallow (the broker's D endpoint answers one row
+    // and synthesis covers about a year; intraday is capped at 30 days), so cap
+    // the request the same way the built-in OpenAlgo provider does — asking for
+    // the app's default lookback (7560 days) makes every chart open slow.
+    let days = match unit {
+        "day" => days.min(365),
+        "minute" => days.min(30),
+        "second" => days.min(30),
+        _ => days,
+    };
     let to = now();
     let per_day = match unit {
         "second" => 86_400 / mult.max(1) as u64,
@@ -349,7 +354,12 @@ pub async fn recent(app: &AppHandle, r: &Route, unit: &str, mult: u32, days: u32
 
 /// Bars strictly before `before_sec`, over `span_days` trading days.
 pub async fn before(app: &AppHandle, r: &Route, unit: &str, mult: u32, before_sec: f64, span_days: u32) -> Result<Vec<Candle>, String> {
-    let span_days = if unit == "day" { span_days.min(365) } else { span_days };
+    let span_days = match unit {
+        "day" => span_days.min(365),
+        "minute" => span_days.min(30),
+        "second" => span_days.min(30),
+        _ => span_days,
+    };
     let to = before_sec - 1.0;
     let per_day = match unit {
         "second" => 86_400 / mult.max(1) as u64,
