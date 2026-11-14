@@ -57,6 +57,9 @@ export class SymbolSessions {
   /** Tick bands [upper price bound, tick] ascending, the last bound
    *  Infinity; empty when the tick does not depend on the price. */
   readonly tickBands: ReadonlyArray<readonly [number, number]>;
+  /** Interval ids served by the symbol's data plugin; empty for the provider's
+   *  symbols (its capabilities say what it serves). */
+  readonly intervals: readonly string[];
 
   constructor(info: SymbolSession) {
     const tz = info.timezone;
@@ -80,6 +83,7 @@ export class SymbolSessions {
     const bands: [number, number][] = [];
     for (let i = 0; i < v.length; i += 2) bands.push([i + 1 < v.length ? v[i + 1] : Infinity, v[i]]);
     this.tickBands = bands;
+    this.intervals = info.intervals ?? [];
   }
 
   /** Tick at `price`: the tick of the first band whose bound is at or above it (1 is written 1.0000 on a US stock), else the current-price tick. */
@@ -94,8 +98,13 @@ export class SymbolSessions {
    *  price formatter (checked 01/10/2026 on 11 symbols). */
   formatPrice(price: number): string {
     const tick = this.tickAt(price);
-    const d = tickDecimals(tick);
-    return (Math.round(price / tick) * tick).toFixed(d);
+    return (Math.round(price / tick) * tick).toFixed(tickDecimals(tick));
+  }
+
+  /** Decimals of the tick at `price`: a price move (change, range) is written with the decimals of the price it
+   *  moves (a 0.5 change of a 123.45 US stock is 0.50, not the 0.5000 of a price under 1). */
+  decimalsAt(price: number): number {
+    return tickDecimals(this.tickAt(price));
   }
 
   /** Schedule of the bottom-bar session choice. */

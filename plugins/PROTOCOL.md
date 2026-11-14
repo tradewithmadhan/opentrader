@@ -129,9 +129,9 @@ Bars are `[time, open, high, low, close, volume]` arrays. `time` is the bar's st
 
 `{"query":"eur"}` → `{"symbols":[{"ticker":"EURUSD","description":"Euro vs US Dollar","type":"forex"}]}`
 
-The query never holds the exchange: the app asks each plugin once and keeps the rows of the exchange the user typed (`NSE:REL`). The request may carry a `type` (the dialog's Type chip code — `EQ`, `FUT`, `CE`, `PE`, `IX`, or the row kinds below): a plugin that knows its rows' kinds filters on it; one that cannot may ignore it.
+The query never holds the exchange: the app asks each plugin once and keeps the rows of the exchange the user typed (`NSE:REL`).
 
-Return at most 50 matches; an empty query may return the most used symbols. `type` is one of `stock`, `fund`, `index`, `forex`, `crypto`, `futures`, `options`, `cfd`, `bond`. It picks the search tab the row appears under.
+Return at most 50 matches; an empty query may return the most used symbols. `type` is one of `stock`, `fund`, `index`, `forex`, `crypto`, `futures`, `cfd`, `bond`. It picks the search tab the row appears under.
 
 ### `data.symbolInfo` (app → plugin, request)
 
@@ -150,7 +150,7 @@ Return at most 50 matches; an empty query may return the most used symbols. `typ
 | `extended` | The whole traded day, when it is wider than `session`. |
 | `holidays` | Full-close days, `YYYYMMDD,YYYYMMDD`. |
 | `pricescale`, `minmov` | One tick is `minmov / pricescale`. For example, 100000 and 1 give 0.00001. |
-| `intervals` | The resolutions served: minutes (`"1"`, `"5"`, `"60"`…), seconds (`"1S"`…), `"1D"`, `"1W"`, `"1M"`. Other minute or second sizes are built by the app from the largest served size that divides them, on the clock grid. Weeks and months are built from days. |
+| `intervals` | The resolutions served: minutes (`"1"`, `"5"`, `"60"`…), seconds (`"1S"`…), `"1D"`, `"1W"`, `"1M"`. Intraday bars start on the clock grid of their size in the symbol's time zone (a `"60"` bar starts on the hour). Other minute or second sizes are built by the app from a served size that divides them. Bars that start at the session open (09:30, 10:30…) are built from a served size that divides the time from midnight to the open; with none (only `"60"` for a 09:30 open), the bars keep the served grid (09:00, 10:00…) and the one the open falls in is stamped at the open. Weeks and months are built from days. The interval picker offers only these; another interval shows that it is not supported. |
 
 ### `data.bars` (app → plugin, request)
 
@@ -223,6 +223,7 @@ The whole account. Send it once after `hello`, then whenever any part changes: a
 | Field | Meaning |
 |---|---|
 | `connected` | The plugin is logged in to its broker. While it is `false`, the app shows the broker as not connected. |
+| `capabilities` | What the broker supports. The order ticket, the chart and the DOM offer only that: `orderTypes` are the ticket's order types; without `brackets` a new order has no take profit / stop loss; without `positionBrackets` there is no Protect position; without `partialClose` a position closes whole; without `modifyOrders` orders are not dragged or modified. A field left out is supported. |
 | `positionMode` | `netting` gives one position per symbol. `hedging` allows several, each closed on its own. A chart shows a hedging account's positions of a symbol as one net position. |
 | `orders[].status` | `placing`, `working`, `inactive`, `filled`, `cancelled` or `rejected`. Keep recent filled, cancelled and rejected orders for the account manager's filters. |
 | `orders[].takeProfit`, `stopLoss` | The brackets an order opens its position with. |
