@@ -623,6 +623,10 @@ class OpenAlgoSource:
         """A day window's bars. Deployments whose D endpoint answers only its last day (verified live: this one
         answers a single row for every window) get their days synthesized from the intraday bars it serves
         fully — hourly when the intervals table has one, else the finest minute table, chunked."""
+        # synthesizing across years would fetch tens of thousands of intraday bars (very slow); the deployment's
+        # intraday history only reaches back about a year anyway, so cap the synthesis window to that.
+        if to - frm > 365 * 86400:
+            frm = to - 365 * 86400
         bars = self._window(exchange, symbol, interval, True, frm, to, count_back, 0)
         if len(bars) >= 2 or to - frm <= 3 * 86400:
             return bars
