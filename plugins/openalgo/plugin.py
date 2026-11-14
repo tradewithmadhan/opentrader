@@ -323,11 +323,6 @@ class OpenAlgoSource:
         self.executions = []
         self.last_poll = 0.0
         self.rest_ok = False
-        # history cache: (ticker, resolution) -> (bars list, frm, to, fetched_at). Re-opening a chart
-        # (or asking for a narrower window after a wide one) is instant within the TTL.
-        self._bars_cache = {}
-        self._bars_cache_lock = threading.Lock()
-        self._BARS_CACHE_TTL = 120.0
 
     # ── settings ──
     def configure(self, settings):
@@ -614,29 +609,15 @@ class OpenAlgoSource:
         raise PluginError(f"Resolution {resolution} is not served", -32602)
 
     def bars(self, ticker, resolution, frm, to, count_back):
-        frm_i, to_i = int(frm), int(to)
-        with self._bars_cache_lock:
-            cached = self._bars_cache.get((ticker, resolution))
-        if cached is not None:
-            cbars, cfrm, cto, cts = cached
-            if cfrm <= frm_i and cto >= to_i and (time.time() - cts) < self._BARS_CACHE_TTL:
-                out = [b for b in cbars if frm_i <= b[0] <= to_i]
-                return out[-count_back:] if count_back else out
         exchange, _, symbol = ticker.partition(":")
         interval = self._interval_for(resolution)
         try:
             if interval in ("D", "W", "M"):
-                bars = self._daily(exchange, symbol, interval, frm, to, count_back)
-            else:
-                bars = self._window(exchange, symbol, interval, False, frm, to, count_back, 0)
+                return self._daily(exchange, symbol, interval, frm, to, count_back)
+            return self._window(exchange, symbol, interval, False, frm, to, count_back, 0)
         except PluginError as e:
-            self.log(f"history {ticker} {interval}: {e}", "warn")
+            self.log(f"history {ticker} {interval}: {e}", "warn")  # the chart only says "no data"; the log says why
             raise
-        with self._bars_cache_lock:
-            prev = self._bars_cache.get((ticker, resolution))
-            if prev is None or (to_i - frm_i) >= (prev[2] - prev[1]):
-                self._bars_cache[(ticker, resolution)] = (list(bars), frm_i, to_i, time.time())
-        return bars
 
     def _daily(self, exchange, symbol, interval, frm, to, count_back):
         """A day window's bars. Deployments whose D endpoint answers only its last day (verified live: this one
