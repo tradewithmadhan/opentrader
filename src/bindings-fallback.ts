@@ -67,6 +67,7 @@ export type SymbolSession = {
   pricescale: number;
   minmov: number;
   variableTickSize: string;
+  intervals?: string[];
 };
 export type CommandResult<T> = { status: "ok"; data: T } | { status: "error"; error: string };
 export type WindowState = any;
@@ -550,6 +551,8 @@ export const commands: {
   localFolderScan(folder: string): Promise<CommandResult<FolderFile[]>>;
   localFolderRead(folder: string, file: string): Promise<CommandResult<string>>;
   getFundamentals(symbol: string): Promise<CommandResult<Fundamentals>>;
+  getDividends(symbol: string): Promise<CommandResult<DividendEvent[]>>;
+  getSplits(symbol: string): Promise<CommandResult<SplitEvent[]>>;
   getFilings(symbol: string, query: FilingQuery): Promise<CommandResult<FilingList>>;
   readFiling(symbol: string, accn: string, section: string | null, offset: number | null): Promise<CommandResult<FilingText>>;
   marketPassSet(pass: string | null, exp: number | null): void;
@@ -626,6 +629,8 @@ export const commands: {
   localFolderScan(folder: string): Promise<CommandResult<FolderFile[]>>;
   localFolderRead(folder: string, file: string): Promise<CommandResult<string>>;
   getFundamentals(symbol: string): Promise<CommandResult<Fundamentals>>;
+  getDividends(symbol: string): Promise<CommandResult<DividendEvent[]>>;
+  getSplits(symbol: string): Promise<CommandResult<SplitEvent[]>>;
   getFilings(symbol: string, query: FilingQuery): Promise<CommandResult<FilingList>>;
   readFiling(symbol: string, accn: string, section: string | null, offset: number | null): Promise<CommandResult<FilingText>>;
   marketPassSet(pass: string | null, exp: number | null): void;
