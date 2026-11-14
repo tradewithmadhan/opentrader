@@ -1,0 +1,29 @@
+{
+  "id": "openalgo",
+  "name": "OpenAlgo (development)",
+  "version": "0.0.0-dev",
+  "publisher": "tradewithmadhan",
+  "description": "The OpenAlgo plugin while it is developed: you run plugin.py yourself, the app writes where to connect.",
+  "api": 2,
+  "provides": ["datafeed", "broker"],
+  "exchanges": ["NSE", "BSE", "NFO", "BFO", "MCX", "CDS", "BCD", "NCO", "NCDEX", "BCO", "NSE_INDEX", "BSE_INDEX", "MCX_INDEX"],
+  "runtime": { "type": "external", "connectionFile": "{localAppData}/OpenTraderPlugins/openalgo-dev.json" },
+  "settings": [
+    { "key": "apiUrl", "label": "OpenAlgo API URL", "type": "text", "default": "http://127.0.0.1:5000",
+      "help": "The base URL of your OpenAlgo server (REST)." },
+    { "key": "wsUrl", "label": "OpenAlgo WebSocket URL", "type": "text", "default": "ws://127.0.0.1:8765",
+      "help": "The full WebSocket URL of your OpenAlgo server, including any path (e.g. wss://your-domain/ws)." },
+    { "key": "apiKey", "label": "API key", "type": "text", "default": "",
+      "help": "Your OpenAlgo API key. Kept in the plugin's settings; never printed to the log." },
+    { "key": "exchanges", "label": "Exchanges to serve", "type": "text",
+      "default": "NSE,BSE,NFO,BFO,MCX,CDS,BCD,NCO,NCDEX,NSE_INDEX,BSE_INDEX,MCX_INDEX",
+      "help": "Comma-separated, the OpenAlgo segments exactly as their names appear in the instrument master (the index segments included: NSE_INDEX etc.). Symbols of other exchanges are not served; remove one your broker does not support." },
+    { "key": "product", "label": "Default product", "type": "select", "default": "MIS",
+      "options": [
+        { "value": "MIS", "label": "MIS (intraday)" },
+        { "value": "CNC", "label": "CNC (delivery)" },
+        { "value": "NRML", "label": "NRML (carryforward)" }
+      ],
+      "help": "The product type orders without one are sent as. MIS closes by day's end; CNC holds delivery; NRML carries F&O overnight." }
+  ]
+}

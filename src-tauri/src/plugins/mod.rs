@@ -344,6 +344,29 @@ fn stop_process(app: &AppHandle, id: &str) {
     }
 }
 
+/// The plugin folder's source stamp: the summed mtimes of the top-level files sharing the entry's
+/// extension (the entry's own kind — `plugin.py` watches the `.py` files), 0 when none.
+fn source_stamp(dir: &std::path::Path, entry: &std::path::Path) -> u64 {
+    let ext = entry.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let mut stamp = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let same = e.path().extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case(&ext));
+            if same != Some(true) {
+                continue;
+            }
+            if let Ok(meta) = e.metadata() {
+                if let Ok(t) = meta.modified() {
+                    if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                        stamp = stamp.saturating_add(d.as_millis() as u64);
+                    }
+                }
+            }
+        }
+    }
+    stamp
+}
+
 /// Start the plugin's program and keep it running (started again after it stops, waiting longer each time) until
 /// stopped.
 fn start_process(app: &AppHandle, m: &Manifest, entry: &str, args: &[String], port: u16, token: &str) {
@@ -351,6 +374,26 @@ fn start_process(app: &AppHandle, m: &Manifest, entry: &str, args: &[String], po
     let exe = dir.join(entry);
     let (tx, mut stop) = oneshot::channel::<()>();
     app.state::<Plugins>().processes.locked().insert(m.id.clone(), tx);
+    // Development: the folder is watched and saving the plugin's source restarts it, so the edit loop is
+    // just save. A release build watches nothing (the channel then has a sender and never a signal).
+    let (edit_tx, mut edit_rx) = tokio::sync::watch::channel(0u64);
+    let _edit_tx = edit_tx;
+    if cfg!(debug_assertions) {
+        let (dir2, exe2, edit_tx) = (dir.clone(), exe.clone(), _edit_tx.clone());
+        tauri::async_runtime::spawn(async move {
+            let mut last = source_stamp(&dir2, &exe2);
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let stamp = source_stamp(&dir2, &exe2);
+                if stamp != last {
+                    last = stamp;
+                    if edit_tx.send(stamp).is_err() {
+                        return; // the receiver is gone (the program stopped for good): stop watching
+                    }
+                }
+            }
+        });
+    }
     let (app, id, args, token) = (app.clone(), m.id.clone(), args.to_vec(), token.to_string());
     tauri::async_runtime::spawn(async move {
         let mut wait = Duration::from_secs(2);
@@ -406,6 +449,16 @@ fn start_process(app: &AppHandle, m: &Manifest, entry: &str, args: &[String], po
                             let _ = child.kill().await;
                             log(&app, &id, "Stopped");
                             true
+                        }
+                        _ = edit_rx.changed() => {
+                            // A source file was saved: drop the old code, run again with what is on disk.
+                            if let Some(pid) = child.id() {
+                                kill_tree(pid);
+                            }
+                            let _ = child.kill().await;
+                            log(&app, &id, "Changed on disk — restarting with the new code");
+                            wait = Duration::from_secs(2);
+                            false
                         }
                     };
                     app.state::<Plugins>().running.locked().remove(&id);
@@ -720,6 +773,33 @@ pub async fn plugin_pick_folder(app: AppHandle, title: String) -> Result<Option<
     match picked {
         Some(p) => Ok(Some(p.into_path().map_err(|e| e.to_string())?.to_string_lossy().into_owned())),
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_stamp;
+
+    #[test]
+    fn source_stamp_reads_only_the_entry_kinds_files() {
+        let dir = std::env::temp_dir().join(format!("ot-plugin-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("plugin.py");
+        std::fs::write(&entry, "print(1)").unwrap();
+        std::fs::write(dir.join("helper.py"), "x = 1").unwrap();
+        std::fs::write(dir.join("notes.md"), "docs").unwrap();
+        let base = source_stamp(&dir, &entry);
+        assert!(base > 0);
+        // A file of another kind does not count (a docs edit must not restart the program)...
+        std::fs::write(dir.join("notes.md"), "more docs").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(source_stamp(&dir, &entry), base);
+        // ...its kind does.
+        std::fs::write(&entry, "print(2)").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_ne!(source_stamp(&dir, &entry), base);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 

@@ -1449,6 +1449,15 @@ const TYPE_LABELS: Record<string, string> = {
   PE: "options",
   IX: "index",
   INDEX: "index",
+  // The app-level tokens the plugin search rows carry.
+  stock: "stock",
+  futures: "futures",
+  options: "options",
+  index: "index",
+  forex: "forex",
+  crypto: "crypto",
+  fund: "fund",
+  bond: "bond",
 };
 
 /** OpenAlgo instrument type → category-tab override. Equities (EQ and the
@@ -1459,6 +1468,33 @@ const TYPE_CATEGORY: Partial<Record<string, SymbolCategoryId>> = {
   PE: "options",
   IX: "indices",
   INDEX: "indices",
+  futures: "futures",
+  options: "options",
+  index: "indices",
+  forex: "forex",
+  crypto: "crypto",
+  fund: "funds",
+  bond: "bonds",
+};
+
+/** The search tab of a market bucket (the host derives it from the row's
+ *  type; the fallback covers rows with no type). */
+const MARKET_CATEGORY: Record<string, SymbolCategoryId> = {
+  stocks: "stocks",
+  indices: "indices",
+  futures: "futures",
+  fx: "forex",
+  crypto: "crypto",
+};
+
+/** The market bucket → its dialog label (the fallback of a row without a
+ *  security type; the host derives the bucket from the row's type). */
+const MARKET_LABELS: Record<string, string> = {
+  stocks: "stock",
+  indices: "index",
+  futures: "futures",
+  fx: "forex",
+  crypto: "crypto",
 };
 
 /** Map one raw search result into a dialog row. The vendor half of symbol
@@ -1466,7 +1502,9 @@ const TYPE_CATEGORY: Partial<Record<string, SymbolCategoryId>> = {
 export function searchResultToRow(r: SymbolSearchResult): SymbolRow {
   const ex = exchangeName(r.exchange);
   // Equity arrives as "EQ" (search) or "" (symbol detail) — both are stock.
-  const marketType = (r.type && TYPE_LABELS[r.type]) || "stock";
+  // The market bucket backs the security type up: the plugin search rows carry
+  // the app-level types, and a row with neither lands in Stocks.
+  const marketType = (r.type && TYPE_LABELS[r.type]) || MARKET_LABELS[r.market ?? ""] || "stock";
   return {
     symbolName: ex ? `${ex}:${r.ticker}` : r.ticker,
     ticker: r.ticker,
@@ -1475,7 +1513,7 @@ export function searchResultToRow(r: SymbolSearchResult): SymbolRow {
     exchange: ex,
     exchangeTooltip: ex || undefined,
     primaryExchange: !!ex,
-    category: (r.type && TYPE_CATEGORY[r.type]) || "stocks",
+    category: (r.type && TYPE_CATEGORY[r.type]) || MARKET_CATEGORY[r.market ?? ""] || "stocks",
     // All broker venues are Indian listings.
     country: "IN",
     // Logo for stocks only ("EQ" search rows, "stock" detail rows);

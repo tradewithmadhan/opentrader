@@ -157,8 +157,18 @@ fn forget(app: &AppHandle, plugin: &str) {
 }
 
 async fn ask(app: &AppHandle, r: &Route, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+    // The plugin's log carries the app's asks too: the chart only says "no data", the log says what was
+    // asked of whom and why it failed.
+    super::log(app, &r.plugin, format!("{method} {params}"));
     let hub = app.state::<Plugins>().hub.clone();
-    hub.request(&r.plugin, method, params, timeout).await.map_err(|e| e.to_string())
+    let v = hub.request(&r.plugin, method, params, timeout).await;
+    match v {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            super::log(app, &r.plugin, format!("[error] {method} failed: {e}"));
+            Err(e.to_string())
+        }
+    }
 }
 
 pub async fn info(app: &AppHandle, r: &Route) -> Result<Arc<Info>, String> {
@@ -277,6 +287,12 @@ fn rebuild(bars: Vec<Candle>, bucket: u64) -> Vec<Candle> {
 pub async fn bars(app: &AppHandle, r: &Route, unit: &str, mult: u32, from: f64, to: f64, count: u64) -> Result<Vec<Candle>, String> {
     let i = info(app, r).await?;
     let Some((resolution, bucket)) = pick(&i.intervals, unit, mult.max(1)) else {
+        // Silent before: the chart showed "no data" with nothing anywhere. Say why in the plugin's log.
+        super::log(app, &r.plugin, format!(
+            "[warn] history {} {unit}x{mult}: none of it is among the intervals the plugin serves ({})",
+            r.ticker,
+            i.intervals.join(", ")
+        ));
         return Ok(Vec::new());
     };
     let ask_count = if bucket > 0 { count.saturating_mul(bucket / base_seconds(&resolution).max(1)) } else { count };
@@ -287,6 +303,11 @@ pub async fn bars(app: &AppHandle, r: &Route, unit: &str, mult: u32, from: f64, 
     let v = ask(app, r, "data.bars", params, BARS_TIMEOUT).await?;
     let mut bars = parse_bars(&v)?;
     bars.retain(|b| b.time >= from && b.time <= to);
+    if bars.is_empty() {
+        super::log(app, &r.plugin, format!("[warn] history {} {resolution}: the source answered no bars", r.ticker));
+    } else {
+        super::log(app, &r.plugin, format!("history {} {resolution}: {} bars", r.ticker, bars.len()));
+    }
     Ok(if bucket > 0 { rebuild(bars, bucket) } else { bars })
 }
 
@@ -362,7 +383,9 @@ struct FoundSymbol {
 }
 
 /// The connected data plugins' symbols matching `query`, as search rows (`exchange` = the symbol's).
-pub async fn search(app: &AppHandle, query: &str) -> Vec<SymbolSearchResult> {
+/// `type_filter` is the dialog's Type chip code (EQ, FUT, CE, PE, IX, …): the plugin filters on it
+/// (its answer names the type of each row), the host just carries it.
+pub async fn search(app: &AppHandle, query: &str, type_filter: Option<&str>) -> Vec<SymbolSearchResult> {
     // "MT5:EUR" asks the plugin of that exchange for "EUR" (and no other plugin).
     let (only, query) = match query.split_once(':') {
         Some((ex, rest)) => (Some(ex.trim().to_ascii_uppercase()), rest.trim()),
@@ -381,9 +404,10 @@ pub async fn search(app: &AppHandle, query: &str) -> Vec<SymbolSearchResult> {
     let asks = plugins.into_iter().filter(|p| hub.connected(p).is_some()).map(|plugin| {
         let hub = hub.clone();
         let query = query.to_string();
+        let type_filter = type_filter.map(str::to_string);
         let (exchanges, whole, only) = (exchanges.clone(), whole.clone(), only.clone());
         async move {
-            let v = hub.request(&plugin, "data.search", json!({ "query": query }), INFO_TIMEOUT).await.ok()?;
+            let v = hub.request(&plugin, "data.search", json!({ "query": query, "type": type_filter }), INFO_TIMEOUT).await.ok()?;
             let found: Vec<FoundSymbol> = serde_json::from_value(v.get("symbols")?.clone()).ok()?;
             Some(found_rows(&exchanges, &whole, &plugin, only.as_deref(), found))
         }
@@ -413,7 +437,9 @@ fn found_rows(
                 market: Some(market_of(&f.kind).to_string()),
                 locale: None,
                 exchange: Some(exchange.to_string()),
-                r#type: None,
+                // The plugin's security type ("stock", "index", "futures"…) reaches the dialog: the tabs
+                // filter on it (an openalgo-source row reads nothing else).
+                r#type: Some(f.kind.clone()).filter(|k| !k.is_empty()),
             })
         })
         .take(50)
@@ -610,6 +636,18 @@ mod tests {
         assert_eq!(rows.iter().map(|r| format!("{}:{}", r.exchange.as_deref().unwrap(), r.ticker)).collect::<Vec<_>>(), vec!["NSE:RELIANCE", "BSE:RELIANCE"]);
         let only = found_rows(&ex, &whole, "algo", Some("BSE"), vec![found("NSE:RELIANCE"), found("BSE:RELIANCE")]);
         assert_eq!(only.len(), 1);
+    }
+
+    #[test]
+    fn search_rows_carry_the_plugins_type_and_market() {
+        // The dialog's tabs filter on `type`; an empty one reads nothing (dropped to None, not "").
+        let (ex, whole) = maps();
+        let found = |t: &str, k: &str| FoundSymbol { ticker: t.into(), description: String::new(), kind: k.into() };
+        let rows = found_rows(&ex, &whole, "algo", None, vec![
+            found("NSE:RELIANCE", "stock"), found("NSE_INDEX:NIFTY", "index"), found("NFO:BANKNIFTY", "futures"), found("NSE:TCS", ""),
+        ]);
+        assert_eq!(rows.iter().map(|r| r.r#type.as_deref()).collect::<Vec<_>>(), vec![Some("stock"), Some("index"), Some("futures"), None]);
+        assert_eq!(rows.iter().map(|r| r.market.as_deref()).collect::<Vec<_>>(), vec![Some("stocks"), Some("indices"), Some("futures"), Some("stocks")]);
     }
 
     #[test]

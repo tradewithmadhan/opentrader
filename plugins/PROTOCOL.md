@@ -129,9 +129,9 @@ Bars are `[time, open, high, low, close, volume]` arrays. `time` is the bar's st
 
 `{"query":"eur"}` → `{"symbols":[{"ticker":"EURUSD","description":"Euro vs US Dollar","type":"forex"}]}`
 
-The query never holds the exchange: the app asks each plugin once and keeps the rows of the exchange the user typed (`NSE:REL`).
+The query never holds the exchange: the app asks each plugin once and keeps the rows of the exchange the user typed (`NSE:REL`). The request may carry a `type` (the dialog's Type chip code — `EQ`, `FUT`, `CE`, `PE`, `IX`, or the row kinds below): a plugin that knows its rows' kinds filters on it; one that cannot may ignore it.
 
-Return at most 50 matches; an empty query may return the most used symbols. `type` is one of `stock`, `fund`, `index`, `forex`, `crypto`, `futures`, `cfd`, `bond`. It picks the search tab the row appears under.
+Return at most 50 matches; an empty query may return the most used symbols. `type` is one of `stock`, `fund`, `index`, `forex`, `crypto`, `futures`, `options`, `cfd`, `bond`. It picks the search tab the row appears under.
 
 ### `data.symbolInfo` (app → plugin, request)
 

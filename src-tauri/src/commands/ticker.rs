@@ -51,11 +51,10 @@ pub async fn search_tickers(
     query: String,
     type_filter: Option<String>,
 ) -> Result<Vec<SymbolSearchResult>, String> {
-    // The data plugins' symbols too, unless a security type is chosen (theirs have none).
-    if type_filter.is_some() {
-        return Ok(core::search_tickers(&provider, &query, type_filter.as_deref()).await?);
-    }
-    let (own, plugins) = tokio::join!(core::search_tickers(&provider, &query, None), plugin::search(&app, &query));
+    // The data plugins search too: they filter on `type_filter` themselves (their search rows
+    // name each row's type, so a plugin that cannot serve the chosen type returns nothing).
+    let (own, plugins) =
+        tokio::join!(core::search_tickers(&provider, &query, type_filter.as_deref()), plugin::search(&app, &query, type_filter.as_deref()));
     match own {
         Ok(mut rows) => {
             rows.extend(plugins);
