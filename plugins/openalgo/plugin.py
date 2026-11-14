@@ -623,8 +623,9 @@ class OpenAlgoSource:
         """A day window's bars. Deployments whose D endpoint answers only its last day (verified live: this one
         answers a single row for every window) get their days synthesized from the intraday bars it serves
         fully — hourly when the intervals table has one, else the finest minute table, chunked."""
-        # synthesizing across years would fetch tens of thousands of intraday bars (very slow); the deployment's
-        # intraday history only reaches back about a year anyway, so cap the synthesis window to that.
+        # A huge countBack (e.g. 7560) makes both the D call and any synthesis
+        # slow; cap the window to a year up front — the deployment only serves
+        # about a year of intraday history anyway.
         if to - frm > 365 * 86400:
             frm = to - 365 * 86400
         bars = self._window(exchange, symbol, interval, True, frm, to, count_back, 0)
@@ -819,9 +820,7 @@ class OpenAlgoSource:
             raise PluginError("No such position")
         exchange, _, symbol = pos["ticker"].partition(":")
         if qty is None:  # the whole position: the source's own close
-            self._post("/api/v1/closeposition", {"symbol": symbol, "exchange": exchange,
-                                                 "product": (self.settings.get("product", "MIS").upper() or "MIS"),
-                                                 "strategy": self.settings.get("strategy") or "OpenTrader"})
+            self._post("/api/v1/closeposition", {"strategy": self.settings.get("strategy") or "OpenTrader"})
             events = [{"kind": "placed", "ticker": pos["ticker"], "side": "sell" if pos["side"] == "buy" else "buy",
                        "type": "market", "qty": pos["qty"]}]
         else:  # a part of it: a market order the other way (its answer carries the events)
