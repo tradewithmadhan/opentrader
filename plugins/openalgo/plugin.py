@@ -303,7 +303,7 @@ class Instruments:
 
 
 class OpenAlgoSource:
-    POLL_EVERY = 2.0  # the books refresh at most this often (the WebSocket moves the prices between polls)
+    POLL_EVERY = 60.0  # the books refresh on order_update pushes; this is only a slow fallback
 
     def __init__(self):
         self.plugin = None  # set by Plugin: the connection the log lines go through
@@ -953,7 +953,7 @@ class OpenAlgoSource:
         with self.lock:
             due = now - self.last_poll >= self.POLL_EVERY
             work = bool(self.positions) or any(o.get("status") in ("placing", "working") for o in self.orders)
-        if not (due and (work or now - self.last_poll > 15)):
+        if not (due and (work or now - self.last_poll > 60)):
             return []
         self.last_poll = now
         try:
@@ -1175,6 +1175,11 @@ class OpenAlgoSource:
         send_text(json.dumps({"action": "authenticate", "api_key": key}))
         if DEBUG:
             print("[ws >] authenticate (key redacted)", flush=True)
+        # Order updates (fills, cancels, rejections) are pushed on the same socket
+        # after authenticating — account-level, no symbols involved.
+        send_text(json.dumps({"action": "subscribe_orders", "request_id": "orders-1"}))
+        if DEBUG:
+            print("[ws >] subscribe_orders", flush=True)
         last_ping = 0.0
         told_empty = False
         buffer = b""
@@ -1261,7 +1266,13 @@ class OpenAlgoSource:
             message = json.loads(data.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             return
-        if not isinstance(message, dict) or message.get("type") != "market_data":
+        if not isinstance(message, dict):
+            return
+        # Order updates arrive on the same socket (account-level push).
+        if message.get("type") == "order_update":
+            self._handle_order_update(message)
+            return
+        if message.get("type") != "market_data":
             return  # an authenticate answer, an error, a heartbeat: not a price
         r = message.get("data")
         if not isinstance(r, dict):
@@ -1308,7 +1319,62 @@ class OpenAlgoSource:
                 bar[2], bar[3], bar[4], bar[5] = (max(bar[2], quote["high"] or price), min(bar[3], quote["low"] or price),
                                                   price, quote["volume"] or bar[5] or 0)
 
+    def _handle_order_update(self, message):
+        """An order transition pushed by the broker (fill, cancel, reject). Refresh the
+        books and tell the app, instead of waiting for the next REST poll."""
+        order_id = str(message.get("orderid") or message.get("order_id") or "")
+        status_raw = str(message.get("order_status") or "").lower().replace(" ", "").replace("-", "")
+        STATUS_MAP = {
+            "complete": "filled", "filled": "filled",
+            "cancelled": "cancelled", "canceled": "cancelled",
+            "rejected": "rejected",
+            "open": "working", "triggerpending": "working",
+            "pending": "working",
+        }
+        new_status = STATUS_MAP.get(status_raw)
+        filled = num(message.get("filled_quantity") or message.get("filled_qty"))
+        avg = num(message.get("average_price") or message.get("avg_price"))
+        reason = str(message.get("rejection_reason") or "")
+        events = []
+        with self.lock:
+            order = next((o for o in self.orders if o["id"] == order_id), None)
+            if order is not None:
+                was = order.get("status")
+                if new_status:
+                    order["status"] = new_status
+                if filled is not None:
+                    order["filledQty"] = filled
+                if avg is not None and avg > 0:
+                    order["avgFillPrice"] = avg
+                order["updatedMs"] = int(time.time() * 1000)
+                if was in (None, "placing") and order["status"] == "filled":
+                    events.append({"kind": "executed", "ticker": order["ticker"], "side": order["side"],
+                                   "type": order["type"], "qty": order["qty"], "price": order.get("avgFillPrice")})
+                elif was in (None, "placing", "working") and order["status"] == "cancelled":
+                    events.append({"kind": "cancelled", "ticker": order["ticker"], "side": order["side"],
+                                   "type": order["type"], "qty": order["qty"]})
+                elif was in (None, "placing", "working") and order["status"] == "rejected":
+                    events.append({"kind": "rejected", "ticker": order["ticker"], "side": order["side"],
+                                   "type": order["type"], "qty": order["qty"], "message": reason})
+        # refresh the books so positions/funds follow the fill
+        try:
+            self._refresh_books()
+        except PluginError:
+            pass
+        if self.plugin is not None:
+            try:
+                self.plugin.events(events)
+                self.plugin.push_state()
+            except Exception:  # noqa: BLE001
+                pass
+        self.log("order_update %s -> %s" % (order_id, new_status or status_raw))
+
     def _subscribed_match(self, bare):
+        """The subscribed whole symbol a bare echo belongs to, when exactly one matches (the provider's
+        identity rule: an ambiguous bare echo resolves to nothing rather than to the wrong listing)."""
+        with self.lock:
+            matches = [t for t in self.subscribed if t.split(":", 1)[-1] == bare]
+        return matches[0] if len(matches) == 1 else None
         """The subscribed whole symbol a bare echo belongs to, when exactly one matches (the provider's
         identity rule: an ambiguous bare echo resolves to nothing rather than to the wrong listing)."""
         with self.lock:
