@@ -533,6 +533,73 @@ fn history_window<'a>(
     })
 }
 
+/// Synthesize daily bars from intraday bars when the broker's D endpoint answers
+/// only its last day (verified live on this deployment). Hourly is preferred
+/// (it serves a full year in one request); the finest minute table is the
+/// fallback, chunked by fetch_history. `None` when nothing can be synthesized.
+async fn synthesize_daily_from_intraday(
+    base: &str,
+    key: &str,
+    ticker: &str,
+    exchange: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Option<Vec<Candle>> {
+    let minute_tab = minute_table();
+    // Prefer the 1-hour token (plugin: tables["hours"].get(1)).
+    let token = minute_tab
+        .get(&60)
+        .cloned()
+        .or_else(|| minute_tab.keys().min().map(|k| minute_tab[k].clone()))?;
+    // Cap the synthesis window: the deployment only serves about a year of
+    // intraday history, and fetching decades would be unusably slow.
+    let from = if (to - from).num_days() > 365 {
+        to.checked_sub_days(Days::new(365)).unwrap_or(from)
+    } else {
+        from
+    };
+    let intraday = fetch_history(base, key, ticker, exchange, &token, from, to).await.ok()?;
+    if intraday.is_empty() {
+        return None;
+    }
+    Some(aggregate_to_daily(intraday))
+}
+
+/// Fold intraday bars into one bar per IST day: open the first, close the last,
+/// high/low the extremes, volume summed. The timestamp is the first bar's;
+/// snap_day_bar (applied by daily_aggs) moves it to IST midnight.
+fn aggregate_to_daily(bars: Vec<Candle>) -> Vec<Candle> {
+    let mut groups: Vec<(NaiveDate, Vec<Candle>)> = Vec::new();
+    for b in bars {
+        let ts = b.time as i64;
+        let day = chrono::DateTime::from_timestamp(ts + IST_OFFSET_SEC, 0)
+            .map(|d| d.date_naive())
+            .unwrap_or_else(|| Utc::now().date_naive());
+        if let Some(last) = groups.last_mut() {
+            if last.0 == day {
+                last.1.push(b);
+                continue;
+            }
+        }
+        groups.push((day, vec![b]));
+    }
+    groups
+        .into_iter()
+        .map(|(_, bs)| {
+            let first = &bs[0];
+            let last = &bs[bs.len() - 1];
+            Candle {
+                time: first.time,
+                open: first.open,
+                high: bs.iter().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max),
+                low: bs.iter().map(|b| b.low).fold(f64::INFINITY, f64::min),
+                close: last.close,
+                volume: bs.iter().map(|b| b.volume).sum(),
+            }
+        })
+        .collect()
+}
+
 /// History of one interval over a date range, chunked and sorted. Range caps
 /// mirror the source: daily and coarser up to a year per call, seconds 3 days,
 /// the rest 30 days.
@@ -552,14 +619,15 @@ async fn fetch_history(
     } else {
         30
     };
+    // Make sure the interval table (and its 1h token for daily synthesis) is loaded.
+    fetch_intervals(base, key).await;
     let mut out = Vec::new();
     for (a, b) in chunk_ranges(from, to, max_days) {
-        let bars = match history_window(base, key, ticker, exchange, oa_interval, a, b, 0).await {
+        let is_daily = matches!(oa_interval, "D" | "W" | "M");
+        let window_days = (b - a).num_days();
+        let d_bars = match history_window(base, key, ticker, exchange, oa_interval, a, b, 0).await {
             Ok(bars) => bars,
             Err(e) => {
-                // A failed window fails the whole fetch and the chart shows
-                // nothing — say what the server answered (its own message;
-                // the payload carries the key and is never printed).
                 eprintln!(
                     "[openalgo] history {}:{} {} {}..{} failed: {e:#}",
                     exchange, ticker, oa_interval, fmt_date(a), fmt_date(b)
@@ -567,16 +635,27 @@ async fn fetch_history(
                 return Err(e);
             }
         };
-        let raw = bars.len();
-        let mut kept = 0usize;
-        for bar in bars {
-            if let Some(c) = to_candle(bar) {
-                out.push(c);
-                kept += 1;
+        let raw = d_bars.len();
+        // The broker's D endpoint answers only its last day for every window
+        // (verified live on this deployment). Synthesize the daily bars from
+        // the intraday bars it serves fully — hourly when the intervals table
+        // has one, else the finest minute table. The real day bar is kept when
+        // synthesis fails or there is nothing to synthesize from.
+        let chunk_candles: Vec<Candle> = if is_daily && d_bars.len() <= 1 && window_days > 3 {
+            match synthesize_daily_from_intraday(base, key, ticker, exchange, a, b).await {
+                Some(candles) if !candles.is_empty() => candles,
+                _ => {
+                    eprintln!(
+                        "[openalgo] history {}:{} D {}..{}: synthesizing failed; keeping the day bar",
+                        exchange, ticker, fmt_date(a), fmt_date(b)
+                    );
+                    d_bars.into_iter().filter_map(to_candle).collect()
+                }
             }
-        }
-        // A silent empty chart: the request succeeded but nothing became
-        // candles. One line, only when it matters.
+        } else {
+            d_bars.into_iter().filter_map(to_candle).collect()
+        };
+        let kept = chunk_candles.len();
         if raw == 0 {
             eprintln!(
                 "[openalgo] history {}:{} {} {}..{}: empty (no data)",
@@ -589,6 +668,7 @@ async fn fetch_history(
                 raw, kept
             );
         }
+        out.extend(chunk_candles);
     }
     out.sort_by(|a, b| a.time.total_cmp(&b.time));
     Ok(out)
