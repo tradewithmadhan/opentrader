@@ -369,8 +369,9 @@ class OpenAlgoSource:
         return self.settings.get("apiKey", "")
 
     # ── REST ──
-    def _post(self, path, body):
-        """One OpenAlgo /api/v1 call; returns its `data`, raises PluginError with the message the user reads."""
+    def _post(self, path, body, whole=False):
+        """One OpenAlgo /api/v1 call; returns its `data` — or the whole answer with `whole`
+        (placeorder's order id sits at the top level, verified live)."""
         base, key = self._base(), self._key()
         if not base or not key:
             raise PluginError("The OpenAlgo plugin has no API URL or key yet — fill them in Settings > Plugins")
@@ -394,7 +395,7 @@ class OpenAlgoSource:
         if str(answer.get("status", "")).lower() not in ("success", "ok"):
             raise PluginError(f"OpenAlgo: {answer.get('message') or 'the request failed'}")
         self.rest_ok = True
-        return answer.get("data")
+        return answer if whole else answer.get("data")
 
     def _fetch_instruments(self, exchange):
         """The master of one segment, straight from the source."""
@@ -752,9 +753,15 @@ class OpenAlgoSource:
             "quantity": int(qty),
             "price": num(p.get("limitPrice")) or 0,
             "trigger_price": num(p.get("stopPrice")) or 0,
+            # the API wants these two even though they say nothing new here: action repeats the side
+            # and strategy is a free tag (verified live — without them placeorder answers a field error)
+            "action": side.upper(),
+            "strategy": self.settings.get("strategy") or "OpenTrader",
         }
-        answer = self._post("/api/v1/placeorder", body)
-        order_id = str(first_of(answer if isinstance(answer, dict) else {}, "orderid", "order_id") or "")
+        answer = self._post("/api/v1/placeorder", body, whole=True) or {}
+        data = answer.get("data")
+        order_id = str(first_of(answer, "orderid", "order_id")
+                       or first_of(data if isinstance(data, dict) else {}, "orderid", "order_id") or "")
         if not order_id:
             raise PluginError("OpenAlgo accepted the order but gave no order id")
         now_ms = int(time.time() * 1000)
@@ -779,6 +786,10 @@ class OpenAlgoSource:
             "quantity": int(order["qty"]),
             "price": num(p.get("limitPrice")) or num(order.get("limitPrice")) or 0,
             "trigger_price": num(p.get("stopPrice")) or num(order.get("stopPrice")) or 0,
+            "action": order["side"].upper(),
+            "strategy": self.settings.get("strategy") or "OpenTrader",
+            # the API wants the field even though the plugin never sets one (verified live)
+            "disclosed_quantity": 0,
         }
         self._post("/api/v1/modifyorder", body)
         with self.lock:
@@ -794,7 +805,7 @@ class OpenAlgoSource:
             order = next((o for o in self.orders if o["id"] == order_id), None)
         if not order or order["status"] not in ("placing", "working"):
             raise PluginError("The order is no longer working")
-        self._post("/api/v1/cancelorder", {"orderid": order_id})
+        self._post("/api/v1/cancelorder", {"orderid": order_id, "strategy": self.settings.get("strategy") or "OpenTrader"})
         self.force_poll()
         return [{"kind": "cancelled", "ticker": order["ticker"], "side": order["side"], "type": order["type"], "qty": order["qty"]}]
 
@@ -806,7 +817,8 @@ class OpenAlgoSource:
         exchange, _, symbol = pos["ticker"].partition(":")
         if qty is None:  # the whole position: the source's own close
             self._post("/api/v1/closeposition", {"symbol": symbol, "exchange": exchange,
-                                                 "product": (self.settings.get("product", "MIS").upper() or "MIS")})
+                                                 "product": (self.settings.get("product", "MIS").upper() or "MIS"),
+                                                 "strategy": self.settings.get("strategy") or "OpenTrader"})
             events = [{"kind": "placed", "ticker": pos["ticker"], "side": "sell" if pos["side"] == "buy" else "buy",
                        "type": "market", "qty": pos["qty"]}]
         else:  # a part of it: a market order the other way (its answer carries the events)
