@@ -322,6 +322,7 @@ class OpenAlgoSource:
         self.ws_generation = 0
         self.ws_subscribed = set()  # what the stream last subscribed (compared with `subscribed`)
         self.subscribed = set()
+        self.last_rest_poll = 0.0  # REST quote polling cadence (the WebSocket is the primary source)
         self.ws_shape_warned = False  # the "no price read" warn says its piece only once
         # the account, as the books last answered
         self.funds = None
@@ -750,6 +751,40 @@ class OpenAlgoSource:
         return bar
 
     # ── broker ──
+    def poll_quotes_rest(self):
+        """Refresh the quote cache from REST /quotes (the WebSocket is primary; this covers
+        non-market hours and any gap in the stream, mirroring the built-in provider's poller)."""
+        for ticker in list(self.subscribed):
+            if not self.known(ticker):
+                continue
+            exchange, _, symbol = ticker.partition(":")
+            try:
+                answer = self._post("/api/v1/quotes", {"symbol": symbol, "exchange": exchange})
+            except PluginError:
+                continue
+            if not isinstance(answer, dict):
+                continue
+            price = num(answer.get("ltp"))
+            if price is None or price <= 0:
+                continue
+            with self.lock:
+                q = self.quotes.get(ticker) or {}
+                q["price"] = price
+                if answer.get("prev_close") is not None:
+                    q["prevClose"] = num(answer.get("prev_close"))
+                elif answer.get("close") is not None:
+                    q["prevClose"] = num(answer.get("close"))
+                if answer.get("open") is not None:
+                    q["open"] = num(answer.get("open"))
+                if answer.get("high") is not None:
+                    q["high"] = num(answer.get("high"))
+                if answer.get("low") is not None:
+                    q["low"] = num(answer.get("low"))
+                if answer.get("volume") is not None:
+                    q["volume"] = num(answer.get("volume"))
+                self.quotes[ticker] = q
+
+
     def resolve_symbol(self, symbol, ticker):
         """The plugin's ticker of a chart symbol, or None. Its own symbols trade as they are."""
         return symbol if self.known(symbol) else None
@@ -1389,6 +1424,12 @@ class Plugin:
                         q = self.source.quote(t)
                         if q:
                             quotes.append(q)
+                # REST quote poll every 5 s (the WebSocket is primary; this covers
+                # non-market hours and stream gaps, mirroring the built-in provider).
+                now = time.time()
+                if now - self.source.last_rest_poll >= 5.0:
+                    self.source.last_rest_poll = now
+                    self.source.poll_quotes_rest()
                 events = self.source.on_tick()
                 for q in quotes:
                     if q["ticker"] in self.tickers:
