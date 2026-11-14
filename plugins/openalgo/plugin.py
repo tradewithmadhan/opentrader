@@ -435,17 +435,18 @@ class OpenAlgoSource:
         self.log(f"instruments {exchange}: {len(rows)} rows")
         return rows
 
+    def _alias_ticker(self, ticker):
+        """Stale index entries ('NSE:BANKNIFTY') are not real NSE/BSE symbols; map them
+        to their *_INDEX venue so REST quotes still work (WS ticks are dropped for them)."""
+        exchange, sep, symbol = ticker.partition(":")
+        if sep and exchange in ("NSE", "BSE") and symbol.upper() in _INDEX_NAMES:
+            return "%s_INDEX:%s" % (exchange, symbol)
+        return ticker
+
     def known(self, ticker):
         """True when `ticker` ("NSE:SBIN-EQ") is one of the plugin's symbols."""
         exchange, sep, symbol = ticker.partition(":")
-        if not (sep and symbol) or exchange not in self.exchanges:
-            return False
-        # stale index entries ("NSE:BANKNIFTY") are not real NSE/BSE symbols and must not be
-        # subscribed to the broker — they break the whole subscribe frame and take every
-        # other symbol's ticks down with them
-        if exchange in ("NSE", "BSE") and symbol.upper() in _INDEX_NAMES:
-            return False
-        return True
+        return bool(sep and symbol) and exchange in self.exchanges
 
     def tick(self, ticker):
         """One price step of `ticker`, from the master's tick size (the ticket's bid/ask spread)."""
@@ -781,13 +782,17 @@ class OpenAlgoSource:
         return bar
 
     # ── broker ──
-    def poll_quotes_rest(self):
+    def poll_quotes_rest(self, tickers=None):
         """Refresh the quote cache from REST /quotes (the WebSocket is primary; this covers
-        non-market hours and any gap in the stream, mirroring the built-in provider's poller)."""
-        for ticker in list(self.subscribed):
-            if not self.known(ticker):
-                continue
-            exchange, _, symbol = ticker.partition(":")
+        non-market hours and any gap in the stream, mirroring the built-in provider's poller).
+        `tickers` are the app's subscribed symbols; stale index entries are aliased to their
+        *_INDEX venue for the REST call but stored under the original ticker."""
+        to_poll = set(self.subscribed)
+        if tickers:
+            to_poll |= set(tickers)
+        for ticker in list(to_poll):
+            broker_sym = self._alias_ticker(ticker)
+            exchange, _, symbol = broker_sym.partition(":")
             try:
                 answer = self._post("/api/v1/quotes", {"symbol": symbol, "exchange": exchange})
             except PluginError:
@@ -1429,20 +1434,23 @@ class Plugin:
             self.source.configure(p.get("settings", {}))
             self.forward_subscription()
         elif method == "data.subscribe":
-            self.tickers = {t for t in p.get("tickers", []) if self.source.known(t)}
-            dropped = len(p.get("tickers", [])) - len(self.tickers)
-            if dropped:
-                self.log(f"data.subscribe: dropped {dropped} stale symbol(s) (e.g. NSE:BANKNIFTY -> use NSE_INDEX:BANKNIFTY)")
-            self.log(f"data.subscribe: {len(self.tickers)} tickers")
+            self.tickers = set(p.get("tickers", []))
+            stale = [t for t in self.tickers if self.source._alias_ticker(t) != t]
+            if stale:
+                self.log("data.subscribe: %d stale symbol(s) polled via REST (use NSE_INDEX:... for live WS ticks): %s"
+                         % (len(stale), ", ".join(stale[:5])))
+            self.log("data.subscribe: %d tickers" % len(self.tickers))
             self.forward_subscription()
         elif method == "broker.watchQuote":
-            self.watched = {t for t in p.get("tickers", []) if self.source.known(t)}
-            self.log(f"broker.watchQuote: {len(self.watched)} tickers")
+            self.watched = set(p.get("tickers", []))
+            self.log("broker.watchQuote: %d tickers" % len(self.watched))
             self.forward_subscription()
 
     def forward_subscription(self):
-        """The stream's subscription is the union of the data symbols and the ticket's."""
-        self.source.subscribed = self.tickers | self.watched
+        """The stream's subscription is the union of the data symbols and the ticket's,
+        minus stale index entries (those are polled via REST instead)."""
+        ws_tickers = {t for t in (self.tickers | self.watched) if self.source._alias_ticker(t) == t}
+        self.source.subscribed = ws_tickers
 
     # ── streaming: live prices, the ticket's bid / ask, the books ──
     def stream(self):
@@ -1459,7 +1467,7 @@ class Plugin:
                 now = time.time()
                 if now - self.source.last_rest_poll >= 5.0:
                     self.source.last_rest_poll = now
-                    self.source.poll_quotes_rest()
+                    self.source.poll_quotes_rest(self.tickers | self.watched)
                 events = self.source.on_tick()
                 for q in quotes:
                     if q["ticker"] in self.tickers:
