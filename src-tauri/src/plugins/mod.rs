@@ -375,11 +375,13 @@ fn start_process(app: &AppHandle, m: &Manifest, entry: &str, args: &[String], po
     let (tx, mut stop) = oneshot::channel::<()>();
     app.state::<Plugins>().processes.locked().insert(m.id.clone(), tx);
     // Development: the folder is watched and saving the plugin's source restarts it, so the edit loop is
-    // just save. A release build watches nothing (the channel then has a sender and never a signal).
+    // just save. A release build watches nothing: no poller, no sender, and the select arm below is off —
+    // the channel must not be left sender-less, or `changed()` answers at once and the program restarts
+    // in a loop (verified live).
+    let watching = cfg!(debug_assertions);
     let (edit_tx, mut edit_rx) = tokio::sync::watch::channel(0u64);
-    let _edit_tx = edit_tx;
-    if cfg!(debug_assertions) {
-        let (dir2, exe2, edit_tx) = (dir.clone(), exe.clone(), _edit_tx.clone());
+    if watching {
+        let (dir2, exe2, edit_tx) = (dir.clone(), exe.clone(), edit_tx);
         tauri::async_runtime::spawn(async move {
             let mut last = source_stamp(&dir2, &exe2);
             loop {
@@ -450,7 +452,7 @@ fn start_process(app: &AppHandle, m: &Manifest, entry: &str, args: &[String], po
                             log(&app, &id, "Stopped");
                             true
                         }
-                        _ = edit_rx.changed() => {
+                        _ = edit_rx.changed(), if watching => {
                             // A source file was saved: drop the old code, run again with what is on disk.
                             if let Some(pid) = child.id() {
                                 kill_tree(pid);
