@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.2"
+PLUGIN_VERSION = "0.1.3"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -758,17 +758,47 @@ class OpenAlgoSource:
     def _get_json(self, url, timeout=8):
         """One GET that must answer 2xx JSON; raises PluginError on an HTTP answer and OSError when
         the host cannot be reached (the caller decides what a dead host costs the request). The
-        public profile API 403s unknown clients — a browser User-Agent goes along. The timeout is
-        short so a request answers inside the app's window even when the host's IPv6 — the address
-        resolution offers first — black-holes the connect before the IPv4 one succeeds."""
-        try:
-            request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(request, timeout=timeout) as r:
-                return json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            raise PluginError(f"HTTP {e.code}") from e
-        except ValueError as e:
-            raise PluginError(f"bad answer ({e})") from e
+        public profile API 403s unknown clients — a browser User-Agent goes along. Hand-rolled
+        (HTTP/1.0: no chunked bodies, no keep-alive) because the resolved addresses are tried by
+        hand, IPv4 first: the API answers on two IPv6 addresses that come first in the DNS order,
+        and a broken IPv6 path black-holes each connect until the timeout — the library's order
+        made every first lookup to a new symbol cost two dead attempts (~16 s) and miss the app's
+        request window."""
+        import ssl
+        parts = urllib.parse.urlsplit(url)
+        host, target = parts.hostname, parts.path or "/"
+        if parts.query:
+            target += f"?{parts.query}"
+        tls = ssl.create_default_context()
+        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        attempts = [i for i in infos if i[0] == socket.AF_INET] + [i for i in infos if i[0] != socket.AF_INET]
+        answer, last = None, None
+        for family, _, _, _, addr in attempts:
+            try:
+                with socket.socket(family, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(timeout)
+                    sock.connect(addr)
+                    with tls.wrap_socket(sock, server_hostname=host) as secure:
+                        secure.sendall((f"GET {target} HTTP/1.0\r\nHost: {host}\r\n"
+                                        "User-Agent: Mozilla/5.0\r\nAccept: application/json\r\n\r\n").encode("ascii"))
+                        answer = b""
+                        while True:
+                            chunk = secure.recv(65536)
+                            if not chunk:
+                                break
+                            answer += chunk
+                break
+            except OSError as e:
+                last = e  # this address is dead (a black-holed IPv6, a refused IPv4): try the next
+        if answer is None:
+            raise last if last is not None else PluginError("no address to connect to")
+        head, _, body = answer.partition(b"\r\n\r\n")
+        if not head.startswith(b"HTTP/"):
+            raise PluginError("bad answer")
+        status = int(head.split(b" ", 2)[1])
+        if status != 200:
+            raise PluginError(f"HTTP {status}")
+        return json.loads(body.decode("utf-8"))
 
     def _calendar_session(self, exchange):
         """The venue's session from the broker calendar (the built-in provider's rule): the standard
