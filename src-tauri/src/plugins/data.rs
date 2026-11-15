@@ -35,6 +35,13 @@ const MAX_BARS: u64 = 50_000;
 pub struct Info {
     #[serde(default)]
     pub description: String,
+    /// The display name (`name`) when the plugin says one separately from
+    /// `description` (a host that only reads `description` still shows it).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The dialog's longer line (`longDescription`): broker symbol, expiry, lot.
+    #[serde(default)]
+    pub long_description: Option<String>,
     /// `syminfo.type`: forex, crypto, stock, index, futures, cfd, fund, bond…
     #[serde(default, rename = "type")]
     pub kind: String,
@@ -48,6 +55,18 @@ pub struct Info {
     pub extended: Option<String>,
     #[serde(default)]
     pub holidays: String,
+    /// Special sessions, the app's corrections grammar ("HHMM-HHMM:YYYYMMDD,…;…").
+    #[serde(default)]
+    pub corrections: String,
+    /// The company profile (the plugin's own enrichment), when it says.
+    #[serde(default)]
+    pub sector: Option<String>,
+    #[serde(default)]
+    pub industry: Option<String>,
+    /// A logo URL (`icon`): the plugin serves equities only, and the logos host
+    /// is public, so the webview may read the bare URL.
+    #[serde(default)]
+    pub icon: Option<String>,
     /// The profit of a 1-point move in one unit (the plugin's `pointValue`): the fork's
     /// OpenAlgo plugin maps its contract's lot size here, like the built-in provider does.
     #[serde(default)]
@@ -189,18 +208,37 @@ pub async fn info(app: &AppHandle, r: &Route) -> Result<Arc<Info>, String> {
     Ok(info)
 }
 
+/// The subsessions of a plugin's `session`/`extended` pair: the regular one, plus the extended,
+/// premarket and postmarket when the day is wider — the bands are derived from `extended` the way
+/// the built-in provider builds them, and only when both specs are plain "HHMM-HHMM" (a day-coded
+/// spec cannot be split into halves).
+fn session_subs(session: &str, extended: Option<&String>) -> Vec<Subsession> {
+    let mut subsessions = vec![Subsession::new("regular", "Regular Trading Hours", session)];
+    let Some(ext) = extended.filter(|e| **e != session) else { return subsessions };
+    subsessions.push(Subsession::new("extended", "Extended Trading Hours", ext));
+    let plain = |s: &str| {
+        s.len() == 9 && s.as_bytes()[4] == b'-'
+            && (s[..4].bytes().chain(s[5..].bytes()).all(|c| c.is_ascii_digit()))
+    };
+    if plain(ext) && plain(session) {
+        if ext[..4] != session[..4] {
+            subsessions.push(Subsession::new("premarket", "Premarket", &format!("{}-{}", &ext[..4], &session[..4])));
+        }
+        if session[5..] != ext[5..] {
+            subsessions.push(Subsession::new("postmarket", "Postmarket", &format!("{}-{}", &session[5..], &ext[5..])));
+        }
+    }
+    subsessions
+}
+
 pub async fn session(app: &AppHandle, r: &Route) -> Result<SymbolSession, String> {
     let i = info(app, r).await?;
-    let mut subsessions = vec![Subsession::new("regular", "Regular Trading Hours", &i.session)];
-    if let Some(ext) = i.extended.as_ref().filter(|e| **e != i.session) {
-        subsessions.push(Subsession::new("extended", "Extended Trading Hours", ext));
-    }
     Ok(SymbolSession {
         timezone: i.timezone.clone(),
         session: i.session.clone(),
-        subsessions,
+        subsessions: session_subs(&i.session, i.extended.as_ref()),
         holidays: i.holidays.clone(),
-        corrections: String::new(),
+        corrections: i.corrections.clone(),
         pricescale: i.pricescale,
         minmov: i.minmov.max(1),
         variable_tick_size: String::new(),
@@ -210,21 +248,25 @@ pub async fn session(app: &AppHandle, r: &Route) -> Result<SymbolSession, String
 pub async fn ticker_info(app: &AppHandle, r: &Route) -> Result<TickerInfo, String> {
     let i = info(app, r).await?;
     let exchange = r.symbol.split(':').next().unwrap_or_default().to_string();
+    // The plugin says the display name (`name`) and the dialog line (`longDescription`)
+    // separately; a plugin that only fills `description` keeps it as the name.
+    let name = i.name.clone().filter(|n| !n.is_empty()).or_else(|| Some(i.description.clone()).filter(|d| !d.is_empty()));
+    let description = i.long_description.clone().filter(|d| !d.is_empty());
     Ok(TickerInfo {
         ticker: r.ticker.clone(),
-        name: Some(i.description.clone()).filter(|d| !d.is_empty()),
+        name,
         exchange: Some(exchange),
-        industry: None,
-        sector: None,
+        industry: i.industry.clone().filter(|v| !v.is_empty()),
+        sector: i.sector.clone().filter(|v| !v.is_empty()),
         currency: i.currency.clone(),
-        description: None,
+        description,
         homepage_url: None,
         total_employees: None,
         market_cap: None,
         figi: None,
         symbol_type: Some(i.kind.clone()).filter(|k| !k.is_empty()),
         security_type: Some(i.kind.clone()).filter(|k| !k.is_empty()),
-        icon_url: None,
+        icon_url: i.icon.clone().filter(|u| !u.is_empty()),
         // The plugin's `pointValue` (its lot size); None when it does not say.
         point_value: i.point_value,
     })
@@ -680,5 +722,63 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bare.point_value, None);
+    }
+
+    #[test]
+    fn symbol_info_reads_the_enrichment_fields() {
+        // The OpenAlgo plugin's calendar session, correction grammar and company profile
+        // ride in alongside; a plugin that does not say (the fields are defaulted) still parses.
+        let info: Info = serde_json::from_str(
+            r#"{"timezone":"Asia/Kolkata","session":"0915-1530","pricescale":10,
+                "name":"Tata Consultancy Services","longDescription":"TCS-EQ",
+                "holidays":"20260126","corrections":"0900-1530:20260101",
+                "sector":"Information Technology","industry":"IT Services",
+                "icon":"https://api.dharun.dev/v1/logos/NSE%3ATCS-EQ"}"#,
+        )
+        .unwrap();
+        assert_eq!(info.name.as_deref(), Some("Tata Consultancy Services"));
+        assert_eq!(info.long_description.as_deref(), Some("TCS-EQ"));
+        assert_eq!(info.corrections, "0900-1530:20260101");
+        assert_eq!(info.sector.as_deref(), Some("Information Technology"));
+        assert_eq!(info.industry.as_deref(), Some("IT Services"));
+        assert!(info.icon.as_deref().unwrap().starts_with("https://"));
+        let bare: Info = serde_json::from_str(
+            r#"{"timezone":"Asia/Kolkata","session":"0915-1530","pricescale":10}"#,
+        )
+        .unwrap();
+        assert_eq!(bare.name, None);
+        assert_eq!(bare.long_description, None);
+        assert_eq!(bare.corrections, "");
+        assert_eq!(bare.sector, None);
+        assert_eq!(bare.industry, None);
+        assert_eq!(bare.icon, None);
+    }
+
+    #[test]
+    fn session_builds_the_pre_post_bands_from_the_traded_day() {
+        let subs = |s: &[Subsession]| s.iter().map(|x| format!("{}={}", x.id, x.session)).collect::<Vec<_>>();
+        // NSE: 15 minutes before the open, 30 after the close (the plugin's extended day).
+        let ext = "0900-1600".to_string();
+        assert_eq!(
+            subs(&session_subs("0915-1530", Some(&ext))),
+            subs(&[
+                Subsession::new("regular", "Regular Trading Hours", "0915-1530"),
+                Subsession::new("extended", "Extended Trading Hours", "0900-1600"),
+                Subsession::new("premarket", "Premarket", "0900-0915"),
+                Subsession::new("postmarket", "Postmarket", "1530-1600"),
+            ]),
+        );
+        // Bands of zero read as the regular day: no extended subsessions at all.
+        assert_eq!(session_subs("0900-2330", Some(&"0900-2330".to_string())).len(), 1);
+        assert_eq!(session_subs("0915-1530", None).len(), 1);
+        // A day-coded spec cannot be split into halves — the extended day stands alone.
+        let coded = "0915-1530:12345".to_string();
+        assert_eq!(
+            subs(&session_subs("0915-1530", Some(&coded))),
+            subs(&[
+                Subsession::new("regular", "Regular Trading Hours", "0915-1530"),
+                Subsession::new("extended", "Extended Trading Hours", "0915-1530:12345"),
+            ]),
+        );
     }
 }

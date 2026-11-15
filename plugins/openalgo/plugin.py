@@ -47,6 +47,24 @@ def ist_date(ts):
     return datetime.fromtimestamp(ts, TZ_IST).strftime("%Y-%m-%d")
 
 
+def calendar_exchange(prefix):
+    """Our venue prefix → the exchange code the calendar rows name (index venues follow their
+    cash market: the /market/holidays rows list NSE, not NSE_INDEX)."""
+    base = prefix.strip().upper()
+    return base[:-6] if base.endswith("_INDEX") and len(base) > 6 else (base or "NSE")
+
+
+def ms_to_hhmm(ms):
+    """Epoch milliseconds as the exchange's "HHMM" in IST; empty when the field is missing."""
+    try:
+        ms = float(ms)
+    except (TypeError, ValueError):
+        return ""
+    if ms != ms or ms in (float("inf"), float("-inf")):
+        return ""
+    return datetime.fromtimestamp(ms / 1000, TZ_IST).strftime("%H%M")
+
+
 def in_market_hours():
     """Whether the Indian market can move right now: the pre-open and regular session on a weekday
     (IST). A holiday polls a few calls that answer stale quotes — harmless."""
@@ -106,8 +124,8 @@ class PluginError(Exception):
 #    /history call must not hold up the quote stream.
 # ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-# Standard regular session per exchange, in the market's clock (broker docs table). The plugin does not build a
-# full holiday calendar: bars show the trading days the history answers with.
+# Standard regular session per exchange, in the market's clock (broker docs table). The calendar
+# (holidays + timings) only overrides it; the static table is the last-resort answer.
 SESSIONS = {
     "CDS": "0900-1700",
     "BCD": "0900-1700",
@@ -115,6 +133,12 @@ SESSIONS = {
     # NSE, BSE, NFO, BFO, NCO, BCO and anything unlisted.
     "_": "0915-1530",
 }
+STD_SESSIONS = {  # open, close, pre minutes, post minutes — the built-in provider's bands (NSE pre-open 15m, post 30m)
+    "CDS": ("0900", "1700", 0, 0),
+    "BCD": ("0900", "1700", 0, 0),
+    "MCX": ("0900", "2330", 0, 0),
+}
+STD_DEFAULT = ("0915", "1530", 15, 30)
 
 # The app resolution → OpenAlgo interval, when /intervals says nothing (verified against a deployment).
 FALLBACK_MINUTES = {1: "1m", 3: "3m", 5: "5m", 10: "10m", 15: "15m", 20: "20m", 30: "30m", 60: "1h", 120: "2h"}
@@ -229,12 +253,23 @@ class Instruments:
                         self.unavailable.pop(exchange, None)
                         self.rows[exchange], self.day[exchange] = fetched, today
                         self.catalog = None  # the combined search catalog is stale
+                if fetched is not None:
+                    self._write_disk(exchange, today, fetched)  # a restart re-reads, no pull
             finally:
                 with self.lock:
                     self.loading.pop(exchange, None)
                 event.set()
             with self.lock:
                 return self.rows.get(exchange) or []
+
+    def landed(self, exchange):
+        """Whether today's master of a segment is in (memory or disk) — an empty landing counts:
+        a segment the deployment does not serve answers success with no rows (verified live)."""
+        today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
+        with self.lock:
+            if self.day.get(exchange) == today:
+                return True
+        return self._read_disk(exchange, today) is not None
 
     def rows_peek(self, exchange):
         """The rows already here (memory, or today's disk cache) — search never starts a pull or waits for one."""
@@ -337,7 +372,12 @@ class OpenAlgoSource:
         self.ws_shape_warned = False  # the "no price read" warn says its piece only once
         self.ws_quiet_warned = False  # the "connected but no tick" warn says its piece only once
         self._daily_cache = {}  # (exchange, symbol, interval, start date, end date) → a folded year of day bars
-        self._holidays = {}  # (exchange, year) → (IST day fetched, [YYYYMMDD closed days])
+        self._holiday_rows = {}  # year → (IST day fetched, the raw calendar rows of every exchange)
+        self._timings = {}  # date → (IST day fetched, [timing rows])
+        self._sessions = {}  # (calendar exchange, IST day) → the built session dict
+        self._calendar_failed = {}  # year → monotonic time of the last failed holidays fetch
+        self._symbol_rows = {}  # ticker → (IST day, the live /symbol row or None)
+        self._profiles = {}  # ticker → (IST day, the company profile or None)
         # the account, as the books last answered
         self.funds = None
         self.positions = []
@@ -389,6 +429,31 @@ class OpenAlgoSource:
 
     def _key(self):
         return self.settings.get("apiKey", "")
+
+    # ── day-stamped disk cache (the mirror of the built-in provider's daily files:
+    #    an app restart inside a day makes no network call for these) ──
+    def _daily_path(self, name):
+        return Path(local_app_data()) / "OpenTraderPlugins" / "openalgo-cache" / "daily" / f"{name}.json"
+
+    def _read_daily(self, name, today):
+        """The day-stamped file's data when it was pulled today, else None."""
+        try:
+            with open(self._daily_path(name), encoding="utf-8") as f:
+                file = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if isinstance(file, dict) and file.get("date") == today:
+            return file.get("data")
+        return None
+
+    def _write_daily(self, name, today, data):
+        try:
+            path = self._daily_path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"date": today, "data": data}, f)
+        except OSError:
+            pass
 
     # ── REST ──
     def _post(self, path, body, whole=False):
@@ -486,13 +551,18 @@ class OpenAlgoSource:
         match outranks a symbol match, then a name or broker-symbol match (the app provider's tiers), and the
         budget is spread over the exchanges round-robin — a broad query must not spend the whole budget on
         NSE's 10 000 rows and starve BSE or MCX. `type_filter` is the dialog's Type chip (EQ, FUT, CE, PE,
-        IX, …): only the rows of that kind answer. Only what is already here is searched: a segment still
-        loading joins the catalog when its pull lands."""
+        IX, …): only the rows of that kind answer. Until every configured segment's day-pull has landed
+        (memory or disk), the live /search answers instead — the cold-start window, the same rule the app
+        provider follows; a failed live call falls back to the rows already here."""
         q = query.strip().upper()
         prefix, _, rest = q.partition(":")
         if rest and (prefix in self.exchanges or prefix in INDEX_SEGMENTS.values()):
             q = rest.strip()  # "NSE:SBIN" searches for SBIN; the app filters the rows by its prefix
         want = FILTER_KINDS.get(str(type_filter or "").strip().upper())
+        if q and not all(self.instruments.landed(e) for e in self.instruments.master_exchanges(self.exchanges)):
+            live = self._live_search(q, want)
+            if live is not None:
+                return live
         if q:
             tiers = ({}, {}, {})  # exchange → [(symbol, ticker, kind, description)], per tier
             for symbol_up, name_up, br_up, ticker, kind, description in self.instruments.catalog_get(self.exchanges):
@@ -532,80 +602,273 @@ class OpenAlgoSource:
                         segs.remove(hits)
         return out
 
+    def _live_search(self, q, want):
+        """The live /search for the cold window (before the day's master lands), the app provider's
+        fallback: up to 500 rows back, mapped by the same kind/display shape the catalog uses, the
+        Type chip applied, 50 kept. None when the call fails — the caller serves the rows it has."""
+        try:
+            data = self._post("/api/v1/search", {"query": q})
+        except PluginError as e:
+            self.log(f"live search {q}: {e}; the landed rows serve", "warn")
+            return None
+        # `_post` already unwrapped the answer's `data`; a nested dict shape is accepted too.
+        rows = data if isinstance(data, list) else \
+            (data.get("rows") if isinstance(data, dict) else None)
+        if not isinstance(rows, list):
+            return None
+        out = []
+        for row in rows[:500]:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            exchange = str(row.get("exchange") or "").strip().upper()
+            # The live rows carry the ticker whole (verified) but a bare symbol + exchange
+            # field is accepted too — the same ticker either way.
+            ticker = symbol if ":" in symbol else (f"{exchange}:{symbol}" if exchange else symbol)
+            kind = self._kind_of(ticker.split(":", 1)[0], row)
+            if want and kind != want:
+                continue
+            out.append({"ticker": ticker, "description": display_name(row.get("name") or symbol, row),
+                        "type": kind})
+            if len(out) >= 50:
+                break
+        return out
+
     def symbol_info(self, ticker):
-        """The symbol's shape: description, type, currency, sessions, tick size, the point value
-        (the contract's lot size — the app prices positions with it), the trading holidays and
-        the intervals served."""
-        row = self._instrument_row(ticker)
+        """The symbol's shape: names, type, currency, the calendar session (holidays, special
+        timings), tick size, the point value (the contract's lot size — the app prices positions
+        with it), the company profile and the intervals served."""
+        row = self._symbol_row(ticker)
         if row is None:
             raise PluginError(f"Unknown symbol {ticker}", -32602)
         exchange = ticker.split(":", 1)[0]
+        symbol = ticker.partition(":")[2]
         tick = num(first_of(row, "tick_size", "ticksize")) or 0.05
         pricescale = max(2, round(1 / tick)) if tick < 1 else 100
-        return {
-            "description": display_name(row.get("name") or ticker.partition(":")[2], row),
+        name = display_name(row.get("name") or symbol, row)
+        lot = num(first_of(row, "lotsize", "lot_size")) or 1.0
+        cal = self._calendar_session(exchange)
+        if cal is None:  # the calendar cannot be reached: the static session stands (never an error)
+            cal = {"session": SESSIONS.get(exchange, SESSIONS["_"]), "extended": None,
+                   "holidays": "", "corrections": ""}
+        info = {
+            "name": name,
+            "description": name,  # a host without `name` still shows the display name
+            "longDescription": self._long_description(symbol, row, lot),
             "type": self._kind_of(exchange, row),
             "currency": "INR",
             "timezone": "Asia/Kolkata",
-            "session": SESSIONS.get(exchange, SESSIONS["_"]),
+            "session": cal["session"],
+            "extended": cal["extended"],
+            "holidays": cal["holidays"],
+            "corrections": cal["corrections"],
             "pricescale": pricescale,
             "minmov": 1,
-            "pointValue": num(first_of(row, "lotsize", "lot_size")) or 1.0,
-            "holidays": self._holidays_for(exchange),
+            "pointValue": lot,
             "intervals": self._served_intervals(),
         }
+        # The profile and the logo name the bare symbol (the built-in provider's calls read
+        # `companies/TCS`, `logos/TCS` — the venue prefix would 404 them).
+        profile = self._company_profile(symbol)
+        if profile:
+            if profile.get("sector"):
+                info["sector"] = profile["sector"]
+            if profile.get("industry"):
+                info["industry"] = profile["industry"]
+        # The logo for equities only (the built-in provider's gate: index venues and derivatives
+        # fall back to the letter icon).
+        if str(first_of(row, "instrumenttype", "instrument_type") or "").strip().upper() == "EQ" \
+                and not exchange.upper().endswith("_INDEX"):
+            info["icon"] = f"https://api.dharun.dev/v1/logos/{symbol.upper()}"
+        return info
 
-    def _holidays_for(self, exchange):
-        """The exchange's full-day trading holidays of this and next year, comma-joined `YYYYMMDD`
-        (the app's session grammar, src/data/session/spec.ts). Day-cached per exchange and year,
-        like the instrument master."""
-        base = exchange.strip().upper()
-        # An index venue follows its cash market in the calendar (the app provider's rule):
-        # the /market/holidays rows name NSE, not NSE_INDEX.
-        base = base[:-6] if base.endswith("_INDEX") and len(base) > 6 else base
-        today = datetime.now(TZ_IST).date()
-        out = []
-        for year in (today.year, today.year + 1):
-            with self.lock:
-                hit = self._holidays.get((base, year))
-                days = hit[1] if hit is not None and hit[0] == today else None
-            if days is None:
-                days = self._fetch_holidays(base, year)
-                with self.lock:
-                    self._holidays[(base, year)] = (today, days)
-            out.extend(days)
-        return ",".join(sorted(set(out)))
+    def _long_description(self, symbol, row, lot):
+        """The dialog's description: the broker symbol with each tail only when it applies
+        (`TCS-EQ`, `NIFTY FUT 23-NOV-26 · exp 30-Oct-26 · lot 65`) — the built-in's shape."""
+        out = str(first_of(row, "brsymbol", "broker_symbol") or "").strip() or symbol
+        expiry = str(first_of(row, "expiry", "expiry_date") or "").strip()
+        if expiry:
+            out += f" · exp {expiry}"
+        if lot != 1.0:
+            out += f" · lot {lot:g}"
+        return out
 
-    def _fetch_holidays(self, exchange, year):
-        """One year's closed days for `exchange` from /market/holidays. Only rows that list the
-        exchange in `closed_exchanges` close it (the app provider's rule: special and settlement
-        sessions and unmentioned exchanges keep trading) — and the plugin serves no special
-        session timings, so its static session stands those days. A failed answer logs and caches
-        as empty for the day: a holiday calendar must not take symbol info down."""
+    def _symbol_row(self, ticker):
+        """The master's row, or the live /symbol answer when the master doesn't list the symbol (a
+        fresh listing before the master's next pull). Day-cached; a miss stays None, never fatal."""
+        row = self._instrument_row(ticker)
+        if row is not None:
+            return row
+        today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
+        with self.lock:
+            hit = self._symbol_rows.get(ticker)
+            if hit is not None and hit[0] == today:
+                return hit[1]
+        row = None
         try:
-            data = self._post("/api/v1/market/holidays", {"year": year})
+            exchange, _, symbol = ticker.partition(":")
+            data = self._post("/api/v1/symbol", {"symbol": symbol, "exchange": exchange})
+            if isinstance(data, dict):
+                row = data
         except PluginError as e:
-            self.log(f"holiday calendar {exchange} {year}: {e}; the static session stands", "warn")
-            return []
-        # `_post` already unwraps the answer's `data`; the whole shape is accepted too, just in case.
-        rows = data if isinstance(data, list) else (data.get("data") if isinstance(data, dict) else None)
-        if not isinstance(rows, list):
-            return []
-        days = []
+            self.log(f"symbol {ticker}: {e}", "warn")
+        with self.lock:
+            self._symbol_rows[ticker] = (today, row)
+        return row
+
+    def _company_profile(self, ticker):
+        """{sector, industry} from the public companies API the built-in provider reads (the broker
+        /symbol serves neither). Day-cached in memory; a miss is None, never fatal."""
+        today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
+        with self.lock:
+            hit = self._profiles.get(ticker)
+            if hit is not None and hit[0] == today:
+                return hit[1]
+        profile = None
+        try:
+            data = self._get_json(f"https://api.dharun.dev/v1/companies/{ticker.upper()}")
+            row = data.get("data") if isinstance(data, dict) else None
+            if isinstance(row, dict):
+                profile = {k: str(row[k]) for k in ("sector", "industry") if row.get(k)}
+        except PluginError:
+            pass  # a 404 or a dead host: no profile, the dialog just shows none
+        with self.lock:
+            self._profiles[ticker] = (today, profile)
+        return profile
+
+    def _get_json(self, url, timeout=15):
+        """One GET that must answer 2xx JSON; raises PluginError otherwise (callers degrade).
+        The public profile API 403s unknown clients — a browser User-Agent goes along."""
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(request, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raise PluginError(f"HTTP {e.code}") from e
+        except (OSError, ValueError) as e:
+            raise PluginError(f"not reachable ({e})") from e
+
+    def _calendar_session(self, exchange):
+        """The venue's session from the broker calendar (the built-in provider's rule): the standard
+        hours as the base spec; closed days into `holidays`; special sessions into `corrections`
+        (`spec:date,date;…`), which win over holidays; settlement holidays and unmentioned exchanges
+        keep trading. Years fetched: the current one, the next only in December (January's specials
+        and the countdown over New Year need it). None when the calendar cannot be reached — the
+        static session stands in, never an error."""
+        base = calendar_exchange(exchange)
+        now = datetime.now(TZ_IST)
+        key = (base, now.strftime("%Y-%m-%d"))
+        with self.lock:
+            hit = self._sessions.get(key)
+        if hit is not None:
+            return hit
+        std = STD_SESSIONS.get(base, STD_DEFAULT)
+        to_min = lambda hhmm: int(hhmm[:2]) * 60 + int(hhmm[2:])
+        fmt = lambda m: f"{((m // 60) % 24 + 24) % 24:02d}{(m % 60) % 60:02d}"
+        rth = f"{std[0]}-{std[1]}"
+        eth = rth if std[2] + std[3] == 0 else f"{fmt(to_min(std[0]) - std[2])}-{fmt(to_min(std[1]) + std[3])}"
+        years = [now.year] + ([now.year + 1] if now.month == 12 else [])
+        rows, ok = [], False
+        for year in years:
+            got = self._holiday_rows_of(base, year, now)
+            if got is not None:
+                ok = True
+                rows.extend(got)
+        if not ok:
+            return None
+        # A timings row for this exchange on the day makes it a special session (`spec:date`).
+        # SPECIAL_SESSION days whose row carries no timings resolve through /market/timings —
+        # a year holds a handful at most, so the lookups stay bounded.
+        closed, opens, need = [], {}, {}
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            # Row dates must read "YYYY-MM-DD" (the source's own guard, mirroring the app provider).
-            date = str(row.get("date") or "").strip()
-            if len(date) != 10 or not all(c.isdigit() or c == "-" for c in date):
+            iso = str(row.get("date") or "").strip()
+            if len(iso) != 10 or not all(c.isdigit() or c == "-" for c in iso):
+                continue  # the row dates must read "YYYY-MM-DD" (the source's own guard)
+            day = iso.replace("-", "")
+            hit = next((t for t in (row.get("open_exchanges") or [])
+                        if str(t.get("exchange") or "").strip().upper() == base), None) \
+                if isinstance(row.get("open_exchanges"), list) else None
+            if hit:
+                spec = f"{ms_to_hhmm(hit.get('start_time'))}-{ms_to_hhmm(hit.get('end_time'))}"
+                opens.setdefault(spec, set()).add(day)
                 continue
-            closed = row.get("closed_exchanges")
-            if not isinstance(closed, list):
+            closed_list = [str(e).strip().upper() for e in row.get("closed_exchanges")] \
+                if isinstance(row.get("closed_exchanges"), list) else []
+            if base in closed_list:
+                closed.append(day)
                 continue
-            if exchange not in [str(e).strip().upper() for e in closed]:
-                continue
-            days.append(date.replace("-", ""))  # YYYY-MM-DD → YYYYMMDD, the app's holiday grammar
-        return days
+            if str(row.get("holiday_type") or "").strip().upper() == "SPECIAL_SESSION":
+                need[iso] = day
+        for iso, day in sorted(need.items())[:12]:
+            for t in self._timings_of(base, iso) or []:
+                if str(t.get("exchange") or "").strip().upper() == base:
+                    spec = f"{ms_to_hhmm(t.get('start_time'))}-{ms_to_hhmm(t.get('end_time'))}"
+                    opens.setdefault(spec, set()).add(day)
+                    break
+        corrections = ";".join(f"{spec}:{','.join(sorted(days))}" for spec, days in sorted(opens.items()))
+        out = {"session": rth, "extended": eth if eth != rth else None,
+               "holidays": ",".join(sorted(set(closed))), "corrections": corrections}
+        with self.lock:
+            self._sessions[key] = out
+        return out
+
+    def _holiday_rows_of(self, base, year, now):
+        """The raw calendar rows of one year (every exchange — the filtering is the builder's job),
+        from memory, the day-stamped disk file, or the source; None when it cannot be reached."""
+        with self.lock:
+            hit = self._holiday_rows.get(year)
+            if hit is not None and hit[0] == now.strftime("%Y-%m-%d"):
+                return hit[1]
+            if time.monotonic() < self._calendar_failed.get(year, 0.0):
+                return None  # a failed fetch waits a minute before it is tried again
+        today = now.strftime("%Y-%m-%d")
+        disk = self._read_daily(f"holidays-{year}", today)
+        if isinstance(disk, list):
+            with self.lock:
+                self._holiday_rows[year] = (today, disk)
+            return disk
+        try:
+            data = self._post("/api/v1/market/holidays", {"year": year}, whole=True)
+        except PluginError as e:
+            with self.lock:
+                self._calendar_failed[year] = time.monotonic() + 60.0
+            self.log(f"holiday calendar {base} {year}: {e}; the static session stands", "warn")
+            return None
+        rows = data.get("data") if isinstance(data, dict) else (data if isinstance(data, list) else None)
+        rows = rows if isinstance(rows, list) else []
+        self._write_daily(f"holidays-{year}", today, rows)
+        with self.lock:
+            self._holiday_rows[year] = (today, rows)
+        return rows
+
+    def _timings_of(self, base, date):
+        """One date's per-exchange timings (empty on holidays), from memory, the day-stamped disk
+        file, or the source; None when it cannot be reached (the regular session stands)."""
+        today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
+        with self.lock:
+            hit = self._timings.get(date)
+            if hit is not None and hit[0] == today:
+                return hit[1]
+        disk = self._read_daily(f"timings-{date}", today)
+        if isinstance(disk, list):
+            with self.lock:
+                self._timings[date] = (today, disk)
+            return disk
+        try:
+            data = self._post("/api/v1/market/timings", {"date": date}, whole=True)
+        except PluginError as e:
+            self.log(f"timings {base} {date}: {e}; the regular session stands", "warn")
+            return None
+        rows = data.get("data") if isinstance(data, dict) else (data if isinstance(data, list) else None)
+        rows = rows if isinstance(rows, list) else []
+        self._write_daily(f"timings-{date}", today, rows)
+        with self.lock:
+            self._timings[date] = (today, rows)
+        return rows
 
     def _served_intervals(self):
         """The resolutions the plugin maps straight onto the source (the app builds the others)."""
@@ -623,45 +886,54 @@ class OpenAlgoSource:
         return out
 
     def _interval_tables(self):
-        """The resolution→token tables of /api/v1/intervals, refreshed daily; the fallback tables when cold."""
+        """The resolution→token tables of /api/v1/intervals, refreshed daily (memory, then the day-stamped
+        disk file — a restart re-reads, no network); the fallback tables when cold."""
+        today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
         with self.lock:
-            today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
             if self.intervals is not None and self.intervals_day == today:
                 return self.intervals
-        try:
-            data = self._post("/api/v1/intervals", {}) or {}
-        except PluginError:
-            data = None
-        tables = {
-            "minutes": dict(FALLBACK_MINUTES),
-            "hours": dict(FALLBACK_HOURS),
-            "seconds": dict(FALLBACK_SECONDS),
-            "days": ["D"],
-            "weeks": ["W"],
-            "months": ["M"],
-        }
-        if isinstance(data, dict):
-            def table_of(v, unit):
-                """mult → token, either shape: a dict ({'1': '1m'}) or a list of tokens whose numbers are
-                the multipliers of `unit` (['1m', '3m', …] — verified live)."""
-                if isinstance(v, dict):
-                    return {int(k): str(x) for k, x in v.items() if str(x).strip()}
-                out = {}
-                if isinstance(v, list):
-                    for token in v:
-                        token = str(token).strip()
-                        if token[:-1].isdigit() and token[-1:].lower() == unit:
-                            out[int(token[:-1])] = token
-                return out
-            if data.get("minutes"):
-                tables["minutes"] = table_of(data["minutes"], "m")
-            if data.get("hours"):
-                tables["hours"] = table_of(data["hours"], "h")
-            if data.get("seconds"):
-                tables["seconds"] = table_of(data["seconds"], "s")
-            for key in ("days", "weeks", "months"):
-                if isinstance(data.get(key), list) and data[key]:
-                    tables[key] = [str(x) for x in data[key]]
+        tables = self._read_daily("intervals", today)
+        if isinstance(tables, dict):
+            # The disk round-trip turned the int multiplier keys into strings ("1": "1m") —
+            # back to ints, the callers index by the multiplier (`hours.get(1)`, `min(minutes)`).
+            tables = {k: {int(m): t for m, t in v.items() if str(m).lstrip("-").isdigit()}
+                      if isinstance(v, dict) else v for k, v in tables.items()}
+        if not isinstance(tables, dict):
+            try:
+                data = self._post("/api/v1/intervals", {}) or {}
+            except PluginError:
+                data = None
+            tables = {
+                "minutes": dict(FALLBACK_MINUTES),
+                "hours": dict(FALLBACK_HOURS),
+                "seconds": dict(FALLBACK_SECONDS),
+                "days": ["D"],
+                "weeks": ["W"],
+                "months": ["M"],
+            }
+            if isinstance(data, dict):
+                def table_of(v, unit):
+                    """mult → token, either shape: a dict ({'1': '1m'}) or a list of tokens whose numbers are
+                    the multipliers of `unit` (['1m', '3m', …] — verified live)."""
+                    if isinstance(v, dict):
+                        return {int(k): str(x) for k, x in v.items() if str(x).strip()}
+                    out = {}
+                    if isinstance(v, list):
+                        for token in v:
+                            token = str(token).strip()
+                            if token[:-1].isdigit() and token[-1:].lower() == unit:
+                                out[int(token[:-1])] = token
+                    return out
+                if data.get("minutes"):
+                    tables["minutes"] = table_of(data["minutes"], "m")
+                if data.get("hours"):
+                    tables["hours"] = table_of(data["hours"], "h")
+                if data.get("seconds"):
+                    tables["seconds"] = table_of(data["seconds"], "s")
+                for key in ("days", "weeks", "months"):
+                    if isinstance(data.get(key), list) and data[key]:
+                        tables[key] = [str(x) for x in data[key]]
+                self._write_daily("intervals", today, tables)
         with self.lock:
             self.intervals, self.intervals_day = tables, today
         return tables
@@ -789,9 +1061,6 @@ class OpenAlgoSource:
                 days.append([day, b[1], b[2], b[3], b[4], b[5] or 0])
         return days[-count_back:] if count_back else days
 
-    def _window(self, exchange, symbol, interval, daily, frm, to, count_back, depth):
-        """A history window, split in half and retried when the source answers only part of it
-        (OpenAlgo caps a window's bars; the halves reach past the cap)."""
     def _window(self, exchange, symbol, interval, daily, frm, to, count_back, depth, max_days=None):
         """History window with date-chunking (per-request caps) + split-retry on 5xx."""
         if max_days is None:
