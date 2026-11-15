@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.2"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -226,8 +226,9 @@ class Instruments:
         return out
 
     def rows_for(self, exchange):
-        """The master rows of a segment, fetched at most once a day. One pull per segment at a time: the other
-        callers wait for the running one instead of fetching again (search and the prefetch race otherwise)."""
+        """The master rows of a segment: today's memory or disk cache first (a restart re-reads, no
+        pull), then the worker's pull. One pull per segment at a time: the other callers wait for the
+        running one instead of fetching again (the prefetch races itself otherwise)."""
         today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
         while True:
             with self.lock:
@@ -245,7 +246,10 @@ class Instruments:
                 event.wait(120)  # the running pull decides; then the loop re-checks
                 continue
             try:
-                fetched = self._fetch(exchange)
+                fetched = self._read_disk(exchange, today)  # today's disk cache: no network
+                from_disk = fetched is not None
+                if not from_disk:
+                    fetched = self._fetch(exchange)
                 with self.lock:
                     if fetched is None:
                         self.unavailable[exchange] = time.monotonic() + self.BACKOFF
@@ -253,7 +257,7 @@ class Instruments:
                         self.unavailable.pop(exchange, None)
                         self.rows[exchange], self.day[exchange] = fetched, today
                         self.catalog = None  # the combined search catalog is stale
-                if fetched is not None:
+                if fetched is not None and not from_disk:
                     self._write_disk(exchange, today, fetched)  # a restart re-reads, no pull
             finally:
                 with self.lock:
@@ -526,14 +530,15 @@ class OpenAlgoSource:
         return True
 
     def tick(self, ticker):
-        """One price step of `ticker`, from the master's tick size (the ticket's bid/ask spread)."""
+        """One price step of `ticker`, from the master's tick size (the ticket's bid/ask spread).
+        The lookup never waits for a pull: until the master lands, the app's default tick stands."""
         row = self._instrument_row(ticker)
         size = num(first_of(row or {}, "tick_size", "ticksize"))
         return size or 0.05
 
     def _instrument_row(self, ticker):
         exchange, _, symbol = ticker.partition(":")
-        for row in self.instruments.rows_for(exchange):  # the row lives in the segment the symbol names itself
+        for row in self.instruments.rows_peek(exchange):  # the row lives in the segment the symbol names itself; a pull is never awaited
             if row.get("symbol") == symbol:
                 return row
         return None
@@ -698,7 +703,9 @@ class OpenAlgoSource:
 
     def _symbol_row(self, ticker):
         """The master's row, or the live /symbol answer when the master doesn't list the symbol (a
-        fresh listing before the master's next pull). Day-cached; a miss stays None, never fatal."""
+        fresh listing before the master's next pull). The lookup never waits for a pull: rows already
+        here (memory or today's disk cache) answer, so the dialog works while the masters warm.
+        Day-cached; a miss stays None, never fatal."""
         row = self._instrument_row(ticker)
         if row is not None:
             return row
