@@ -33,6 +33,7 @@ mod prior_close;
 mod quotes;
 mod reference;
 mod search;
+mod segments;
 mod snapshot;
 
 pub use aggs::{fetch_daily_aggs, fetch_minute_aggs, fetch_second_aggs, fetch_second_tail, probe_oldest_bar};
@@ -54,6 +55,7 @@ pub use reference::{
 };
 pub(crate) use reference::icon_proxy_url;
 pub use search::{search_tickers, SymbolSearchResult};
+pub use segments::{fetch_revenue_breakdown, BreakdownGroup, BreakdownMember, BreakdownReport, BreakdownRole, RevenueBreakdown};
 pub use snapshot::{fetch_ticker_snapshot, Snapshot};
 
 /// Process-wide memo keyed by `K`, each value stamped with the day it was
