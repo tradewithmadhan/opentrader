@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.1.1"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -378,6 +378,7 @@ class OpenAlgoSource:
         self._calendar_failed = {}  # year → monotonic time of the last failed holidays fetch
         self._symbol_rows = {}  # ticker → (IST day, the live /symbol row or None)
         self._profiles = {}  # ticker → (IST day, the company profile or None)
+        self._profile_failed_until = 0.0  # while the companies API is unreachable, lookups skip it
         # the account, as the books last answered
         self.funds = None
         self.positions = []
@@ -720,35 +721,47 @@ class OpenAlgoSource:
 
     def _company_profile(self, ticker):
         """{sector, industry} from the public companies API the built-in provider reads (the broker
-        /symbol serves neither). Day-cached in memory; a miss is None, never fatal."""
+        /symbol serves neither). Day-cached in memory; a miss is None, never fatal. The API answers
+        on its IPv6 address first, and a broken IPv6 path black-holes the connect until the timeout
+        — so when it cannot be reached, the whole lookup backs off for a minute: one symbol's dialog
+        pays the wait, not every one."""
         today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
         with self.lock:
             hit = self._profiles.get(ticker)
             if hit is not None and hit[0] == today:
                 return hit[1]
+            dead = time.monotonic() < self._profile_failed_until
         profile = None
-        try:
-            data = self._get_json(f"https://api.dharun.dev/v1/companies/{ticker.upper()}")
-            row = data.get("data") if isinstance(data, dict) else None
-            if isinstance(row, dict):
-                profile = {k: str(row[k]) for k in ("sector", "industry") if row.get(k)}
-        except PluginError:
-            pass  # a 404 or a dead host: no profile, the dialog just shows none
+        if not dead:
+            try:
+                data = self._get_json(f"https://api.dharun.dev/v1/companies/{ticker.upper()}")
+                row = data.get("data") if isinstance(data, dict) else None
+                if isinstance(row, dict):
+                    profile = {k: str(row[k]) for k in ("sector", "industry") if row.get(k)}
+            except PluginError:
+                pass  # the source answered (a 404 for anything but a listed company): no profile
+            except OSError:
+                with self.lock:
+                    self._profile_failed_until = time.monotonic() + 60.0
+                self.log("the companies API is not reachable; symbol profiles are paused for a minute", "warn")
         with self.lock:
             self._profiles[ticker] = (today, profile)
         return profile
 
-    def _get_json(self, url, timeout=15):
-        """One GET that must answer 2xx JSON; raises PluginError otherwise (callers degrade).
-        The public profile API 403s unknown clients — a browser User-Agent goes along."""
+    def _get_json(self, url, timeout=8):
+        """One GET that must answer 2xx JSON; raises PluginError on an HTTP answer and OSError when
+        the host cannot be reached (the caller decides what a dead host costs the request). The
+        public profile API 403s unknown clients — a browser User-Agent goes along. The timeout is
+        short so a request answers inside the app's window even when the host's IPv6 — the address
+        resolution offers first — black-holes the connect before the IPv4 one succeeds."""
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(request, timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             raise PluginError(f"HTTP {e.code}") from e
-        except (OSError, ValueError) as e:
-            raise PluginError(f"not reachable ({e})") from e
+        except ValueError as e:
+            raise PluginError(f"bad answer ({e})") from e
 
     def _calendar_session(self, exchange):
         """The venue's session from the broker calendar (the built-in provider's rule): the standard
