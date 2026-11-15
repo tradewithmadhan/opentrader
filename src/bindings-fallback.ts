@@ -52,6 +52,13 @@ export type FundamentalPeriods = { end?: string[]; fy?: (number | null)[]; fp?: 
 export type FundamentalMetric = any;
 export type EconomicSeries = any;
 export type EconomicPoint = any;
+// The revenue breakdown (crates/core/src/data/market_rest/segments.rs, camelCase serde):
+// one period's figures split by segments, products, geography and customers.
+export type BreakdownRole = { concept: string; total?: number | null; coverage?: number | null };
+export type BreakdownMember = { id: string; label: string; revenue?: number | null; profit?: number | null; revenueShare?: number | null };
+export type BreakdownGroup = { revenue?: BreakdownRole | null; profit?: BreakdownRole | null; revenueShare?: BreakdownRole | null; members: BreakdownMember[] };
+export type BreakdownReport = { accession: string; form: string; accepted: string; fy?: number | null; fp?: string | null; periodEnd: string; months: number; derived: boolean; currency: string; totalRevenue?: number | null; segments?: BreakdownGroup | null; products?: BreakdownGroup | null; geography?: BreakdownGroup | null; customers?: BreakdownGroup | null };
+export type RevenueBreakdown = { ticker: string; reports: BreakdownReport[] };
 export type Subsession = {
   id: string;
   description: string;
@@ -152,6 +159,10 @@ export type LocalModelInfo = {
   ramNeededBytes: number;
   freeDiskBytes: number;
   installing: boolean;
+  // The versioned fine-tunes: the one on disk and the newest this build offers.
+  version?: number | null;
+  latestVersion: number;
+  updateBytes: number;
 };
 export type LocalProgress = {
   file: string;
@@ -527,6 +538,11 @@ export const commands: {
   getProxySettings(): Promise<ProxySettings>;
   setProxySettings(settings: ProxySettings): Promise<CommandResult<void>>;
   agentReady(): Promise<void>;
+  // The main menu's clipboard/zoom/exit rows (src-tauri/src/app_menu.rs).
+  appClipboardText(): Promise<string | null>;
+  appZoomGet(): Promise<number>;
+  appZoomSet(factor: number): Promise<number>;
+  appQuit(): Promise<void>;
   agentServerStatus(): Promise<AgentServerStatus>;
   agentServerSetEnabled(enabled: boolean): Promise<CommandResult<AgentServerStatus>>;
   agentServerSetPort(port: number): Promise<CommandResult<AgentServerStatus>>;
@@ -551,6 +567,7 @@ export const commands: {
   localFolderScan(folder: string): Promise<CommandResult<FolderFile[]>>;
   localFolderRead(folder: string, file: string): Promise<CommandResult<string>>;
   getFundamentals(symbol: string): Promise<CommandResult<Fundamentals>>;
+  getRevenueBreakdown(symbol: string): Promise<CommandResult<RevenueBreakdown>>;
   getDividends(symbol: string): Promise<CommandResult<DividendEvent[]>>;
   getSplits(symbol: string): Promise<CommandResult<SplitEvent[]>>;
   getFilings(symbol: string, query: FilingQuery): Promise<CommandResult<FilingList>>;
@@ -605,6 +622,11 @@ export const commands: {
   getProxySettings(): Promise<ProxySettings>;
   setProxySettings(settings: ProxySettings): Promise<CommandResult<void>>;
   agentReady(): Promise<void>;
+  // The main menu's clipboard/zoom/exit rows (src-tauri/src/app_menu.rs).
+  appClipboardText(): Promise<string | null>;
+  appZoomGet(): Promise<number>;
+  appZoomSet(factor: number): Promise<number>;
+  appQuit(): Promise<void>;
   agentServerStatus(): Promise<AgentServerStatus>;
   agentServerSetEnabled(enabled: boolean): Promise<CommandResult<AgentServerStatus>>;
   agentServerSetPort(port: number): Promise<CommandResult<AgentServerStatus>>;
@@ -629,6 +651,7 @@ export const commands: {
   localFolderScan(folder: string): Promise<CommandResult<FolderFile[]>>;
   localFolderRead(folder: string, file: string): Promise<CommandResult<string>>;
   getFundamentals(symbol: string): Promise<CommandResult<Fundamentals>>;
+  getRevenueBreakdown(symbol: string): Promise<CommandResult<RevenueBreakdown>>;
   getDividends(symbol: string): Promise<CommandResult<DividendEvent[]>>;
   getSplits(symbol: string): Promise<CommandResult<SplitEvent[]>>;
   getFilings(symbol: string, query: FilingQuery): Promise<CommandResult<FilingList>>;
