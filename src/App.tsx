@@ -91,6 +91,7 @@ import { replayBroker } from "./data/trading/replay-broker";
 import { pluginBroker } from "./data/trading/plugin-broker";
 import { events } from "./bindings";
 import { forgetUnknownSymbols } from "./data/unknown-symbols";
+import { refreshPluginSessions } from "./data/session/symbol-sessions";
 import { createDrawingStore } from "./window/drawings/drawing-store";
 import { createChartBridge } from "./window/right-rail/community/chart-bridge";
 import { setChartBridge } from "./data/community/chart-share";
@@ -431,10 +432,14 @@ function App() {
   onMount(() => { if (isTauri() && windowLabel === "main") openFirstStartOnboarding(); });
 
   // A data plugin that connects again may know its symbols again (an expired contract returns): each window
-  // forgets the symbols it gave up on and asks for them once more.
+  // forgets the symbols it gave up on and asks for them once more; it may also describe its symbols otherwise
+  // (an update: #340's bar grid), so the sessions are read again and the charts reload when one changed.
   onMount(() => {
     if (!isTauri()) return;
-    const stop = events.pluginsChanged.listen(() => forgetUnknownSymbols());
+    const stop = events.pluginsChanged.listen(() => {
+      forgetUnknownSymbols();
+      void refreshPluginSessions().then((changed) => changed && emitAppEvent("chart-reload-data"));
+    });
     onCleanup(() => void stop.then((f) => f()));
   });
 
