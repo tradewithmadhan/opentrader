@@ -149,6 +149,9 @@ mod tests {
             pricescale: 100,
             minmov: 1,
             variable_tick_size: String::new(),
+            intervals: Vec::new(),
+            bar_origin: None,
+            point_value: None,
         }
     }
 

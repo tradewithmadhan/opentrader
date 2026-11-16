@@ -69,8 +69,9 @@ pub struct Info {
     /// is public, so the webview may read the bare URL.
     #[serde(default)]
     pub icon: Option<String>,
-    /// The profit of a 1-point move in one unit (the plugin's `pointValue`), per unit — the lot size
-    /// of a contract sized in lots goes to `broker.instrument`'s `qtyStep` instead (#341).
+    /// The profit of a 1-point move in one unit of quantity (the plugin's `pointValue`), in the
+    /// symbol's currency: a future counted in contracts gives its multiplier (the master's
+    /// lot size); a plugin counting underlying units leaves it at 1 (#341, #345).
     #[serde(default)]
     pub point_value: Option<f64>,
     pub pricescale: u32,
@@ -79,6 +80,10 @@ pub struct Info {
     /// The resolutions served: "1", "5", "60" (minutes), "1D", "1W", "1M", "15S" (seconds).
     #[serde(default)]
     pub intervals: Vec<String>,
+    /// "HHMM" in `timezone` where intraday bars of every size start their clock grid, when they ignore the session
+    /// opens (a broker terminal: 5-minute bars at 01:00 when trading opens at 01:01).
+    #[serde(default)]
+    pub bar_origin: Option<String>,
 }
 
 fn one() -> u32 {
@@ -274,7 +279,19 @@ pub async fn session(app: &AppHandle, r: &Route) -> Result<SymbolSession, String
         pricescale: i.pricescale,
         minmov: i.minmov.max(1),
         variable_tick_size: String::new(),
+        intervals: i.intervals.clone(),
+        bar_origin: i.bar_origin.as_deref().and_then(origin_minutes),
+        point_value: i.point_value.filter(|v| v.is_finite() && *v > 0.0),
     })
+}
+
+/// Minutes after midnight of an "HHMM" time of day.
+fn origin_minutes(hhmm: &str) -> Option<u32> {
+    if hhmm.len() != 4 || !hhmm.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (h, m) = (hhmm[..2].parse::<u32>().ok()?, hhmm[2..].parse::<u32>().ok()?);
+    (h < 24 && m < 60).then_some(h * 60 + m)
 }
 
 pub async fn ticker_info(app: &AppHandle, r: &Route) -> Result<TickerInfo, String> {

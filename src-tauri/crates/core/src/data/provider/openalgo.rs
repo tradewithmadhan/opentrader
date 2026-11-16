@@ -1330,6 +1330,9 @@ fn build_exchange_session(
         pricescale: 100,
         minmov: 5,
         variable_tick_size: String::new(),
+        intervals: Vec::new(),
+        bar_origin: None,
+        point_value: None,
     }
 }
 
@@ -1519,6 +1522,9 @@ fn static_nse_session() -> SymbolSession {
         pricescale: 100,
         minmov: 5,
         variable_tick_size: String::new(),
+        intervals: Vec::new(),
+        bar_origin: None,
+        point_value: None,
     }
 }
 

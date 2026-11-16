@@ -220,6 +220,9 @@ fn us_equity_session() -> SymbolSession {
                 ],
                 holidays: trading_calendar::holidays_spec(from, to),
                 corrections: format!("0930-1300:{early}"),
+                intervals: Vec::new(),
+                bar_origin: None,
+                point_value: None,
             }
         })
         .clone()
@@ -286,6 +289,9 @@ async fn economic_session(sym: &SymbolRef) -> Result<SymbolSession> {
         pricescale: 10u32.pow(dec),
         minmov: 1,
         variable_tick_size: String::new(),
+        intervals: Vec::new(),
+        bar_origin: None,
+        point_value: None,
     })
 }
 

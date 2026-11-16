@@ -75,6 +75,10 @@ export type SymbolSession = {
   minmov: number;
   variableTickSize: string;
   intervals?: string[];
+  /** Minutes after local midnight where intraday bars of every size start their clock grid (a data plugin's barOrigin). */
+  barOrigin?: number | null;
+  /** Money one unit of quantity makes when the price moves by 1 (a future counted in contracts gives its multiplier). */
+  pointValue?: number | null;
 };
 export type CommandResult<T> = { status: "ok"; data: T } | { status: "error"; error: string };
 export type WindowState = any;

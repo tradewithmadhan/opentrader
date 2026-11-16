@@ -47,7 +47,7 @@ export function SymbolInfoDialog(props: Props) {
       isin: i?.isin ?? null,
       currency: i?.currency,
       tickSize: tick != null ? String(Number(tick.toPrecision(6))) : null,
-      pointValue: i?.pointValue ?? null,
+      pointValue: s?.pointValue,
     });
   });
   const timeline = createMemo(() => {

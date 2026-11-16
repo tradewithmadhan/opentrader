@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 /// Sessions and price grid of a symbol. `session` is the regular session;
 /// `subsessions` names the parts of the trading day the provider serves.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolSession {
     /// IANA time zone of the exchange ("America/New_York").
@@ -44,6 +44,18 @@ pub struct SymbolSession {
     /// stocks under 1 trade in 0.0001). Empty = the `minmov / pricescale`
     /// tick at every price.
     pub variable_tick_size: String,
+    /// Interval ids the symbol's source serves when it is not the provider (a data plugin's `intervals`: "1", "5",
+    /// "1S", "1D"); the app builds the others it can from them. Empty: the provider's capabilities.
+    #[serde(default)]
+    pub intervals: Vec<String>,
+    /// Minutes after local midnight where the source's intraday bars of every size start their clock grid (a data
+    /// plugin's `barOrigin`: a broker terminal's bars ignore the session opens). None: bars start at the opens.
+    #[serde(default)]
+    pub bar_origin: Option<u32>,
+    /// Money one unit of quantity makes when the price moves by 1, in the symbol's currency: a future counted in
+    /// contracts gives its multiplier (65 for an NSE NIFTY future). None: 1.
+    #[serde(default)]
+    pub point_value: Option<f64>,
 }
 
 /// One named part of the trading day.
