@@ -1,7 +1,7 @@
 {
   "id": "openalgo",
   "name": "OpenAlgo",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "publisher": "tradewithmadhan",
   "description": "Your OpenAlgo deployment in OpenTrader: the market segments of your account (NSE, BSE, NFO, MCX…) on the charts and its trading from the charts.",
   "api": 2,
@@ -24,7 +24,7 @@
         { "value": "CNC", "label": "CNC (delivery)" },
         { "value": "NRML", "label": "NRML (carryforward)" }
       ],
-      "help": "The product type orders without one are sent as. MIS closes by day's end; CNC holds delivery; NRML carries F&O overnight." }
+      "help": "The product type an order starts from — the order ticket picks one per order (per segment: MIS or CNC on an equity, MIS or NRML on a derivative) and remembers the last pick." }
   ],
   "homepage": "https://github.com/tradewithmadhan/opentrader",
   "platforms": ["windows"]

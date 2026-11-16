@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.8"
+PLUGIN_VERSION = "0.1.9"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -646,11 +646,13 @@ class OpenAlgoSource:
 
     def symbol_info(self, ticker):
         """The symbol's shape: names, type, currency, the calendar session (holidays, special
-        timings), tick size, the point value (the contract's lot size — the app prices positions
-        with it), the company profile and the intervals served."""
+        timings), tick size, the point value (the money one unit makes per point — a lot-sized
+        contract says its lot to `broker.instrument` instead), the company profile and the
+        intervals served."""
         row = self._symbol_row(ticker)
         if row is None:
-            raise PluginError(f"Unknown symbol {ticker}", -32602)
+            # -32004: the app stops asking for it (an expired contract left in a watchlist) and shows it in red.
+            raise PluginError(f"Unknown symbol {ticker}", -32004)
         exchange = ticker.split(":", 1)[0]
         symbol = ticker.partition(":")[2]
         tick = num(first_of(row, "tick_size", "ticksize")) or 0.05
@@ -674,7 +676,9 @@ class OpenAlgoSource:
             "corrections": cal["corrections"],
             "pricescale": pricescale,
             "minmov": 1,
-            "pointValue": lot,
+            # The money one unit makes per point: Indian contracts are multiplier 1 (one unit is one
+            # share's worth), so 1; the lot size goes to `broker.instrument` as the quantity step.
+            "pointValue": 1,
             "intervals": self._served_intervals(),
         }
         # The profile and the logo name the bare symbol (the built-in provider's calls read
@@ -1265,6 +1269,44 @@ class OpenAlgoSource:
         """The plugin's ticker of a chart symbol, or None. Its own symbols trade as they are."""
         return symbol if self.known(symbol) else None
 
+    PRODUCTS = {"MIS": "Intraday", "CNC": "Delivery", "NRML": "Carry forward"}
+
+    def _product_options(self, exchange, row):
+        """The product types the segment takes: a derivative is intraday (MIS) or carry-forward
+        (NRML), an equity intraday (MIS) or delivery (CNC); anything unrecognised offers all three
+        and the broker rejects what it does not take."""
+        kind = str(first_of(row, "instrumenttype", "instrument_type") or "").upper()
+        if "FUT" in kind or "OPT" in kind or exchange in ("MCX", "NCDEX", "CDS"):
+            return ["MIS", "NRML"]
+        if kind == "EQ":
+            return ["MIS", "CNC"]
+        return ["MIS", "CNC", "NRML"]
+
+    def _product_field(self, options):
+        """A ticket field the app shows as its selector: the product type with each order. The
+        default is the settings' product (the app falls back to the first option when the segment
+        does not take it)."""
+        default = (self.settings.get("product", "MIS") or "MIS").upper()
+        return {"id": "product", "label": "Product",
+                "options": [{"value": v, "label": self.PRODUCTS.get(v, v)} for v in options],
+                "default": default}
+
+    def instrument(self, ticker):
+        """`broker.instrument`: the quantities the broker takes (units) and the money one unit makes
+        per point, from the master's row. A lot-sized contract says its lot (qtyMin = qtyStep); the
+        point value stays 1 (Indian contracts are multiplier 1 — one unit is one share's worth, the
+        old lot-size-as-point-value made the risk and P&L 65x too big). The product choice is the
+        segment's: an equity is intraday or delivery, a derivative intraday or carry-forward."""
+        row = self._symbol_row(ticker)
+        if row is None:
+            raise PluginError(f"Unknown symbol {ticker}", -32004)
+        exchange = ticker.split(":", 1)[0].upper()
+        lot = num(first_of(row, "lotsize", "lot_size")) or 1.0
+        return {
+            "qtyMin": lot, "qtyStep": lot, "pointValue": 1,
+            "ticketFields": [self._product_field(self._product_options(exchange, row))],
+        }
+
     def place(self, p):
         """A new order; returns its id, raises PluginError to refuse (shown as a rejected order)."""
         ticker, side, kind = p["ticker"], p["side"], p["type"]
@@ -1273,18 +1315,21 @@ class OpenAlgoSource:
             raise PluginError(f"{ticker} is not one of this account's symbols")
         if not qty or qty <= 0:
             raise PluginError("The quantity must be above 0")
-        # The broker's quantity is in lots on the derivatives (the master's lotsize), and the
-        # ticket has no lot stepper yet — it sends units. A wrong quantity is caught here with
-        # the next valid value instead of a round trip to the broker's rejection.
+        # The broker's quantity is in lots on the derivatives (the master's lotsize); the app
+        # checks whole lots first (`broker.instrument`) — this one stands when that answer was
+        # not asked yet. The wording is the app's ("65 is one lot: use 65 or 130").
         row = self._symbol_row(ticker)
         lot = num(first_of(row, "lotsize", "lot_size")) if row else None
         if lot and lot > 1 and abs(qty - round(qty / lot) * lot) > 1e-9:
-            raise PluginError(f"Quantity must be in multiples of the lot size {int(lot)} — "
-                              f"try {int((qty // lot + 1) * lot)} or more")
+            below = max(int(qty // lot) * int(lot), int(lot))
+            raise PluginError(f"{int(lot):g} is one lot: use {below:g} or {below + int(lot):g}")
+        # The product picked in the ticket (`fields.product`) wins over the settings default.
+        picked = str((p.get("fields") or {}).get("product") or "").upper()
+        product = picked if picked in self.PRODUCTS else (self.settings.get("product", "MIS").upper() or "MIS")
         exchange, _, symbol = ticker.partition(":")
         body = {
             "symbol": symbol, "exchange": exchange,
-            "product": (self.settings.get("product", "MIS").upper() or "MIS"),
+            "product": product,
             "pricetype": PRICE_TYPES.get(kind, "LIMIT"),
             "quantity": int(qty),
             "price": num(p.get("limitPrice")) or 0,
@@ -1305,7 +1350,9 @@ class OpenAlgoSource:
             self.orders = [o for o in self.orders if o["id"] != order_id] + [
                 {"id": order_id, "ticker": ticker, "side": side, "type": kind, "qty": qty, "filledQty": 0,
                  "limitPrice": num(p.get("limitPrice")), "stopPrice": num(p.get("stopPrice")),
-                 "status": "placing", "duration": "day", "updatedMs": now_ms}]
+                 "status": "placing", "duration": "day", "updatedMs": now_ms,
+                 # The ticket fields it was placed with: `broker.modify` sends them back.
+                 "fields": {"product": product}}]
         self.force_poll()
         return order_id, [{"kind": "placed", "ticker": ticker, "side": side, "type": kind, "qty": qty}]
 
@@ -1315,9 +1362,15 @@ class OpenAlgoSource:
         if not order or order["status"] not in ("placing", "working"):
             raise PluginError("The order is no longer working")
         exchange, _, symbol = order["ticker"].partition(":")
+        # A modified order keeps the fields it was placed with (the host sends them back; the
+        # placed order's own win over what came, the settings default stands for an order placed
+        # before 0.1.9 without any).
+        placed = str((order.get("fields") or {}).get("product") or "").upper()
+        sent = str((p.get("fields") or {}).get("product") or "").upper()
+        product = placed if placed in self.PRODUCTS else (sent if sent in self.PRODUCTS else (self.settings.get("product", "MIS").upper() or "MIS"))
         body = {
             "orderid": order["id"], "symbol": symbol, "exchange": exchange,
-            "product": (self.settings.get("product", "MIS").upper() or "MIS"),
+            "product": product,
             "pricetype": PRICE_TYPES.get(order["type"], "LIMIT"),
             "quantity": int(order["qty"]),
             "price": num(p.get("limitPrice")) or num(order.get("limitPrice")) or 0,
@@ -1395,8 +1448,11 @@ class OpenAlgoSource:
             "accounts": [{"id": account["id"], "name": account["name"]}],
             "account": account,
             "positionMode": "netting",
+            # The product type with each order: the ticket shows the three the deployment takes
+            # (a segment's `broker.instrument` narrows them); the settings' product is the default.
             "capabilities": {"orderTypes": ["market", "limit", "stop", "stopLimit"], "brackets": False,
-                             "positionBrackets": False, "partialClose": True, "modifyOrders": True},
+                             "positionBrackets": False, "partialClose": True, "modifyOrders": True,
+                             "ticketFields": [self._product_field(["MIS", "CNC", "NRML"])]},
             "positions": positions,
             "orders": orders,
             "executions": executions,
@@ -1933,6 +1989,10 @@ class Plugin:
             bars = s.bars(p["ticker"], p["resolution"], int(p["from"]), int(p["to"]), int(p.get("countBack", 2000)))
             self.log(f"data.bars {p['ticker']} {p['resolution']}: {len(bars)} bars")
             return {"bars": bars}
+        if method == "broker.getState":
+            return s.state()
+        if method == "broker.instrument":
+            return s.instrument(p["ticker"])
         if method == "broker.resolveSymbol":
             return {"ticker": s.resolve_symbol(p.get("symbol"), p.get("ticker"))}
         if method == "broker.selectAccount":
