@@ -372,17 +372,34 @@ export type Account = {
   /** Everything else the broker reports, as label / value rows. */
   values: AccountValue[];
 };
-/** What the plugin's broker supports; the order ticket and the chart offer only that. */
+/** What the broker's own order choices look like (`capabilities.ticketFields`): a product type. */
+export type TicketFieldOption = { value: string; label: string };
+export type TicketField = { id: string; label: string; options: TicketFieldOption[]; default: string | null };
+/** How the ticker trades at the broker (`broker.instrument`): every field may be left out. */
+export type Instrument = {
+  qtyMin?: number | null;
+  /** Orders are whole multiples of it, in units: the lot size. */
+  qtyStep?: number | null;
+  qtyMax?: number | null;
+  /** The money one unit makes when the price moves by 1. */
+  pointValue?: number | null;
+  /** This ticker's ticket fields, in place of the capabilities'. */
+  ticketFields?: TicketField[] | null;
+};
+/** What the plugin's broker supports; the order ticket and the chart offer only that. A field the
+ *  plugin leaves out is supported (serde-default on the Rust side, optional here). */
 export type BrokerCapabilities = {
-  orderTypes: OrderType[];
+  orderTypes?: OrderType[];
   /** Take profit / stop loss on a new order. */
-  brackets: boolean;
+  brackets?: boolean;
   /** Take profit / stop loss on an open position. */
-  positionBrackets: boolean;
+  positionBrackets?: boolean;
   /** Close part of a position. */
-  partialClose: boolean;
+  partialClose?: boolean;
   /** Modify a working order's price or quantity. */
-  modifyOrders: boolean;
+  modifyOrders?: boolean;
+  /** The broker's own order choices (a product type…), shown as selectors in the order ticket. */
+  ticketFields?: TicketField[];
 };
 export type Position = {
   id: string;
@@ -414,6 +431,8 @@ export type Order = {
   duration: string | null;
   message: string | null;
   updatedMs: number | null;
+  /** The ticket fields it was placed with, sent again when it is modified. */
+  fields?: Record<string, string>;
 };
 export type Execution = {
   id: string;
@@ -448,6 +467,8 @@ export type OrderTicket = {
   stopPrice: number | null;
   takeProfit: number | null;
   stopLoss: number | null;
+  /** The values picked in the broker's own ticket fields (`{"product":"CNC"}`), empty without any. */
+  fields?: Record<string, string>;
 };
 /** An enabled broker plugin, as the status lists it. */
 export type BrokerPlugin = { id: string; name: string; connected: boolean };
@@ -602,6 +623,8 @@ export const commands: {
   brokerSetPositionBrackets(positionId: string, takeProfit: number | null, stopLoss: number | null): Promise<CommandResult<void>>;
   brokerWatchQuotes(tickers: string[]): Promise<CommandResult<void>>;
   brokerSetSymbolMap(id: string, map: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
+  brokerRefreshState(): Promise<void>;
+  brokerInstrument(ticker: string): Promise<CommandResult<Instrument>>;
   [key: string]: any;
 } = new Proxy(
   {},
@@ -686,6 +709,8 @@ export const commands: {
   brokerSetPositionBrackets(positionId: string, takeProfit: number | null, stopLoss: number | null): Promise<CommandResult<void>>;
   brokerWatchQuotes(tickers: string[]): Promise<CommandResult<void>>;
   brokerSetSymbolMap(id: string, map: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
+  brokerRefreshState(): Promise<void>;
+  brokerInstrument(ticker: string): Promise<CommandResult<Instrument>>;
   [key: string]: any;
 };
 
