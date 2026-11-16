@@ -240,6 +240,9 @@ pub async fn info(app: &AppHandle, r: &Route) -> Result<Arc<Info>, String> {
     if info.pricescale == 0 {
         return Err(format!("{}: bad symbol info (pricescale 0)", r.symbol));
     }
+    if info.bar_origin.as_deref().is_some_and(|o| origin_minutes(o).is_none()) {
+        return Err(format!("{}: bad symbol info (barOrigin is not HHMM)", r.symbol));
+    }
     let info = Arc::new(info);
     state(app).infos.locked().insert(r.symbol.clone(), info.clone());
     Ok(info)
@@ -677,6 +680,15 @@ fn on_quote(app: &AppHandle, plugin: &str, params: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bar_origin_is_a_time_of_day() {
+        assert_eq!(origin_minutes("1700"), Some(1020));
+        assert_eq!(origin_minutes("0000"), Some(0));
+        assert_eq!(origin_minutes("2400"), None);
+        assert_eq!(origin_minutes("17:00"), None);
+        assert_eq!(origin_minutes("930"), None);
+    }
 
     fn iv(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
