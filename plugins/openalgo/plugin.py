@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.5"
+PLUGIN_VERSION = "0.1.6"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -1585,6 +1585,9 @@ class OpenAlgoSource:
         with self.lock:
             self.ws = sock
             self.ws_subscribed = set()
+            self.last_ws_tick = time.time()  # the connect counts as life: the quiet clock starts here,
+            # not at 0 — otherwise the first data.subscribe after a cold start reads the quiet check
+            # as "no tick since forever" and fires the REST fallback the same second
         self.log(f"OpenAlgo stream connected ({urllib.parse.urlsplit(url).netloc})")
 
         def send_text(text):
@@ -1647,7 +1650,7 @@ class OpenAlgoSource:
                 if frame is None:
                     break
                 if frame == ():
-                    continue  # ping answered, control frame, or an incomplete read
+                    continue  # ping answered or a control frame: there may be more in the buffer
                 self._ws_message(frame)
             now = time.time()
             with self.lock:
@@ -1662,25 +1665,26 @@ class OpenAlgoSource:
                 send_control(0x89)
 
     def _ws_frame(self, buffer):
-        """One WebSocket text frame from `buffer`: the payload bytes, or () for none yet / a control frame."""
+        """One WebSocket text frame from `buffer`: the payload bytes, () for a control frame — or
+        None while the buffer holds no complete frame yet (the caller goes back to recv)."""
         import struct
 
         if len(buffer) < 2:
-            return (), buffer
+            return None, buffer
         n = buffer[1] & 0x7F
         offset, length = 2, n
         if n == 126:
             if len(buffer) < 4:
-                return (), buffer
+                return None, buffer
             length = struct.unpack(">H", buffer[2:4])[0]
             offset = 4
         elif n == 127:
             if len(buffer) < 10:
-                return (), buffer
+                return None, buffer
             length = struct.unpack(">Q", buffer[2:10])[0]
             offset = 10
         if len(buffer) < offset + length:
-            return (), buffer
+            return None, buffer
         opcode = buffer[0] & 0x0F
         payload = buffer[offset:offset + length]
         rest = buffer[offset + length:]
