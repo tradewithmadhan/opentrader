@@ -5,6 +5,13 @@ fork's `6b3727cc`, plugin 0.1.9.** The design that landed differs from this draf
 field on `OrderTicket`, but a generic `capabilities.ticketFields` (the values travel in
 `fields`), and the lot size moved out of `pointValue` into `broker.instrument`'s `qtyStep`.
 
+**Follow-up #345 (`8786ed6f`, adopted in the fork's `9f3be6d1`):** the reference app counts
+futures in **contracts** — one NIFTY lot = qty 1 at pointValue 65. The plugin therefore sends
+`data.symbolInfo.pointValue = lotsize`, `broker.instrument = {"qtyMin": 1, "qtyStep": 1}` (pointValue
+omitted, taken from the symbol), multiplies qty by the lot on `place`/`modify`, and divides the
+broker's quantities by the lot on positions/orders/fills. Both counting ways stay legal as long as
+orders, positions and pointValue agree. Plugin 0.1.10 implements this.
+
 Title of the issue: **Order ticket: broker product selection (MIS / CNC / NRML) per order**
 
 Fork reference: `tradewithmadhan/opentrader`, branch `sample-web-clean`. The OpenAlgo plugin
