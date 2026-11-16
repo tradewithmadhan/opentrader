@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.9"
+PLUGIN_VERSION = "0.1.10"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -676,9 +676,9 @@ class OpenAlgoSource:
             "corrections": cal["corrections"],
             "pricescale": pricescale,
             "minmov": 1,
-            # The money one unit makes per point: Indian contracts are multiplier 1 (one unit is one
-            # share's worth), so 1; the lot size goes to `broker.instrument` as the quantity step.
-            "pointValue": 1,
+            # Money one unit makes per point: a future counted in contracts gives its multiplier
+            # (the master's lot size); the host divides the broker's quantities by the same lot.
+            "pointValue": lot,
             "intervals": self._served_intervals(),
         }
         # The profile and the logo name the bare symbol (the built-in provider's calls read
@@ -706,6 +706,23 @@ class OpenAlgoSource:
         if lot != 1.0:
             out += f" · lot {lot:g}"
         return out
+
+    def _lot_of(self, ticker):
+        """The master's lot size for `ticker` (1 when unknown or an equity)."""
+        row = self._symbol_row(ticker)
+        lot = num(first_of(row, "lotsize", "lot_size")) if row else None
+        return lot if lot and lot > 0 else 1.0
+
+    def _units(self, ticker, contracts):
+        """Contracts to broker units (× lot)."""
+        return (contracts or 0) * self._lot_of(ticker)
+
+    def _contracts(self, ticker, units):
+        """Broker units to contracts (÷ lot); units unchanged when the lot is unknown."""
+        lot = self._lot_of(ticker)
+        if not lot or lot <= 1:
+            return units or 0
+        return (units or 0) / lot
 
     def _symbol_row(self, ticker):
         """The master's row, or the live /symbol answer when the master doesn't list the symbol (a
@@ -1301,9 +1318,8 @@ class OpenAlgoSource:
         if row is None:
             raise PluginError(f"Unknown symbol {ticker}", -32004)
         exchange = ticker.split(":", 1)[0].upper()
-        lot = num(first_of(row, "lotsize", "lot_size")) or 1.0
         return {
-            "qtyMin": lot, "qtyStep": lot, "pointValue": 1,
+            "qtyMin": 1, "qtyStep": 1,
             "ticketFields": [self._product_field(self._product_options(exchange, row))],
         }
 
@@ -1320,9 +1336,12 @@ class OpenAlgoSource:
         # not asked yet. The wording is the app's ("65 is one lot: use 65 or 130").
         row = self._symbol_row(ticker)
         lot = num(first_of(row, "lotsize", "lot_size")) if row else None
-        if lot and lot > 1 and abs(qty - round(qty / lot) * lot) > 1e-9:
-            below = max(int(qty // lot) * int(lot), int(lot))
-            raise PluginError(f"{int(lot):g} is one lot: use {below:g} or {below + int(lot):g}")
+        if lot is None:
+            lot = 1.0
+        # Contracts are whole lots: a fractional contract is refused with the host's wording.
+        if abs(qty - round(qty)) > 1e-9:
+            below = max(int(qty // 1), 1)
+            raise PluginError(f"1 is one lot: use {below:g} or {below + 1:g}")
         # The product picked in the ticket (`fields.product`) wins over the settings default.
         picked = str((p.get("fields") or {}).get("product") or "").upper()
         product = picked if picked in self.PRODUCTS else (self.settings.get("product", "MIS").upper() or "MIS")
@@ -1331,7 +1350,7 @@ class OpenAlgoSource:
             "symbol": symbol, "exchange": exchange,
             "product": product,
             "pricetype": PRICE_TYPES.get(kind, "LIMIT"),
-            "quantity": int(qty),
+            "quantity": int(qty * lot),
             "price": num(p.get("limitPrice")) or 0,
             "trigger_price": num(p.get("stopPrice")) or 0,
             # the API wants these two even though they say nothing new here: action repeats the side
@@ -1372,7 +1391,7 @@ class OpenAlgoSource:
             "orderid": order["id"], "symbol": symbol, "exchange": exchange,
             "product": product,
             "pricetype": PRICE_TYPES.get(order["type"], "LIMIT"),
-            "quantity": int(order["qty"]),
+            "quantity": int((num(p.get("qty")) or order["qty"]) * (num(first_of(self._symbol_row(order["ticker"]), "lotsize", "lot_size")) or 1.0)),
             "price": num(p.get("limitPrice")) or num(order.get("limitPrice")) or 0,
             "trigger_price": num(p.get("stopPrice")) or num(order.get("stopPrice")) or 0,
             "action": order["side"].upper(),
@@ -1429,7 +1448,8 @@ class OpenAlgoSource:
             q = self.quotes.get(pos["ticker"])
             if q and pos.get("avgPrice"):
                 pos["last"] = q["price"]
-                pos["unrealizedPnl"] = round((q["price"] - pos["avgPrice"]) * pos["qty"] * (1 if pos["side"] == "buy" else -1), 2)
+                units = pos["qty"] * self._lot_of(pos["ticker"])
+                pos["unrealizedPnl"] = round((q["price"] - pos["avgPrice"]) * units * (1 if pos["side"] == "buy" else -1), 2)
         balance = num(first_of(funds, "availablecash", "cash", "totalfundvalue"), 0.0) or 0.0
         unrealized = num(first_of(funds, "m2munrealized", "unrealized"), 0.0) or 0.0
         realized = num(first_of(funds, "m2mrealized", "realized"), 0.0) or 0.0
@@ -1541,8 +1561,8 @@ class OpenAlgoSource:
             "ticker": f"{exchange}:{symbol}",
             "side": "sell" if side.startswith("s") else "buy",
             "type": PRICE_KINDS.get(kind, "limit"),
-            "qty": num(first_of(r, "quantity", "qty"), 0) or 0,
-            "filledQty": num(first_of(r, "filled_quantity", "filledqty", "filled"), 0) or 0,
+            "qty": self._contracts(f"{exchange}:{symbol}", num(first_of(r, "quantity", "qty"), 0) or 0),
+            "filledQty": self._contracts(f"{exchange}:{symbol}", num(first_of(r, "filled_quantity", "filledqty", "filled"), 0) or 0),
             "limitPrice": num(first_of(r, "price")),
             "stopPrice": num(first_of(r, "trigger_price", "triggerprice")),
             "avgFillPrice": num(first_of(r, "average_price", "avg_price", "averageprice")),
@@ -1558,11 +1578,12 @@ class OpenAlgoSource:
         if not symbol:
             return None
         qty = num(first_of(r, "netqty", "quantity", "qty"), 0) or 0
+        ticker = f"{exchange}:{symbol}"
         return {
-            "id": f"{exchange}:{symbol}",
-            "ticker": f"{exchange}:{symbol}",
+            "id": ticker,
+            "ticker": ticker,
             "side": "sell" if qty < 0 else "buy",
-            "qty": abs(qty),
+            "qty": self._contracts(ticker, abs(qty)),
             "avgPrice": num(first_of(r, "average_price", "avg_price", "buyavgprice", "sellavgprice"), 0) or 0,
             "last": None,
             "unrealizedPnl": num(first_of(r, "pnl", "unrealized", "m2m")),
@@ -1577,12 +1598,13 @@ class OpenAlgoSource:
         if not symbol:
             return None
         side = str(first_of(r, "transaction_type", "side") or "buy").lower()
+        ticker = f"{exchange}:{symbol}"
         return {
             "id": str(first_of(r, "tradeid", "executionid", "orderid") or ""),
             "orderId": str(first_of(r, "orderid", "order_id") or ""),
-            "ticker": f"{exchange}:{symbol}",
+            "ticker": ticker,
             "side": "sell" if side.startswith("s") else "buy",
-            "qty": num(first_of(r, "quantity", "qty"), 0) or 0,
+            "qty": self._contracts(ticker, num(first_of(r, "quantity", "qty"), 0) or 0),
             "price": num(first_of(r, "average_price", "avg_price", "price"), 0) or 0,
             "timeMs": self._ms(first_of(r, "timestamp", "trade_time", "updatetime")),
             "commission": num(first_of(r, "commission")),
