@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -1670,11 +1670,13 @@ class OpenAlgoSource:
         rest = buffer[offset + length:]
         if opcode == 0x8:
             raise PluginError("the stream closed")  # close frame
-        if opcode == 0x9:  # ping → pong
-            try:
-                sock = self.ws
-                if sock:
-                    sock.sendall(bytes(bytearray([0x8A, 0x80 | len(payload)]) + payload))
+        if opcode == 0x9:  # ping → pong. Client frames are masked: an unmasked pong is a protocol
+            try:           # error, and the server closes the socket with 1002 "incorrect masking"
+                sock = self.ws  # right after its first ping (verified live) — the stream then
+                if sock:        # reconnects forever and the watchlist falls back to REST polling
+                    mask = os.urandom(4)
+                    sock.sendall(bytes(bytearray([0x8A, 0x80 | len(payload)]) + mask)
+                                 + bytes(payload[i] ^ mask[i % 4] for i in range(len(payload))))
             except OSError:
                 pass
             return (), rest
