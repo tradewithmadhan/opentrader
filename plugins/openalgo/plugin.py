@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.6"
+PLUGIN_VERSION = "0.1.7"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -1401,8 +1401,10 @@ class OpenAlgoSource:
         now = time.time()
         with self.lock:
             due = now - self.last_poll >= self.POLL_EVERY
+            fresh = self.last_poll == 0.0  # the first read is at once — it is what lets the
+            # broker state report connected within seconds of the start, not a minute in
             work = bool(self.positions) or any(o.get("status") in ("placing", "working") for o in self.orders)
-        if not (due and (work or now - self.last_poll > 60)):
+        if not ((due or fresh) and (work or now - self.last_poll > 60 or fresh)):
             return []
         self.last_poll = now
         try:
@@ -1883,6 +1885,8 @@ class Plugin:
         self.tickers = set()  # data.subscribe
         self.watched = set()  # broker.watchQuote
         self.alive = False
+        self.pushed_connected = False  # what the last broker.state push reported
+        self.last_state_push = 0.0
 
     # ── JSON-RPC ──
     def send(self, message):
@@ -2024,8 +2028,18 @@ class Plugin:
                         self.notify("broker.quote", {"ticker": q["ticker"], "bid": round(price - half, 10),
                                                      "ask": round(price + half, 10), "last": price})
                 self.events(events)
-                if self.source.positions:
-                    self.push_state()  # the open P&L moves with the price
+                # The broker state reaches the host when its connected flag or its books move,
+                # and at least every 30 s (with open positions, every pass: the open P&L moves
+                # with the price). The connect-time push carries connected=False — no book has
+                # been read yet — and with no open positions nothing else ever re-pushed it, so
+                # the ticket kept refusing a working plugin ("Broker not connected").
+                rest_ok = self.source.rest_ok
+                now = time.time()
+                if (self.source.positions or events or rest_ok != self.pushed_connected
+                        or now - self.last_state_push >= 30.0):
+                    self.push_state()
+                    self.last_state_push = now
+                    self.pushed_connected = rest_ok
             except OSError:
                 return
             time.sleep(1)
@@ -2044,6 +2058,8 @@ class Plugin:
         self.alive = True
         self.log(f"Connected to {welcome.get('result', {}).get('app', 'OpenTrader')} (Plugin API {welcome.get('result', {}).get('api')})")
         self.push_state()
+        self.pushed_connected = self.source.rest_ok  # what the connect-time push just reported
+        self.last_state_push = time.time()
         threading.Thread(target=self.stream, daemon=True).start()
         for line in reader:
             if not line.strip():
