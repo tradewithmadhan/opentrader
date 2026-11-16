@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.4"
+PLUGIN_VERSION = "0.1.5"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -366,6 +366,8 @@ class OpenAlgoSource:
         self.quotes = {}
         self.minute_bars = {}  # whole symbol → the forming minute bar [time,o,h,l,c,v]
         self.day_bars = {}  # whole symbol → the forming day bar
+        self.day_vol = {}  # whole symbol → the last day volume (ticks without one carry it on)
+        self.vol_base = {}  # whole symbol → the day volume at the minute bucket's first priced tick
         self.ws = None
         self.ws_thread = None
         self.ws_generation = 0
@@ -1194,14 +1196,28 @@ class OpenAlgoSource:
             return None
         now = int(time.time())
         return {"ticker": ticker, "time": now, "price": q["price"], "prevClose": q.get("prevClose"),
-                "minute": self._complete(minute, now // 60 * 60, q),
+                "minute": self._minute_bar(minute, now // 60 * 60, q["price"]),
                 "day": self._complete(day, ist_midnight(now), q)}
 
+    def _minute_bar(self, bar, start, price):
+        """The forming minute bar [time,o,h,l,c,v]: the last price only — the WS day side
+        (its open / high / low / volume) never touches a minute bar, the way the built-in
+        provider keeps its bucket. The volume is the bucket's own delta, maintained in
+        `_ws_message`; a bar seeded here (no ticks in this minute yet) carries none."""
+        if not bar or bar[0] != start:
+            return [start, price, price, price, price, 0]
+        bar = list(bar)
+        bar[2], bar[3], bar[4] = max(bar[2], price), min(bar[3], price), price
+        return bar
+
     def _complete(self, bar, start, q):
-        """A forming bar's shape [time,o,h,l,c,v], seeded from the quote's day fields when it is empty."""
+        """The forming day bar [time,o,h,l,c,v] from the quote's day fields (open / high / low /
+        volume are the day's, both on WS ticks and REST answers): close the last price, and a
+        missing day side falls back to what the bar (or the price) has rather than a 0."""
         p = q["price"]
         if not bar or bar[0] != start:
             return [start, q.get("open") or p, q.get("high") or p, q.get("low") or p, p, q.get("volume") or 0]
+        bar = list(bar)
         bar[2], bar[3] = max(bar[2], q.get("high") or p), min(bar[3], q.get("low") or p)
         bar[4], bar[5] = p, q.get("volume") or bar[5] or 0
         return bar
@@ -1740,20 +1756,37 @@ class OpenAlgoSource:
                  "prevClose": prev or (self.quotes.get(ticker) or {}).get("prevClose")}
         with self.lock:
             self.quotes[ticker] = quote
-            start = t // 60 * 60
+            # Bar formation follows the built-in provider's rules (its `absorb_tick` /
+            # `track_bucket_volume`): the tick volume is the cumulative DAY volume, carried
+            # through the ticks that arrive without one; the forming minute bucket is ltp-only
+            # and its own volume is the day volume's delta since the bucket's first tick with a
+            # volume — the day fields (open / high / low / volume) belong to the day bar alone.
+            if quote["volume"]:
+                self.day_vol[ticker] = quote["volume"]
+            day_vol = self.day_vol.get(ticker) or 0
+            now = int(time.time())
+            start = now // 60 * 60
             bar = self.minute_bars.get(ticker)
             if not bar or bar[0] != start:
-                self.minute_bars[ticker] = [start, price, price, price, price, quote["volume"]]
+                self.minute_bars[ticker] = [start, price, price, price, price, 0]
+                # a rolled bucket takes its base from this tick's day volume; a volume-less
+                # roll delays the base rather than pouring the pre-bucket gap into the bar
+                if quote["volume"]:
+                    self.vol_base[ticker] = quote["volume"]
             else:
-                bar[2], bar[3], bar[4], bar[5] = max(bar[2], price), min(bar[3], price), price, quote["volume"] or bar[5] or 0
-            start = ist_midnight(t)
+                if quote["volume"] and not self.vol_base.get(ticker):
+                    self.vol_base[ticker] = quote["volume"]
+                bar[2], bar[3], bar[4] = max(bar[2], price), min(bar[3], price), price
+                base = self.vol_base.get(ticker)
+                bar[5] = max(0, day_vol - base) if base else 0
+            start = ist_midnight(now)
             bar = self.day_bars.get(ticker)
             if not bar or bar[0] != start:
                 self.day_bars[ticker] = [start, quote["open"] or price, quote["high"] or price,
-                                         quote["low"] or price, price, quote["volume"]]
+                                         quote["low"] or price, price, day_vol]
             else:
-                bar[2], bar[3], bar[4], bar[5] = (max(bar[2], quote["high"] or price), min(bar[3], quote["low"] or price),
-                                                  price, quote["volume"] or bar[5] or 0)
+                bar[2], bar[3] = max(bar[2], quote["high"] or price), min(bar[3], quote["low"] or price)
+                bar[4], bar[5] = price, day_vol
 
     def _handle_order_update(self, message):
         """An order transition pushed by the broker (fill, cancel, reject). Refresh the
