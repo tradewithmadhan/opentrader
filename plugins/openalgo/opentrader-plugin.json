@@ -1,7 +1,7 @@
 {
   "id": "openalgo",
   "name": "OpenAlgo",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "publisher": "tradewithmadhan",
   "description": "Your OpenAlgo deployment in OpenTrader: the market segments of your account (NSE, BSE, NFO, MCX…) on the charts and its trading from the charts.",
   "api": 2,

@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.7"
+PLUGIN_VERSION = "0.1.8"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -1273,6 +1273,14 @@ class OpenAlgoSource:
             raise PluginError(f"{ticker} is not one of this account's symbols")
         if not qty or qty <= 0:
             raise PluginError("The quantity must be above 0")
+        # The broker's quantity is in lots on the derivatives (the master's lotsize), and the
+        # ticket has no lot stepper yet — it sends units. A wrong quantity is caught here with
+        # the next valid value instead of a round trip to the broker's rejection.
+        row = self._symbol_row(ticker)
+        lot = num(first_of(row, "lotsize", "lot_size")) if row else None
+        if lot and lot > 1 and abs(qty - round(qty / lot) * lot) > 1e-9:
+            raise PluginError(f"Quantity must be in multiples of the lot size {int(lot)} — "
+                              f"try {int((qty // lot + 1) * lot)} or more")
         exchange, _, symbol = ticker.partition(":")
         body = {
             "symbol": symbol, "exchange": exchange,
