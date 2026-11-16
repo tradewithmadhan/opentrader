@@ -1,5 +1,10 @@
 # Upstream proposal - for filing on deepentropy/opentrader
 
+**Filed (as part of deepentropy/opentrader#341) and fixed upstream in `285a391c` — adopted in the
+fork's `6b3727cc`, plugin 0.1.9.** The design that landed differs from this draft: no `product`
+field on `OrderTicket`, but a generic `capabilities.ticketFields` (the values travel in
+`fields`), and the lot size moved out of `pointValue` into `broker.instrument`'s `qtyStep`.
+
 Title of the issue: **Order ticket: broker product selection (MIS / CNC / NRML) per order**
 
 Fork reference: `tradewithmadhan/opentrader`, branch `sample-web-clean`. The OpenAlgo plugin

@@ -1,5 +1,10 @@
 # Upstream proposal - for filing on deepentropy/opentrader
 
+**Filed as deepentropy/opentrader#341 and fixed upstream in `285a391c`.** Adopted into this fork in
+`6b3727cc` and the OpenAlgo plugin in 0.1.9 (`ba00c2bb`): the ticket's product field, lot sizing via
+`broker.instrument` (pointValue now per unit, the lot as qtyStep), `broker.getState`, and -32004 for
+unknown symbols.
+
 Title of the issue: **Broker plugins: the host gaps an Indian-broker plugin hits (ticket product, lot sizing, broker-state contract, stale watchlist symbols)**
 
 Fork reference: `tradewithmadhan/opentrader`, branch `sample-web-clean`. The OpenAlgo plugin
