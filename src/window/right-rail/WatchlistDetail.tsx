@@ -5,8 +5,8 @@
  * Data sources (all per-ticker, light):
  *   • reference info → get_ticker_info  (gateway tickers/<T>)
  *   • live snapshot  → get_ticker_snapshot (gateway snapshot/<T>)
- *   • 52w / perf / avg vol → computed client-side from daily candles
- *     (datafeed.getBars(sym, "1D"), the same series the chart uses)
+ *   • 52w / perf / avg vol → computed client-side from the last year of daily
+ *     candles (datafeed.getLastYearDailyBars)
  *
  * No static fallback — each field shows the gateway's value or `—` while the
  * fetch is in flight / failed. A single createResource keyed on the bare
@@ -16,7 +16,7 @@
 import { createEffect, createResource, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import {
   exchangeName,
-  getBars,
+  getLastYearDailyBars,
   getTickerInfo,
   getTickerSnapshot,
   type Snapshot,
@@ -245,8 +245,7 @@ export function WatchlistDetail(props: Props) {
   // the rest of the panel never waits on it; these fields fill in when it lands.
   const [yr] = createResource<YearRange | null, string>(full, async (sym) => {
     try {
-      const { bars } = await getBars(sym, "1D", "ETH", () => untrack(full) === sym);
-      return computeYearRange(bars);
+      return computeYearRange(await getLastYearDailyBars(sym, () => untrack(full) === sym));
     } catch {
       return null;
     }
