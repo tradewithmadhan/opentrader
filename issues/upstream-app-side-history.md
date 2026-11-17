@@ -1,5 +1,17 @@
 # Upstream proposal — for filing on deepentropy/opentrader
 
+> **Update 17/11/2026 — mostly fixed by upstream #347 (`3485843b`, "Plugin history").** The
+> app now keeps a symbol's recent series (one read at a time, fresh <10 s answered at once,
+> scroll-back pages kept 10 min), reads `data.symbolInfo`'s new `history` (calendar days per
+> bar family) to ask nothing older and only bars that fit the window, and backs off on the new
+> busy error -32005. The Details panel reads ~a year of daily bars. Our OpenAlgo plugin
+> 0.1.12 implements both plugin-side halves (`history`, -32005 on 429/503 and "Rate limit …"
+> messages). **What is still open** (the rest of this draft): per-request chunk caps and a
+> `requestsPerSecond`-style pacing budget — a source cannot say "ask me at most N days per
+> call" or "at most X requests a second", so the app still relies on the plugin internally
+> splitting and the gateway still throttles the burst. Decide whether the remainder is worth
+> filing on its own.
+
 Title of the issue: **Chart history: the 7560-bar daily preload reaches data plugins uncapped and unpaced — give sources a way to declare their per-timeframe limits and rate budget**
 
 Fork reference: `tradewithmadhan/opentrader`, branch `sample-web-clean`. Everything below was
