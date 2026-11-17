@@ -1,6 +1,14 @@
 # Upstream proposal — for filing on deepentropy/opentrader
 
-Title of the issue: **Chart data loading: reduce upfront history, only fetch bars for the focused/active chart**
+Title of the issue: **Chart history: the 7560-bar daily preload bypasses every history cap on the plugin path, and requests are not paced to a source's limits**
+
+Fork reference: `tradewithmadhan/opentrader`, branch `sample-web-clean`. Observed with a live
+OpenAlgo data plugin (Plugin API 2) against a self-hosted deployment; plugin log from 17/11/2026.
+This replaces two earlier drafts — corrected against the current code (upstream 0.4.26):
+`clampLookback` no longer exists (the mechanism is now `clamp_to_floor` + `BarFamily` in
+`crates/core/src/history/mod.rs`), and the "history is fetched for every open tab" claim is false
+(verified from the log: only the focused chart's symbol gets `data.bars`; other tabs load
+`symbolInfo` + quotes only).
 
 Paste everything below the line into the issue body.
 
@@ -8,34 +16,87 @@ Paste everything below the line into the issue body.
 
 ### Summary
 
-The chart datafeed requests 30 years of daily bars up-front (`DAILY_FULL_DAYS = 7560` in `src/data/datafeed.ts`) for every daily chart, and the app fetches history for every open chart tab, not just the focused one. For data sources whose history is shallow or expensive to synthesize (OpenAlgo plugins on affected deployments), this makes every chart open slow and multiplies the cost across tabs. Two frontend changes would fix it.
+Every symbol change on a daily chart fires **two** daily history requests: a quick-paint ask
+(`countBack: 10`) and a full preload (`countBack: 7560` — `DAILY_FULL_DAYS` in
+`src/data/datafeed.ts:110`). The preload exists so scroll-back is instant, and for the **built-in**
+provider it is safe: the core clamps the window to the probed history floor (`clamp_to_floor` +
+`BarFamily`, `crates/core/src/history/mod.rs`). But **plugin-routed bars bypass all of it**:
+`src-tauri/src/plugins/data.rs::bars` forwards the frontend's `count` untouched (only clamped to
+`MAX_BARS`), and `historyLimits()?.day` — the source capability that exists precisely for this
+(`src/data/sources/types.ts:117`) — is only read to render a "history exhausted" note
+(`src/window/chart/view/symbol-load.ts:316`), never to cap or pace the requests themselves.
 
-### Background
+The deeper problem: the app has no notion of a **request budget**. A source behind a rate-limited
+gateway cannot tell the app "I can serve at most N bars per request and afford ~M requests per
+symbol load" — so the app asks 7560 bars and pages aggressively, and the plugin absorbs it by
+firing a burst of backend calls the app never sees.
 
-Observed with the OpenAlgo data plugin: opening 6 charts produces 6 serial `data.bars {countBack: 7560}` requests, each taking ~4.5 s (the plugin has to synthesize daily bars from hourly because the broker's daily endpoint answers only its last day). Total ≈ 30 s of serial work per "open charts" action.
+### Observed — one symbol change (live log, 17/11/2026)
 
-Note: there are no watchlist mini-charts/sparklines in the codebase — the watchlist only uses live quotes pushed via `data.subscribe`. So the bars requests come from open chart tabs, not the watchlist.
+```
+data.bars {"countBack":10,   "resolution":"1D", "ticker":"NFO:NIFTY23NOV26FUT", ...}   // quick paint
+data.bars {"countBack":7560, "resolution":"1D", "ticker":"NFO:NIFTY23NOV26FUT", ...}   // contract listed 3 weeks earlier: answers 57 bars
+data.bars {"countBack":2880, "resolution":"5",  ...}                                   // answered ~780 (plugin's synthesis cap)
+data.bars {"countBack":2880, "resolution":"5",  ...}                                   // page-back, because countBack wasn't served
+data.bars {"countBack":10,   "resolution":"1D", "ticker":"NFO:NIFTY23NOV26FUT", ...}   // same symbol re-selected 65 s later: identical ask again
+```
 
-### 1. Reduce the default chart history range
+- The 7560-bar preload is sent for a contract with **57 days** of history; a shallow plugin must
+  still pay a full synthesis scan for a 30-year window on every symbol change.
+- Because the plugin's per-call synthesis is capped (~780 bars), the 2880-bar intraday ask comes
+  back short and the datafeed pages — one symbol change becomes 5 requests where 2 would do.
+- With the plugin's internal chunking (each daily year chunk = 1 probe of the daily endpoint +
+  1 hourly synthesis call), the 7560 ask alone turns into **~12 backend `/history` calls**;
+  one symbol change totals **~15–19 calls within a second**. On a rate-limited deployment that
+  burst is what the gateway sees and throttles — and the app cannot know it happened, because
+  the limits live inside the plugin.
+- Re-selecting the same symbol re-asks the identical quick-paint window; nothing dedupes it.
 
-**Location:** `src/data/datafeed.ts` line 113 — `const DAILY_FULL_DAYS = 7560;`
+### What's needed
 
-Used by `DAILY_INTERVALS` (1D/1W/1M) and `dailyFamily()` (custom ND/NW/NM). The comment says the whole available daily history is loaded up-front so scrolling back is instant. 30 years is far more than any provider serves cheaply, and for shallow providers it is actively harmful.
+**1. Honor `historyLimits()?.day` when building the daily ask.** The capability is already plumbed
+end to end; use it in `datafeed.ts` to size the up-front lookback per source (7560 stays the
+fallback for a source that declares nothing) instead of only annotating exhaustion.
 
-**Suggestion:** lower the default, or derive it from `source().historyLimits()?.day` (falling back to 7560 for the gateway). The built-in OpenAlgo provider already caps at 365 via `historyLimits`; the up-front lookback should respect the same cap so a shallow provider never receives a 7560-day request.
+**2. The plugin-path equivalent of `clamp_to_floor`.** Let a plugin declare its history floor /
+lookback cap so `plugins/data.rs::bars` clamps `countBack` exactly like the core does for
+built-in providers — a Plugin API 2 field (or reuse of `historyLimits` over the plugin wire).
 
-### 2. Only fetch bars for the focused/active chart
+**3. A rate-limit-aware request budget for history.** Extend the source capability so a source can
+declare what one request costs it, and have the host plan around it:
 
-History is requested for every open chart tab, not just the focused one. The plugin cannot tell which request is "active" — it just answers `data.bars`.
+```ts
+historyLimits(): {
+  day?: number;            // existing: max lookback
+  maxBarsPerRequest?: number;  // largest window one request should cover
+  maxRequestsPerLoad?: number; // soft budget of history requests per symbol load
+  requestsPerSecond?: number;  // pacing for paging / retries
+} | null
+```
 
-**Suggestion:** only call `getBars` for the focused/active chart pane; keep other tabs' bars stale until they become active (or until the user scrolls). Lazy-load on focus change.
+The host then:
+- sizes the up-front preload to what the budget can serve (e.g. `min(DAILY_FULL_DAYS,
+  maxBarsPerRequest × maxRequestsPerLoad)`) instead of a fixed 7560;
+- sizes and paces scroll-back pages to what the source declared **and actually returned** (a page
+  that came back short is re-asked with the served count, not the original ask);
+- serializes/queues a symbol's history requests instead of firing the quick-paint, the preload
+  and the intraday window concurrently.
 
-### Why this matters for plugins
+Why this shape: today the chunking and pacing live *inside* the plugin, invisible to the host —
+the plugin must either fire a burst (rate-limited, throttled, slow) or answer short (and the app
+pages it, firing more). A declared budget turns the invisible burst into a planned 2–4 requests,
+and every source that declares nothing keeps today's behaviour.
 
-A data plugin serves symbols under `<exchange>:<ticker>` and answers `data.bars {ticker, resolution, from, to, countBack}`. It has no way to know the visible range or which symbol is active, and it cannot refuse a 7560-day request without breaking the chart. The only levers are the app's request size and request count. The plugin-side mitigations (capping synthesis to 365 days, dropping stale symbols from the WebSocket subscribe frame) are workarounds; these two changes are what actually remove the cost.
+**4. Dedupe unchanged repeat asks.** Re-selecting a symbol re-asks an identical window seconds
+later; serving it from the in-flight or just-completed load (per tab, per resolution) removes one
+request class entirely.
 
-### Related
+### Notes
 
-- Companion issue: chart history performance on shallow providers (the 7560 default and `clampLookback` not taking effect for plugin-routed symbols).
-- `src/data/datafeed.ts` — `DAILY_FULL_DAYS`, `clampLookback`, `getBars`, `getBarsBefore`.
-- `src-tauri/src/plugins/data.rs` — `plugin::recent` / `plugin::bars` (passes `days` straight through as `countBack`).
+- Only the focused chart fetches history (verified) — no per-tab change is needed; the cost is
+  per symbol change, not per open tab.
+- Plugin-side mitigations already shipped in the fork's OpenAlgo plugin (year-chunk caching,
+  floor detection that stops the daily walk) soften the repeats but not the first burst; the
+  request budget is what removes it.
+
+Happy to test a build against a live deployment.
