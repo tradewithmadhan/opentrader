@@ -45,6 +45,7 @@ import { migrateDrawingKey } from "../drawings/persistence";
 import { setSelectedDrawingId } from "../drawings/drawing-selection";
 import { embedConfig } from "../../embed/config";
 import { embedSeedTab } from "../../embed/seed";
+import { chartLinkUrl } from "../../data/chart-link";
 
 export function createAppTabs(windowLabel: string, singleView = false) {
   // An embedded chart (#338) opens on the chart its settings describe.
@@ -387,6 +388,13 @@ export function createAppTabs(windowLabel: string, singleView = false) {
     const t = tabs().find((x) => x.id === id);
     if (t) navigator.clipboard?.writeText(fullSymbolFor(activePaneOf(t).symbol)).catch(() => undefined);
   }
+  /** Tab menu "Copy link" (#350): the web link of the tab's focused chart, its symbol and interval. */
+  function copyTabLink(id: string) {
+    const t = tabs().find((x) => x.id === id);
+    if (!t) return;
+    const p = activePaneOf(t);
+    navigator.clipboard?.writeText(chartLinkUrl({ symbol: fullSymbolFor(p.symbol), interval: p.interval })).catch(() => undefined);
+  }
 
   return {
     tabs,
@@ -423,6 +431,7 @@ export function createAppTabs(windowLabel: string, singleView = false) {
     reloadTab,
     openDevTools,
     copyTabSymbol,
+    copyTabLink,
   };
 }
 
