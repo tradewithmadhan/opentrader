@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.14"
+PLUGIN_VERSION = "0.1.15"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -1309,31 +1309,84 @@ class OpenAlgoSource:
             bars = bars[-count_back:]
         return bars
 
+    @staticmethod
+    def _session_bounds(exchange, ts):
+        """(open, close) of ts's calendar-day session, from the static table, IST epoch seconds.
+        The tables are one daily window per exchange; holidays are not known here (a probe into
+        one costs a single empty call, which the paging below survives)."""
+        spec = SESSIONS.get(exchange, SESSIONS["_"])
+        o_h, o_m, c_h, c_m = int(spec[:2]), int(spec[2:4]), int(spec[5:7]), int(spec[7:9])
+        day = ist_midnight(ts)
+        return day + (o_h * 60 + o_m) * 60, day + (c_h * 60 + c_m) * 60
+
+    def _first_bar_at(self, exchange, ts):
+        """The earliest bar stamp the source can hold at or after ts: a bar grid starts at the
+        session's open, so an off-hours ts (evening, pre-open) waits for the next open — and
+        Saturdays and Sundays roll to Monday, the static table has no weekend."""
+        open_ts, close_ts = self._session_bounds(exchange, ts)
+        if open_ts <= ts < close_ts and datetime.fromtimestamp(ts, TZ_IST).weekday() < 5:
+            return ts
+        day = ist_midnight(ts)
+        for _ in range(4):  # at most a weekend to cross
+            open_ts, _ = self._session_bounds(exchange, day)
+            if open_ts >= ts and datetime.fromtimestamp(open_ts, TZ_IST).weekday() < 5:
+                return open_ts
+            day += 86400
+        return ts  # unreachable
+
+    def _last_bar_cover(self, exchange, ts):
+        """The newest moment a bar can cover at or before ts: its session's close — the prior
+        weekday's close when ts sits before that open (a pre-open or early-morning `to`)."""
+        open_ts, close_ts = self._session_bounds(exchange, ts)
+        if ts >= open_ts:
+            return close_ts  # in the session or after its close: the close covers ts's side
+        day = ist_midnight(ts) - 86400
+        for _ in range(4):
+            if datetime.fromtimestamp(day, TZ_IST).weekday() < 5:
+                _, close_ts = self._session_bounds(exchange, day)
+                return close_ts
+            day -= 86400
+        return close_ts  # unreachable
+
     def _window_page(self, exchange, symbol, interval, daily, frm, to, count_back, depth, guard):
-        """The window's bars, paged to its span. The deployment caps rows per call (~780) and
-        answers the window's newest rows: page toward the uncovered side, one call per page,
-        until the window spans (or the source's history ends). This replaces the binary split,
-        which refetched the covered half at every level — a 2880-bar ask cost ~7-10 calls where
-        paging takes ~4. A bar at T covers [T, T+period), the period the last two bars' gap:
-        history "reaches" `to` when its last bar's coverage does."""
+        """The window's bars, paged to its span in session time. The deployment caps rows per
+        call (~780) and answers the window's newest rows: page toward the uncovered side, one
+        call per page, until the window spans (or the source's history ends). This replaces the
+        binary split, which refetched the covered half at every level — a 2880-bar ask cost
+        ~7-10 calls where paging takes ~4. The span is judged in session time: raw window edges
+        misfire (an evening `frm`'s first bar is the next session's 09:15; an after-close `to`
+        sits between bar stamps), and complete answers were split for nothing. A bar at T
+        covers [T, T+period), the period the last two bars' gap."""
         bars = self._window_fetch(exchange, symbol, interval, daily, frm, to, count_back, depth)
         if bars is None:
             return []
+        first = self._first_bar_at(exchange, frm)
+        last = min(self._last_bar_cover(exchange, to), to)
         while len(bars) >= 2 and to - frm > 3 * 86400 and guard > 0 and depth < 9 \
                 and (not count_back or len(bars) < count_back):
-            reach = bars[-1][0] + max(bars[-1][0] - bars[-2][0], 1)
-            if bars[0][0] > frm + 1:
+            gap = max(bars[-1][0] - bars[-2][0], 1)
+            if bars[0][0] - first >= gap:
+                # the answer's oldest bar sits a period or more after the window's earliest
+                # possible one: there may be bars between — page older
                 older = self._window_fetch(exchange, symbol, interval, daily, frm, bars[0][0] - 1, count_back, depth + 1)
                 if not older:
                     break  # the source's history ends inside the window
                 have = {b[0] for b in older}
-                bars = older + [b for b in bars if b[0] not in have]
-            elif reach < to:
-                newer = self._window_fetch(exchange, symbol, interval, daily, reach, to, count_back, depth + 1)
+                merged = older + [b for b in bars if b[0] not in have]
+                if len(merged) == len(bars):
+                    break  # the page repeated the covered rows: the source ends here
+                bars = merged
+            elif bars[-1][0] + 2 * gap <= last:
+                # room for one more complete bar before the window's covered end — page newer;
+                # a mid-gap or after-close `to` leaves none (no probe into dead time)
+                newer = self._window_fetch(exchange, symbol, interval, daily, bars[-1][0] + gap, to, count_back, depth + 1)
                 if not newer:
                     break
                 have = {b[0] for b in bars}
-                bars = bars + [b for b in newer if b[0] not in have]
+                merged = bars + [b for b in newer if b[0] not in have]
+                if len(merged) == len(bars):
+                    break
+                bars = merged
             else:
                 break  # the window spans
             if len(bars) > count_back:
