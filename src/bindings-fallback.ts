@@ -389,9 +389,14 @@ export type Instrument = {
   pointValue?: number | null;
   /** This ticker's ticket fields, in place of the capabilities'. */
   ticketFields?: TicketField[] | null;
+  /** This ticker's times in force, in place of the capabilities'. */
+  durations?: OrderDuration[] | null;
 };
 /** What the plugin's broker supports; the order ticket and the chart offer only that. A field the
  *  plugin leaves out is supported (serde-default on the Rust side, optional here). */
+/** A time in force the broker takes ("day", "gtc"…): what the order carries, what the ticket shows
+ *  and the order types it applies to (all when left out). */
+export type OrderDuration = { id: string; label?: string | null; orderTypes?: OrderType[] | null; default?: boolean | null };
 export type BrokerCapabilities = {
   orderTypes?: OrderType[];
   /** Take profit / stop loss on a new order. */
@@ -404,6 +409,8 @@ export type BrokerCapabilities = {
   modifyOrders?: boolean;
   /** The broker's own order choices (a product type…), shown as selectors in the order ticket. */
   ticketFields?: TicketField[];
+  /** How long an order stays working (time in force), the ticket's selector. None: the plugin's own. */
+  durations?: OrderDuration[];
 };
 export type Position = {
   id: string;
@@ -473,6 +480,8 @@ export type OrderTicket = {
   stopLoss: number | null;
   /** The values picked in the broker's own ticket fields (`{"product":"CNC"}`), empty without any. */
   fields?: Record<string, string>;
+  /** The time in force picked (a `durations` id); left out when the broker declares none. */
+  duration?: string;
 };
 /** An enabled broker plugin, as the status lists it. */
 export type BrokerPlugin = { id: string; name: string; connected: boolean };
