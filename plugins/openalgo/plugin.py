@@ -29,12 +29,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.11"
+PLUGIN_VERSION = "0.1.12"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
 
 TZ_IST = timezone(timedelta(hours=5, minutes=30), "Asia/Kolkata")
+
+# The oldest bars the deployment serves: the intraday floor (daily bars are synthesized from the
+# hour endpoint, so they stop here too — the D endpoint answers one row for any window, the plugin
+# builds the days from the hour bars). `history` (below, the app's #347 contract) is measured from
+# it: the app then asks nothing older and only as many bars as fit the window.
+HISTORY_FLOOR = datetime(2021, 11, 13, tzinfo=TZ_IST)
 
 # ── the market's clock: bars and sessions are keyed in the exchange's time zone (India: one) ──
 def ist_midnight(ts):
@@ -116,6 +122,17 @@ class PluginError(Exception):
     def __init__(self, message, code=-32000):
         super().__init__(message)
         self.code = code
+
+
+# -32005 (busy, app's #347 contract): the app asks again later, waiting longer each time, instead
+# of paging harder into the endpoint that said no. Used when the gateway rate-limits us.
+BUSY_CODE = -32005
+
+
+def is_rate_limit_message(msg):
+    """A gateway message that spells the rate limit out (some adapters answer HTTP 200 with
+    `"status": "error"` and "Rate limit …" in the message instead of an HTTP 429)."""
+    return "rate limit" in str(msg or "").lower()
 
 
 # ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -483,6 +500,9 @@ class OpenAlgoSource:
             with urllib.request.urlopen(request, timeout=30) as r:
                 answer = json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
+            if e.code in (429, 503):
+                # The gateway's rate limit (or a proxy in front of it): busy, the app backs off.
+                raise PluginError(f"OpenAlgo answered HTTP {e.code} — rate limited, the app will ask again later", BUSY_CODE) from e
             try:
                 answer = json.loads(e.read().decode("utf-8"))
             except (OSError, ValueError):
@@ -491,7 +511,13 @@ class OpenAlgoSource:
             self.rest_ok = False
             raise PluginError(f"OpenAlgo is not reachable ({_clean(str(e), key)})") from e
         if str(answer.get("status", "")).lower() not in ("success", "ok"):
-            raise PluginError(f"OpenAlgo: {answer.get('message') or 'the request failed'}")
+            msg = str(answer.get("message") or "the request failed")
+            # -32005 (busy, #347): the app asks again later, waiting longer each time, instead of
+            # paging harder into the throttled endpoint. Some adapters spell the limit out in the
+            # JSON message instead of answering HTTP 429.
+            if is_rate_limit_message(msg):
+                raise PluginError(f"OpenAlgo: {msg} — the app will ask again later", BUSY_CODE)
+            raise PluginError(f"OpenAlgo: {msg}")
         self.rest_ok = True
         return answer if whole else answer.get("data")
 
@@ -684,6 +710,10 @@ class OpenAlgoSource:
             # (the master's lot size); the host divides the broker's quantities by the same lot.
             "pointValue": lot,
             "intervals": self._served_intervals(),
+            # How far back, in calendar days, the source serves each family of bars (#347): the app
+            # asks nothing older and no more bars than fit the window. Days and minutes reach the
+            # floor; no seconds are served.
+            "history": {"minute": self._history_days(), "day": self._history_days()},
         }
         # The profile and the logo name the bare symbol (the built-in provider's calls read
         # `companies/TCS`, `logos/TCS` — the venue prefix would 404 them).
@@ -946,6 +976,11 @@ class OpenAlgoSource:
         with self.lock:
             self._timings[date] = (today, rows)
         return rows
+
+    def _history_days(self):
+        """The calendar days of bars the source serves (from the floor to today); the app's
+        `history` depth for the day and minute families."""
+        return (datetime.now(TZ_IST) - HISTORY_FLOOR).days + 1
 
     def _served_intervals(self):
         """The resolutions the plugin maps straight onto the source (the app builds the others)."""
