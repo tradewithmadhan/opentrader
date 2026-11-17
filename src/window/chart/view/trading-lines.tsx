@@ -16,6 +16,9 @@
  * a chip of an order or a bracket drags the price (snapped to the tick), a
  * click on an order chip opens it in the order ticket.
  *
+ * A broker plugin's lines offer only what it supports (#320): no drag or
+ * Modify without order modification, no TP / SL chips without brackets.
+ *
  * Chart settings → Trading (per chart): Positions and orders (reverse button),
  * Profit and loss value of the position / brackets (money, ticks, %),
  * Execution marks (labels), Extended price lines, Order and position
@@ -38,6 +41,7 @@ import { confirmCancelOrder, confirmClosePosition } from "../../trading/confirm"
 import { BuySellPresetsButton, placePresetOrder } from "../../trading/OrderPresets";
 import { QtyCalculator, QtyPill } from "../../trading/QtyCalculator";
 import { moveOrder } from "../../trading/order-actions";
+import { canAddOrderBrackets, canMove } from "../../../data/trading/capabilities";
 import { Popover, PopDivider, PopItem } from "../../screener/Popover";
 import { lastAtOrBefore } from "../time-search";
 import {
@@ -52,6 +56,7 @@ import {
   orderMenuTitle,
   orderTypeText,
   plText,
+  plTone,
   positionQtyText,
   requestWithPrice,
   snapToTick,
@@ -69,6 +74,9 @@ const BLUE = "#2962ff";
 const TP_COLOR = "#089981";
 const SL_COLOR = "#ff9800";
 const SELL_COLOR = "#f23645";
+
+/** A P&L text's colour, over the line's: green in profit, red in loss. */
+const toneClass = (tone: ReturnType<typeof plTone> | undefined) => ({ "is-profit": tone === "profit", "is-loss": tone === "loss" });
 /** The replay broker projects no market order (reference app: none on the
  *  chart while the ticket is on Market, whatever "Project order for market
  *  orders" says; the setting adds Market to the project order's types). */
@@ -121,6 +129,8 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
   const position = () => (on() && ta().positions ? broker.position(paneId) : null);
   const orders = () => (on() && ta().positions ? broker.orders(paneId) : []);
   const executions = () => (on() && ta().executions ? broker.executions(paneId) : []);
+  /** What this chart's broker supports (#320): the lines offer only that. */
+  const caps = () => broker.capabilities(paneId);
   /** One-click trading (app-wide). */
   const oneClick = () => tradingPrefs.prefs().oneClick;
   /** Cancel / close: asked first, unless one-click trading is on. */
@@ -236,6 +246,8 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
       if (e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
+      // A broker that cannot modify it: no drag, and no Modify on a click.
+      if (!canMove(caps(), o)) return;
       const g = geom();
       const start = linePrice(o, limit);
       if (!g || start === null) return;
@@ -351,7 +363,7 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
        *  stop carries them on its limit line. */
       const canAdd = (kind: "tp" | "sl") => {
         const x = o();
-        if (!x || x.kind !== "order" || x.type === "market") return false;
+        if (!x || x.kind !== "order" || x.type === "market" || !canAddOrderBrackets(caps())) return false;
         if (hasLimitLine(x) !== p.line.limit) return false;
         return kind === "tp" ? x.takeProfit === null : x.stopLoss === null;
       };
@@ -382,10 +394,13 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
                 <Icon name="replay-status" size={14} />
                 {fmtQty(o()!.qty)}
               </span>
-              <Tooltip text="Modify order" side="top">
-                <span class="ot-trd-chip__part is-text">{bracketPl(o()!) ?? orderChipText(o()!)}</span>
-              </Tooltip>
-              <Show when={!p.line.limit}>
+              <Show when={canMove(caps(), o()!)} fallback={<span class="ot-trd-chip__part is-text" classList={toneClass(bracketPl(o()!)?.tone)}>{bracketPl(o()!)?.text ?? orderChipText(o()!)}</span>}>
+                <Tooltip text="Modify order" side="top">
+                  <span class="ot-trd-chip__part is-text" classList={toneClass(bracketPl(o()!)?.tone)}>{bracketPl(o()!)?.text ?? orderChipText(o()!)}</span>
+                </Tooltip>
+              </Show>
+              {/* A bracket goes by modifying its order or the position's brackets. */}
+              <Show when={!p.line.limit && (o()!.kind === "order" || canMove(caps(), o()!))}>
                 <Tooltip text={o()!.kind === "tp" ? "Cancel take profit" : o()!.kind === "sl" ? "Cancel stop loss" : "Cancel order"} side="top">
                   <button
                     type="button"
@@ -428,7 +443,7 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
               </Tooltip>
               <span class="ot-trd-seg" />
             </Show>
-            <BracketChips tp={p.pos.takeProfit === null} sl={p.pos.stopLoss === null} set={setBracket} />
+            <BracketChips tp={caps().positionBrackets && p.pos.takeProfit === null} sl={caps().positionBrackets && p.pos.stopLoss === null} set={setBracket} />
             <div class="ot-trd-chip is-position-chip" onPointerDown={stop} onMouseDown={stop} onContextMenu={(e) => openMenu(e, null)}>
               <Tooltip text={fmtPl(p.pos.pl, broker.currency(paneId))} side="top">
                 <span class="ot-trd-chip__part is-qty is-filled">
@@ -438,7 +453,7 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
               </Tooltip>
               <Show when={ta().plPositions}>
                 {(kind) => (
-                  <span class="ot-trd-chip__part is-text is-pl">
+                  <span class="ot-trd-chip__part is-text is-pl" classList={toneClass(plTone(p.pos.pl, kind() === "money"))}>
                     {plText(p.pos.qty > 0 ? p.pos.pl / p.pos.qty : 0, p.pos.qty, p.pos.avgPrice, kind(), tick(), ccy())}
                   </span>
                 )}
@@ -462,7 +477,7 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
 
     /** P&L of a bracket if it fills (Profit and loss value → Brackets), from the
      *  position's average price or its order's price; null = the plain text. */
-    const bracketPl = (o: TradingOrder): string | null => {
+    const bracketPl = (o: TradingOrder): { text: string; tone: ReturnType<typeof plTone> } | null => {
       const kind = ta().plBrackets;
       if (!kind || o.kind === "order") return null;
       const at = orderLinePrice(o);
@@ -480,7 +495,8 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
         long = parent.side === "buy";
       }
       if (at === null || base === null) return null;
-      return plText((at - base) * (long ? 1 : -1), o.qty, base, kind, tick(), ccy());
+      const perUnit = (at - base) * (long ? 1 : -1);
+      return { text: plText(perUnit, o.qty, base, kind, tick(), ccy()), tone: plTone(perUnit) };
     };
 
     /** A take profit / stop loss dragged out of its dotted chip. */
@@ -561,7 +577,7 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
     const [projectMenu, setProjectMenu] = createSignal<HTMLElement | null>(null);
     /** Types the project order can switch to: Market only with "Project
      *  order for market orders". */
-    const projectTypes = (): TradingOrder["type"][] => (ta().projectMarket ? ["market", "limit", "stop", "stopLimit"] : ["limit", "stop", "stopLimit"]);
+    const projectTypes = (): TradingOrder["type"][] => caps().orderTypes.filter((t) => t !== "market" || ta().projectMarket);
 
     /** Default exit of the project order: the ticket's distance from its entry. */
     const defaultProjectExit = (kind: "tp" | "sl"): number | null => {
@@ -591,8 +607,8 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
             </button>
             <span class="ot-trd-seg" />
             <BracketChips
-              tp={pr().tp === null}
-              sl={pr().sl === null}
+              tp={caps().brackets && pr().tp === null}
+              sl={caps().brackets && pr().sl === null}
               set={(kind, at) => pr().actions.setExit(kind, at ?? defaultProjectExit(kind))}
             />
             <div
@@ -634,16 +650,17 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
     function ProjectSideRow(p: { g: Geom; k: "limit" | "tp" | "sl" }) {
       const y = () => yOf(projectPrice(p.k), p.g);
       const color = () => (p.k === "tp" ? TP_COLOR : p.k === "sl" ? SL_COLOR : sideColor(project()!.side));
-      const text = () => {
+      const text = (): { text: string; tone?: ReturnType<typeof plTone> } => {
         const pr = project()!;
-        if (p.k === "limit") return orderTypeText("limit");
+        if (p.k === "limit") return { text: orderTypeText("limit") };
         const at = projectPrice(p.k);
         const kind = ta().plBrackets;
         if (kind && at !== null && pr.main !== null && pr.qty !== null) {
           const base = pr.type === "stopLimit" ? pr.limit ?? pr.main : pr.main;
-          return plText((at - base) * (pr.side === "buy" ? 1 : -1), pr.qty, base, kind, tick(), ccy());
+          const perUnit = (at - base) * (pr.side === "buy" ? 1 : -1);
+          return { text: plText(perUnit, pr.qty, base, kind, tick(), ccy()), tone: plTone(perUnit) };
         }
-        return p.k === "tp" ? "Take profit" : "Stop loss";
+        return { text: p.k === "tp" ? "Take profit" : "Stop loss" };
       };
       return (
         <Show when={y() !== null}>
@@ -658,7 +675,7 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
                 <Icon name="replay-status" size={14} />
                 {project()!.qty !== null ? fmtQty(project()!.qty!) : "\u2014"}
               </span>
-              <span class="ot-trd-chip__part is-text">{text()}</span>
+              <span class="ot-trd-chip__part is-text" classList={toneClass(text().tone)}>{text().text}</span>
               <Show when={p.k !== "limit"}>
                 <Tooltip text={p.k === "tp" ? "Cancel take profit" : "Cancel stop loss"} side="top">
                   <button type="button" class="ot-trd-chip__part is-close" aria-label={p.k === "tp" ? "Cancel take profit" : "Cancel stop loss"} onPointerDown={stop} onMouseDown={stop} onClick={() => project()!.actions.setExit(p.k as "tp" | "sl", null)}>
@@ -782,14 +799,16 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
                     when={m().order}
                     fallback={
                       <>
-                        <PopItem
-                          title="Protect position"
-                          onClick={() => {
-                            setMenu(null);
-                            const pos = position();
-                            if (pos) tradingUi.editPosition(pos, paneId);
-                          }}
-                        />
+                        <Show when={caps().positionBrackets}>
+                          <PopItem
+                            title="Protect position"
+                            onClick={() => {
+                              setMenu(null);
+                              const pos = position();
+                              if (pos) tradingUi.editPosition(pos, paneId);
+                            }}
+                          />
+                        </Show>
                         <PopItem
                           title="Close position"
                           onClick={() => {
@@ -811,8 +830,10 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
                     {(o) => (
                       <>
                         <PopItem title={orderMenuTitle(o(), tick())} disabled />
-                        <PopDivider />
-                        <Show when={o().kind === "order"}>
+                        <Show when={o().kind === "order" || canMove(caps(), o())}>
+                          <PopDivider />
+                        </Show>
+                        <Show when={o().kind === "order" && caps().modifyOrders}>
                           <PopItem
                             title="Modify order"
                             onClick={() => {
@@ -822,14 +843,16 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
                             }}
                           />
                         </Show>
-                        <PopItem
-                          title="Cancel order"
-                          onClick={() => {
-                            const x = o();
-                            setMenu(null);
-                            askCancel(x, () => broker.cancel(x.id, paneId));
-                          }}
-                        />
+                        <Show when={o().kind === "order" || canMove(caps(), o())}>
+                          <PopItem
+                            title="Cancel order"
+                            onClick={() => {
+                              const x = o();
+                              setMenu(null);
+                              askCancel(x, () => broker.cancel(x.id, paneId));
+                            }}
+                          />
+                        </Show>
                       </>
                     )}
                   </Show>
@@ -907,7 +930,8 @@ export function createTradingLines(cx: ChartCx): TradingLinesApi {
     const go = (side: "buy" | "sell") => {
       focusPane(paneId);
       const p = preset();
-      if (!oneClick()) {
+      // A broker without market orders takes the order from the ticket.
+      if (!oneClick() || (!p && !caps().orderTypes.includes("market"))) {
         tradingUi.openOrderTicket({ side, presetId: p?.id });
         return;
       }
