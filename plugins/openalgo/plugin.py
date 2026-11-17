@@ -16,20 +16,19 @@ The connection layer (everything below the source) is OpenTrader's plugin templa
 documented adaptations so a long request (a day of history) does not hold up the quote stream: the source locks
 its own parts (no outer lock in `handle`), and the stream reads the source's live-price cache.
 """
+import http.client
 import json
 import os
 import socket
 import sys
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.12"
+PLUGIN_VERSION = "0.1.13"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -379,6 +378,8 @@ class OpenAlgoSource:
         self.plugin = None  # set by Plugin: the connection the log lines go through
         self.lock = threading.RLock()
         self.settings = {}
+        self._rest_pool = []  # idle keep-alive connections (see "REST" below)
+        self._rest_lock = threading.Lock()
         self.exchanges = []
         self.instruments = Instruments(self)
         self.intervals = None  # the normalized /intervals tables, or None until fetched
@@ -484,38 +485,98 @@ class OpenAlgoSource:
             pass
 
     # ── REST ──
+    # Keep-alive transport. urllib opened a fresh TCP connection per call (it sends
+    # "Connection: close"); through the gateway's tunnel an intermittently dropped SYN made
+    # Windows walk its retransmit ladder — 21 s (one stalled connect) to 42 s (two in a row)
+    # per chart load while the server itself answered in 30-60 ms once connected. One pooled
+    # connection per base is reused across calls: requests run on their own threads, so the
+    # pool hands connections out under a lock, and a connection the server closed while idle
+    # (or a connect that stalls) is retried once on a fresh one.
+
+    REST_TIMEOUT = 10.0  # connect + read of one /api/v1 call (the masters pull passes its own)
+    REST_POOL = 6  # idle connections kept; beyond this a connection is used once and closed
+
+    def _rest_open(self, scheme, host, timeout):
+        """A new connection; tests patch this."""
+        cls = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+        return cls(host, timeout=timeout)
+
+    def _rest_take(self, scheme, host, timeout):
+        """A pooled connection, or a new one when the pool is empty. The caller gives it back."""
+        with self._rest_lock:
+            if self._rest_pool:
+                return self._rest_pool.pop()
+        return self._rest_open(scheme, host, timeout)
+
+    def _rest_give(self, conn):
+        with self._rest_lock:
+            if len(self._rest_pool) < self.REST_POOL:
+                self._rest_pool.append(conn)
+                return
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+    def _rest(self, method, path, body, timeout=None):
+        """One call on a pooled connection: `(status, body bytes)`, or PluginError. A broken
+        connection is retried once — but only before anything was sent (a failed order POST
+        must not be sent twice) or on a GET (reading again is safe)."""
+        base = self._base()
+        if not base:
+            raise PluginError("The OpenAlgo plugin has no API URL yet — fill it in Settings > Plugins")
+        scheme, sep, host = base.partition("://")
+        if not sep:
+            scheme, host = "http", base
+        payload = None if body is None else (
+            body if isinstance(body, (bytes, bytearray)) else json.dumps(body).encode("utf-8"))
+        last = None
+        for _ in (0, 1):
+            sent = False
+            conn = self._rest_take(scheme, host, self.REST_TIMEOUT if timeout is None else timeout)
+            try:
+                conn.request(method, path, body=payload,
+                             headers={"Content-Type": "application/json", "Accept": "application/json"})
+                sent = True
+                r = conn.getresponse()
+                data = r.read()
+                if r.will_close:
+                    conn.close()
+                else:
+                    self._rest_give(conn)
+                return r.status, data
+            except (http.client.HTTPException, OSError) as e:
+                last = e
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                if sent and method != "GET":
+                    break  # the request may have reached the server: never send it twice
+        raise PluginError(f"OpenAlgo is not reachable ({_clean(str(last), self._key())})")
+
     def _post(self, path, body, whole=False):
         """One OpenAlgo /api/v1 call; returns its `data` — or the whole answer with `whole`
         (placeorder's order id sits at the top level, verified live)."""
-        base, key = self._base(), self._key()
-        if not base or not key:
+        key = self._key()
+        if not self._base() or not key:
             raise PluginError("The OpenAlgo plugin has no API URL or key yet — fill them in Settings > Plugins")
         payload = dict(body)
         payload["apikey"] = key
-        request = urllib.request.Request(
-            f"{base}{path}", data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
+        status, raw = self._rest("POST", path, payload)
+        if status in (429, 503):
+            # The gateway's rate limit (or a proxy in front of it): busy, the app backs off.
+            raise PluginError(f"OpenAlgo answered HTTP {status} — rate limited, the app will ask again later", BUSY_CODE)
         try:
-            with urllib.request.urlopen(request, timeout=30) as r:
-                answer = json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 503):
-                # The gateway's rate limit (or a proxy in front of it): busy, the app backs off.
-                raise PluginError(f"OpenAlgo answered HTTP {e.code} — rate limited, the app will ask again later", BUSY_CODE) from e
-            try:
-                answer = json.loads(e.read().decode("utf-8"))
-            except (OSError, ValueError):
-                raise PluginError(f"OpenAlgo answered HTTP {e.code}") from e
-        except (OSError, ValueError) as e:
-            self.rest_ok = False
-            raise PluginError(f"OpenAlgo is not reachable ({_clean(str(e), key)})") from e
+            answer = json.loads(raw.decode("utf-8"))
+        except (OSError, ValueError):
+            raise PluginError(f"OpenAlgo answered HTTP {status}") from None
         if str(answer.get("status", "")).lower() not in ("success", "ok"):
             msg = str(answer.get("message") or "the request failed")
             # -32005 (busy, #347): the app asks again later, waiting longer each time, instead of
             # paging harder into the throttled endpoint. Some adapters spell the limit out in the
             # JSON message instead of answering HTTP 429.
-            if is_rate_limit_message(msg):
+            if status in (429, 503) or is_rate_limit_message(msg):
                 raise PluginError(f"OpenAlgo: {msg} — the app will ask again later", BUSY_CODE)
             raise PluginError(f"OpenAlgo: {msg}")
         self.rest_ok = True
@@ -527,16 +588,19 @@ class OpenAlgoSource:
         base = self._base()
         if not base or not key:
             return None
-        url = f"{base}/api/v1/instruments?apikey={urllib.parse.quote(key)}&exchange={exchange}&format=json"
+        path = f"/api/v1/instruments?apikey={urllib.parse.quote(key)}&exchange={exchange}&format=json"
         try:
-            with urllib.request.urlopen(url, timeout=60) as r:
-                answer = json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            self.log(f"instruments {exchange}: HTTP {e.code}"
-                     + (" (rate limited; the pull retries on the next use)" if e.code == 429 else ""), "warn")
-            return None
-        except (OSError, ValueError) as e:
+            status, raw = self._rest("GET", path, None, timeout=60)
+        except PluginError as e:
             self.log(f"instruments {exchange}: not reachable ({_clean(str(e), key)})", "warn")
+            return None
+        if status == 429:
+            self.log(f"instruments {exchange}: HTTP 429 (rate limited; the pull retries on the next use)", "warn")
+            return None
+        try:
+            answer = json.loads(raw.decode("utf-8"))
+        except (OSError, ValueError):
+            self.log(f"instruments {exchange}: HTTP {status}", "warn")
             return None
         if str(answer.get("status", "")).lower() not in ("success", "ok"):
             self.log(f"instruments {exchange}: {answer.get('message') or 'no answer'}", "warn")
