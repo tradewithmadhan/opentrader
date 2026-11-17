@@ -62,25 +62,34 @@ fallback for a source that declares nothing) instead of only annotating exhausti
 lookback cap so `plugins/data.rs::bars` clamps `countBack` exactly like the core does for
 built-in providers — a Plugin API 2 field (or reuse of `historyLimits` over the plugin wire).
 
-**3. A rate-limit-aware request budget for history.** Extend the source capability so a source can
-declare what one request costs it, and have the host plan around it:
+**3. A rate-limit-aware request budget, per timeframe family.** The caps are not one number: a
+broker's history endpoints cap differently per interval, and a "bar count" means different wall
+time per timeframe (2880 bars ≈ 38 days at 5m, ≈ 11 years at 1D). The capability already carries
+per-family lookback (`HistoryLimits = { second, minute, day }`; the built-in OpenAlgo provider
+declares `{ second: 30, minute: 30, day: 365 }`) — extend each family with what **one request**
+costs it, plus the one thing that is *not* per family: the gateway's API rate limit, shared by
+every endpoint:
 
 ```ts
-historyLimits(): {
-  day?: number;            // existing: max lookback
-  maxBarsPerRequest?: number;  // largest window one request should cover
-  maxRequestsPerLoad?: number; // soft budget of history requests per symbol load
-  requestsPerSecond?: number;  // pacing for paging / retries
-} | null
+export type HistoryRequest = {
+  lookbackDays?: number;      // today's meaning of the family's number
+  maxDaysPerRequest?: number; // largest calendar window one request should cover
+  maxBarsPerRequest?: number; // …or in bars, whichever the endpoint caps by
+};
+export type HistoryLimits = {
+  second?: HistoryRequest; minute?: HistoryRequest; day?: HistoryRequest;
+  requestsPerSecond?: number; // the gateway's rate limit — one budget across all families
+} | null;
 ```
 
-The host then:
-- sizes the up-front preload to what the budget can serve (e.g. `min(DAILY_FULL_DAYS,
-  maxBarsPerRequest × maxRequestsPerLoad)`) instead of a fixed 7560;
-- sizes and paces scroll-back pages to what the source declared **and actually returned** (a page
+The host then, per the resolution being loaded:
+- sizes the up-front preload to what the family's budget can serve
+  (e.g. `min(DAILY_FULL_DAYS, maxDaysPerRequest × maxRequestsPerLoad)`) instead of a fixed 7560;
+- sizes and paces scroll-back pages to what the family declared **and actually returned** (a page
   that came back short is re-asked with the served count, not the original ask);
-- serializes/queues a symbol's history requests instead of firing the quick-paint, the preload
-  and the intraday window concurrently.
+- honors `requestsPerSecond` across families — the quick-paint, the preload and the intraday
+  window for one symbol change are queued through one pacer, not fired concurrently;
+- backs off on 429/5xx instead of paging harder into a throttled endpoint.
 
 Why this shape: today the chunking and pacing live *inside* the plugin, invisible to the host —
 the plugin must either fire a burst (rate-limited, throttled, slow) or answer short (and the app
