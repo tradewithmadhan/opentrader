@@ -5,13 +5,15 @@
 import { createEffect, createMemo, createSignal, on, onCleanup, untrack } from "solid-js";
 import { broker } from "../../data/trading/broker";
 import { pluginBroker } from "../../data/trading/plugin-broker";
-import { ANY_INSTRUMENT, qtyArrowStep, qtyProblem, wholeLots, type Instrument } from "../../data/trading/capabilities";
-import { ticketFieldPrefs } from "../../data/trading/trading-ui";
+import { ANY_INSTRUMENT, durationsFor, pickDuration, qtyArrowStep, qtyProblem, wholeLots, type Instrument } from "../../data/trading/capabilities";
+import { ticketDurationPref, ticketFieldPrefs } from "../../data/trading/trading-ui";
 import { POSITION_EDIT, tradingUi, type OrderPreset, type TicketDraft } from "../../data/trading/trading-ui";
 import type { OrderType } from "../../data/trading/types";
 import { replayStartSeq } from "../../data/replay";
 import { parsePositive, tickDecimals } from "./format";
 import {
+  QTY_TYPES,
+  VALUE_QTY_TYPES,
   buildTicket,
   entryPrice,
   exitPrice,
@@ -19,6 +21,7 @@ import {
   exitValueIn,
   fieldTypes,
   fmtTypeValue,
+  isRiskQty,
   parseSigned,
   priceOffset,
   presetFields,
@@ -49,6 +52,10 @@ export function createTicketModel() {
   const inst = createMemo<Instrument>(() => broker.instrument(tradingUi.draft()?.paneId), ANY_INSTRUMENT, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
   const ctx = () => ({ tick: tick(), decimals: dec(), balance: balance(), pointValue: inst().pointValue, instrument: inst() });
   const types = () => fieldTypes(d());
+  /** What the broker of the ticket's chart supports (#320). */
+  const caps = () => broker.capabilities(tradingUi.draft()?.paneId);
+  /** Quantity types: a risk is measured to the stop loss, so it needs brackets. */
+  const qtyTypes = (): QtyType[] => (caps().brackets ? QTY_TYPES : VALUE_QTY_TYPES);
   /** The draft as the order uses it (offsets, risk and exit types resolved). */
   const r = createMemo(() => resolveDraft(d(), q(), ctx()));
   /** The ticket edits the brackets of the position (Protect position). */
@@ -76,7 +83,8 @@ export function createTicketModel() {
       const x = tradingUi.draft();
       const sym = broker.symbol();
       if (!x || x.editing || !sym || sym === x.symbol) return;
-      const units = x.qtyType && x.qtyType !== "units" ? { qtyType: "units" as const, qtyEquiv: x.qtyType } : {};
+      // The stop loss is reset: a risk quantity is in units again; an order's value stays, sized on the new price.
+      const units = x.qtyType && isRiskQty(x.qtyType) ? { qtyType: "units" as const, qtyEquiv: x.qtyType } : {};
       tradingUi.setDraft({ ...x, ...units, symbol: sym, limitPrice: "", stopPrice: "", takeProfit: "", stopLoss: "", tpOn: false, slOn: false });
       tradingUi.setSent(true);
     }, { defer: false }),
@@ -110,6 +118,13 @@ export function createTicketModel() {
   };
   const setField = (id: string, value: string) => patch({ fields: { ...d().fields, [id]: value } });
 
+  // ── Time in force (#349) ────────────────────────────────────────────
+  /** The broker's durations for the ticket's order type (none: the broker's own, no selector). */
+  const durations = () => durationsFor(inst().durations, d().orderType);
+  /** The one picked: this order's, else the last one picked, else the broker's default for the type. */
+  const durationValue = () => pickDuration(inst().durations, d().orderType, d().duration, ticketDurationPref());
+  const setDuration = (id: string) => patch({ duration: id });
+
   // The modified order ended (filled / cancelled): back to a new order.
   createEffect(() => {
     const x = tradingUi.draft();
@@ -139,6 +154,20 @@ export function createTicketModel() {
       stopPrice: (t === "stop" || t === "stopLimit") && !x.stopPrice ? px : x.stopPrice,
     });
   };
+
+  // A broker without the ticket's order type, or without brackets (#320): a new order of the first type it takes,
+  // without take profit / stop loss and sized in units (a risk needs the stop loss).
+  createEffect(() => {
+    const x = tradingUi.draft();
+    if (!x || x.editing) return;
+    const c = caps();
+    untrack(() => {
+      if (!c.orderTypes.includes(x.orderType)) setType(c.orderTypes[0]);
+      if (c.brackets || (!x.tpOn && !x.slOn && !isRiskQty(fieldTypes(x).qtyType))) return;
+      const units = isRiskQty(fieldTypes(x).qtyType) ? { qtyType: "units" as const, qtyEquiv: fieldTypes(x).qtyType, qty: r().qty || x.qty } : {};
+      patch({ tpOn: false, slOn: false, takeProfit: "", stopLoss: "", tpValue: "", slValue: "", ...units });
+    });
+  });
 
   // ── Exits ────────────────────────────────────────────────────────────
   const exitOn = (kind: ExitKind) => (kind === "tp" ? d().tpOn : d().slOn);
@@ -189,30 +218,31 @@ export function createTicketModel() {
       ...(keep ? {} : exitFields("sl", type, p)),
     };
   };
-  /** The quantity typed as a risk (money / % balance) of the order now. */
-  const toRiskQty = (type: QtyType, base: Partial<TicketDraft>): Partial<TicketDraft> => {
+  /** The quantity typed as `type` (a value or a risk, in money / % balance) of the order now. */
+  const toTypedQty = (type: QtyType, base: Partial<TicketDraft>): Partial<TicketDraft> => {
     const next: TicketDraft = { ...d(), ...base, qtyType: "units", qty: r().qty || d().qty };
     const v = qtyValueIn(type, resolveDraft(next, q(), ctx()), q(), ctx());
     return { ...base, qtyType: type, risk: v != null ? fmtTypeValue(type, v, dec()) : "" };
   };
   const setExit = (kind: ExitKind, on: boolean) => {
+    if (on && !caps().brackets && !isPos()) return;
     const t = types();
     if (kind === "tp") {
       patch(on ? { tpOn: true, ...exitFields("tp", t.tpType, exitPx("tp")) } : { tpOn: false, takeProfit: "", tpValue: "" });
       return;
     }
     if (!on) {
-      // The quantity is in units again (reference app).
-      patch({ slOn: false, stopLoss: "", slValue: "", ...(t.qtyType !== "units" ? { qtyType: "units", qtyEquiv: t.qtyType, qty: r().qty || d().qty } : {}) });
+      // A risk quantity is in units again (reference app).
+      patch({ slOn: false, stopLoss: "", slValue: "", ...(isRiskQty(t.qtyType) ? { qtyType: "units", qtyEquiv: t.qtyType, qty: r().qty || d().qty } : {}) });
       setSlTip(null);
-      if (t.qtyType !== "units" && takeTip("unitsQty")) setQtyTip(TIPS.unitsQty);
+      if (isRiskQty(t.qtyType) && takeTip("unitsQty")) setQtyTip(TIPS.unitsQty);
       return;
     }
     const sl = slOnFields();
     // "SL enables quantity in risk": the order is sized by its risk.
     if (tradingUi.slEnablesRisk() && t.qtyType === "units") {
-      const rt: QtyType = t.qtyEquiv === "units" ? "riskUsd" : t.qtyEquiv;
-      patch({ ...toRiskQty(rt, sl), qtyEquiv: "units" });
+      const rt: QtyType = isRiskQty(t.qtyEquiv) ? t.qtyEquiv : "riskUsd";
+      patch({ ...toTypedQty(rt, sl), qtyEquiv: "units" });
       if (takeTip("riskQty")) {
         setQtyTip(TIPS.riskQty);
         setSlTip(null);
@@ -238,13 +268,14 @@ export function createTicketModel() {
   // ── Quantity ─────────────────────────────────────────────────────────
   const setQtyType = (type: QtyType, equiv?: QtyType) => {
     const t = types();
-    if (type === t.qtyType) return;
+    if (type === t.qtyType || !qtyTypes().includes(type)) return;
     const eq = equiv ?? (t.qtyEquiv === type ? t.qtyType : t.qtyEquiv);
     if (type === "units") patch({ qtyType: "units", qtyEquiv: eq, qty: r().qty || d().qty });
+    else if (!isRiskQty(type)) patch({ ...toTypedQty(type, {}), qtyEquiv: eq });
     else {
       // A risk needs the stop loss: turned on, with its tip.
       const wasOff = !d().slOn;
-      patch({ ...toRiskQty(type, slOnFields()), qtyEquiv: eq });
+      patch({ ...toTypedQty(type, slOnFields()), qtyEquiv: eq });
       setQtyTip(null);
       if (wasOff && takeTip("stopLoss")) setSlTip(TIPS.stopLoss);
     }
@@ -322,8 +353,9 @@ export function createTicketModel() {
       return;
     }
     const fields = Object.fromEntries(inst().fields.map((f) => [f.id, fieldValue(f.id)]));
-    if (broker.place({ ...t, ...(inst().fields.length ? { fields } : {}) }) === null && !state().ok) return;
-    tradingUi.savePrefs({ ...r(), fields });
+    const duration = durationValue() ?? undefined;
+    if (broker.place({ ...t, ...(inst().fields.length ? { fields } : {}), ...(duration ? { duration } : {}) }) === null && !state().ok) return;
+    tradingUi.savePrefs({ ...r(), fields, duration });
     // The order dialog of the DOM closes once the order is sent.
     if (tradingUi.orderDialog()) return tradingUi.closeOrderDialog();
     tradingUi.setSent(true);
@@ -416,7 +448,7 @@ export function createTicketModel() {
   onCleanup(() => (document.body.style.cursor = ""));
 
   return {
-    d, q, tick, dec, ccy, state, r, types, inst, fieldValue, setField, stepQty, isPos, editing, editingPos, errorText, qtyTip, setQtyTip, slTip, setSlTip, boxes,
+    d, q, tick, dec, ccy, state, r, types, caps, inst, fieldValue, setField, durations, durationValue, setDuration, stepQty, qtyTypes, isPos, editing, editingPos, errorText, qtyTip, setQtyTip, slTip, setSlTip, boxes,
     patch, spread, setType,
     exitOn, exitType, exitEquiv, qtyNum, exitValueText, exitInputValue, setExit, setExitType, setExitEquiv, swapExit, exitStep,
     setQtyType, qtyValueText, priceMode, swapPrice, stepKey,

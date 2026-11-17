@@ -906,6 +906,10 @@ impl Ibkr {
             o.order_type = built.order_type.clone();
             o.limit_price = built.limit_price;
             o.aux_price = built.aux_price;
+            // The time in force picked; an app that sends none keeps the order's.
+            if ticket.duration.is_some() {
+                o.tif = built.tif.clone();
+            }
         })
         .await?;
         self.store.update(|t| {
@@ -1042,6 +1046,7 @@ impl Ibkr {
             stop_price: None,
             take_profit: None,
             stop_loss: None,
+            duration: None,
         };
         let mut order = orders::build_order(&ticket, &account);
         order.order_id = conn.client.next_order_id();

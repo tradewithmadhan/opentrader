@@ -19,7 +19,7 @@
  * "Long 1 @ 644.33", its take profit / stop loss, the trade and tick values,
  * Confirm / Discard. ArrowUp / ArrowDown step a price by the symbol's tick.
  * Off replay (or before a start point) the form gives way to "Launch replay
- * to start".
+ * to start". The order types and the exits are the ones the broker supports (#320).
  *
  * Its state and actions are ticket-model.ts, the fields TicketFields.tsx, the ⋯ menu TicketSettingsMenu.tsx.
  */
@@ -34,8 +34,8 @@ import type { OrderType } from "../../data/trading/types";
 import { fmtPrice, tickerOf } from "./format";
 import { describeTicket } from "./ticket";
 import { createTicketModel } from "./ticket-model";
-import { BrokerFieldInput, ExitInput, PriceInput, QtyInput } from "./TicketFields";
-import { ExitsSection, FieldTip, TicketSettingsMenu } from "./TicketSettingsMenu";
+import { BrokerFieldInput, DurationInput, ExitInput, PriceInput, QtyInput } from "./TicketFields";
+import { FieldTip, TicketSection, TicketSettingsMenu } from "./TicketSettingsMenu";
 import { CloseIcon } from "./icons";
 import { FavoritePresets, OrderPresetsButton } from "./OrderPresets";
 import { DomPanel } from "./DomPanel";
@@ -286,7 +286,7 @@ function TicketBody(props: { floating: boolean }) {
           </div>
 
           <div class="trd-tk-types" role="tablist">
-            <For each={TYPES}>
+            <For each={TYPES.filter(([t]) => m.caps().orderTypes.includes(t))}>
               {([t, title]) => (
                 <button
                   type="button"
@@ -306,10 +306,6 @@ function TicketBody(props: { floating: boolean }) {
 
           <Show when={!isPos()}>
           <div class="trd-tk-inputs" classList={{ "is-editing": !!d().editing }}>
-            {/* The broker's own choices (a product type); an order being modified keeps its own. */}
-            <Show when={!d().editing}>
-              <For each={m.inst().fields}>{(f) => <BrokerFieldInput m={m} field={f} />}</For>
-            </Show>
             <Show when={d().orderType === "limit"}><PriceInput m={m} f="limitPrice" /></Show>
             <Show when={d().orderType === "stop"}><PriceInput m={m} f="stopPrice" /></Show>
             <Show when={d().orderType === "stopLimit"}>
@@ -328,18 +324,31 @@ function TicketBody(props: { floating: boolean }) {
 
           </Show>
 
-          <ExitsSection>
-            <ExitInput m={m} kind="tp" />
-            <ExitInput m={m} kind="sl" />
-            <Show when={rr()}>
-              {(v) => (
-                <div class="trd-tk-row">
-                  <span>Risk / Reward</span>
-                  <span class="trd-tk-row-value">{Number(v().toFixed(2))}</span>
-                </div>
-              )}
-            </Show>
-          </ExitsSection>
+          {/* An order's take profit / stop loss need a broker that takes brackets; the position's are Protect position. */}
+          <Show when={isPos() || m.caps().brackets}>
+            <TicketSection title="Exits">
+              <ExitInput m={m} kind="tp" />
+              <ExitInput m={m} kind="sl" />
+              <Show when={rr()}>
+                {(v) => (
+                  <div class="trd-tk-row">
+                    <span>Risk / Reward</span>
+                    <span class="trd-tk-row-value">{Number(v().toFixed(2))}</span>
+                  </div>
+                )}
+              </Show>
+            </TicketSection>
+          </Show>
+          {/* The time in force and the broker's own choices (a product type), after the exits as in the reference; an
+              order being modified keeps its own. */}
+          <Show when={!d().editing && (m.durations().length > 0 || m.inst().fields.length > 0)}>
+            <TicketSection title="Extra settings">
+              <div class="trd-tk-extra">
+                <DurationInput m={m} />
+                <For each={m.inst().fields}>{(f) => <BrokerFieldInput m={m} field={f} />}</For>
+              </div>
+            </TicketSection>
+          </Show>
           <Show when={editingPos()}>
             {(pos) => (
               <div class="trd-tk-values">
