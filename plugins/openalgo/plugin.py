@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.13"
+PLUGIN_VERSION = "0.1.14"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -400,6 +400,7 @@ class OpenAlgoSource:
         self.ws_shape_warned = False  # the "no price read" warn says its piece only once
         self.ws_quiet_warned = False  # the "connected but no tick" warn says its piece only once
         self._daily_cache = {}  # (exchange, symbol, interval, start date, end date) → a folded year of day bars
+        self._d_synth = {}  # exchange — the D endpoint answers one row per window there: days synthesize
         self._holiday_rows = {}  # year → (IST day fetched, the raw calendar rows of every exchange)
         self._timings = {}  # date → (IST day fetched, [timing rows])
         self._sessions = {}  # (calendar exchange, IST day) → the built session dict
@@ -1152,16 +1153,21 @@ class OpenAlgoSource:
     def _daily(self, exchange, symbol, interval, frm, to, count_back):
         """A day window's bars. Deployments whose D endpoint answers only its last day (verified live: this one
         answers a single row for every window) get their days synthesized from the intraday bars it serves
-        fully — hourly when the intervals table has one, else the finest minute table, chunked."""
+        fully — hourly when the intervals table has one, else the finest minute table, chunked. The probe is
+        remembered per exchange: one wasted call, then the days synthesize straight away."""
         if to - frm > 365 * 86400:
             # The app asks every open day-chart for 7560 bars (decades). Serving only the window's
             # last year made the host walk back a year at a time, re-fetching and re-synthesizing
             # the same years on every step and every reload. Fold whole years here instead —
             # cached — and stop where the source's intraday history ends.
             return self._daily_long(exchange, symbol, interval, frm, to, count_back)
-        bars = self._window(exchange, symbol, interval, True, frm, to, count_back, 0)
-        if len(bars) >= 2 or to - frm <= 3 * 86400:
+        with self.lock:
+            synth = self._d_synth.get(exchange)
+        bars = None if synth else self._window(exchange, symbol, interval, True, frm, to, count_back, 0)
+        if not synth and (len(bars) >= 2 or to - frm <= 3 * 86400):
             return bars
+        with self.lock:
+            self._d_synth[exchange] = True
         tables = self._interval_tables()
         hour = tables["hours"].get(1)
         if hour:
@@ -1169,10 +1175,10 @@ class OpenAlgoSource:
                 return self._days_of(self._window(exchange, symbol, hour, False, frm, to, 0, 0, 365), count_back)
             except PluginError as e:
                 self.log(f"history {exchange}:{symbol} {interval}: synthesizing from {hour} failed ({e}); the day bar alone", "warn")
-                return bars
+                return bars or []
         minute = min(tables["minutes"], default=0)
         if not minute:
-            return bars
+            return bars or []
         try:
             intraday, start = [], frm
             chunk = 30 * 86400  # the source's minute range cap (the app provider's, mirrored)
@@ -1183,7 +1189,7 @@ class OpenAlgoSource:
             return self._days_of(intraday, count_back)
         except PluginError as e:
             self.log(f"history {exchange}:{symbol} {interval}: synthesizing from {tables['minutes'][minute]} failed ({e}); the day bar alone", "warn")
-            return bars
+            return bars or []
 
     def _daily_long(self, exchange, symbol, interval, frm, to, count_back):
         """A window longer than a year: year chunks walked back from `to`, each folded and cached, until
@@ -1266,9 +1272,12 @@ class OpenAlgoSource:
         return merged
 
     def _window_one(self, exchange, symbol, interval, daily, frm, to, count_back, depth):
-        """A single history window (one per-request call), split in half and retried on 5xx."""
-        if depth > 10:
-            return []
+        """A single history window: one per-request call, paged to its span (the deployment
+        caps rows per call); split-retried on 5xx by `_window`'s chunks."""
+        return self._window_page(exchange, symbol, interval, daily, frm, to, count_back, depth, 12)
+
+    def _window_fetch(self, exchange, symbol, interval, daily, frm, to, count_back, depth):
+        """One per-request call: `(bars, the call's window)` or None on a failed retry."""
         body = {
             "symbol": symbol, "exchange": exchange, "interval": interval,
             "start_date": ist_date(frm), "end_date": ist_date(to),
@@ -1278,7 +1287,7 @@ class OpenAlgoSource:
         except PluginError:
             if depth == 0:
                 raise  # the first window's error is what reaches the user
-            return []  # a retried half failing is normal (the cap)
+            return None  # a retried half failing is normal (the cap)
         rows = data if isinstance(data, list) else (data or {}).get("candles") or []
         bars = []
         for r in rows:
@@ -1298,16 +1307,38 @@ class OpenAlgoSource:
         bars.sort(key=lambda b: b[0])
         if len(bars) > count_back:
             bars = bars[-count_back:]
-        if len(bars) >= 2 and len(bars) < count_back and to - frm > 3 * 86400:
-            if bars[0][0] > frm + 1 or bars[-1][0] < to - 1:  # the answer does not span the window: split it
-                mid = frm + (to - frm) // 2
-                lower = self._window(exchange, symbol, interval, daily, frm, mid, count_back, depth + 1)
-                upper = self._window(exchange, symbol, interval, daily, mid + 1, to, count_back, depth + 1)
-                merged = list(lower)
-                have = {b[0] for b in merged}
-                merged += [b for b in upper + bars if b[0] not in have]
-                merged.sort(key=lambda b: b[0])
-                return merged[-count_back:]
+        return bars
+
+    def _window_page(self, exchange, symbol, interval, daily, frm, to, count_back, depth, guard):
+        """The window's bars, paged to its span. The deployment caps rows per call (~780) and
+        answers the window's newest rows: page toward the uncovered side, one call per page,
+        until the window spans (or the source's history ends). This replaces the binary split,
+        which refetched the covered half at every level — a 2880-bar ask cost ~7-10 calls where
+        paging takes ~4. A bar at T covers [T, T+period), the period the last two bars' gap:
+        history "reaches" `to` when its last bar's coverage does."""
+        bars = self._window_fetch(exchange, symbol, interval, daily, frm, to, count_back, depth)
+        if bars is None:
+            return []
+        while len(bars) >= 2 and to - frm > 3 * 86400 and guard > 0 and depth < 9 \
+                and (not count_back or len(bars) < count_back):
+            reach = bars[-1][0] + max(bars[-1][0] - bars[-2][0], 1)
+            if bars[0][0] > frm + 1:
+                older = self._window_fetch(exchange, symbol, interval, daily, frm, bars[0][0] - 1, count_back, depth + 1)
+                if not older:
+                    break  # the source's history ends inside the window
+                have = {b[0] for b in older}
+                bars = older + [b for b in bars if b[0] not in have]
+            elif reach < to:
+                newer = self._window_fetch(exchange, symbol, interval, daily, reach, to, count_back, depth + 1)
+                if not newer:
+                    break
+                have = {b[0] for b in bars}
+                bars = bars + [b for b in newer if b[0] not in have]
+            else:
+                break  # the window spans
+            if len(bars) > count_back:
+                bars = bars[-count_back:]
+            guard -= 1
         return bars
 
     def quote(self, ticker):
