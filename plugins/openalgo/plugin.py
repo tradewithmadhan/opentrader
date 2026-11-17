@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.10"
+PLUGIN_VERSION = "0.1.11"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -189,6 +189,10 @@ PRICE_KINDS = {  # the source's price type → the wire's (sl-m / sl-l are some 
     "sl-m": "stop", "slm": "stop", "sl-l": "stopLimit", "sll": "stopLimit",
 }
 
+# Time in force (#346): the app's duration ids ↔ the API's validity values. The ticket offers the
+# three the deployment takes; an id it doesn't send (or leaves out) keeps the API's DAY default.
+VALIDITY = {"day": "DAY", "ioc": "IOC", "gtc": "GTC"}
+DURATION_IDS = {"DAY": "day", "IOC": "ioc", "GTC": "gtc"}
 
 
 # Index names that live on the *_INDEX segments, not on NSE/BSE themselves. A watchlist that still
@@ -1345,6 +1349,11 @@ class OpenAlgoSource:
         # The product picked in the ticket (`fields.product`) wins over the settings default.
         picked = str((p.get("fields") or {}).get("product") or "").upper()
         product = picked if picked in self.PRODUCTS else (self.settings.get("product", "MIS").upper() or "MIS")
+        # The time in force picked in Extra settings (`duration`); the app sends it only when the
+        # capabilities declare durations. IOC only ever comes with a market or limit order.
+        duration = str(p.get("duration") or "").lower()
+        if duration not in VALIDITY:
+            duration = "day"
         exchange, _, symbol = ticker.partition(":")
         body = {
             "symbol": symbol, "exchange": exchange,
@@ -1353,6 +1362,7 @@ class OpenAlgoSource:
             "quantity": int(qty * lot),
             "price": num(p.get("limitPrice")) or 0,
             "trigger_price": num(p.get("stopPrice")) or 0,
+            "validity": VALIDITY[duration],
             # the API wants these two even though they say nothing new here: action repeats the side
             # and strategy is a free tag (verified live — without them placeorder answers a field error)
             "action": side.upper(),
@@ -1369,7 +1379,7 @@ class OpenAlgoSource:
             self.orders = [o for o in self.orders if o["id"] != order_id] + [
                 {"id": order_id, "ticker": ticker, "side": side, "type": kind, "qty": qty, "filledQty": 0,
                  "limitPrice": num(p.get("limitPrice")), "stopPrice": num(p.get("stopPrice")),
-                 "status": "placing", "duration": "day", "updatedMs": now_ms,
+                 "status": "placing", "duration": duration, "updatedMs": now_ms,
                  # The ticket fields it was placed with: `broker.modify` sends them back.
                  "fields": {"product": product}}]
         self.force_poll()
@@ -1387,6 +1397,12 @@ class OpenAlgoSource:
         placed = str((order.get("fields") or {}).get("product") or "").upper()
         sent = str((p.get("fields") or {}).get("product") or "").upper()
         product = placed if placed in self.PRODUCTS else (sent if sent in self.PRODUCTS else (self.settings.get("product", "MIS").upper() or "MIS"))
+        # A modified order keeps the duration it was placed with; a sent one wins (an IOC order can
+        # be turned into a day order by changing the price, but the broker may refuse).
+        sent_dur = str(p.get("duration") or "").lower()
+        duration = sent_dur if sent_dur in VALIDITY else str(order.get("duration") or "day").lower()
+        if duration not in VALIDITY:
+            duration = "day"
         body = {
             "orderid": order["id"], "symbol": symbol, "exchange": exchange,
             "product": product,
@@ -1394,6 +1410,7 @@ class OpenAlgoSource:
             "quantity": int((num(p.get("qty")) or order["qty"]) * (num(first_of(self._symbol_row(order["ticker"]), "lotsize", "lot_size")) or 1.0)),
             "price": num(p.get("limitPrice")) or num(order.get("limitPrice")) or 0,
             "trigger_price": num(p.get("stopPrice")) or num(order.get("stopPrice")) or 0,
+            "validity": VALIDITY[duration],
             "action": order["side"].upper(),
             "strategy": self.settings.get("strategy") or "OpenTrader",
             # the API wants the field even though the plugin never sets one (verified live)
@@ -1403,6 +1420,7 @@ class OpenAlgoSource:
         with self.lock:
             order.update(qty=num(p.get("qty")) or order["qty"],
                          limitPrice=num(p.get("limitPrice")), stopPrice=num(p.get("stopPrice")),
+                         duration=duration,
                          updatedMs=int(time.time() * 1000))
             order = dict(order)
         self.force_poll()
@@ -1472,7 +1490,10 @@ class OpenAlgoSource:
             # (a segment's `broker.instrument` narrows them); the settings' product is the default.
             "capabilities": {"orderTypes": ["market", "limit", "stop", "stopLimit"], "brackets": False,
                              "positionBrackets": False, "partialClose": True, "modifyOrders": True,
-                             "ticketFields": [self._product_field(["MIS", "CNC", "NRML"])]},
+                             "ticketFields": [self._product_field(["MIS", "CNC", "NRML"])],
+                             "durations": [{"id": "day", "label": "Day", "default": True},
+                                           {"id": "ioc", "label": "Immediate or Cancel", "orderTypes": ["market", "limit"]},
+                                           {"id": "gtc", "label": "Good Till Cancel"}]},
             "positions": positions,
             "orders": orders,
             "executions": executions,
@@ -1567,7 +1588,7 @@ class OpenAlgoSource:
             "stopPrice": num(first_of(r, "trigger_price", "triggerprice")),
             "avgFillPrice": num(first_of(r, "average_price", "avg_price", "averageprice")),
             "status": self.STATUS_MAP.get(status, "working"),
-            "duration": "day",
+            "duration": DURATION_IDS.get(str(first_of(r, "validity", "validity_type") or "").upper().strip(), "day"),
             "message": first_of(r, "reason", "message", "remarks"),
             "updatedMs": self._ms(first_of(r, "updatetime", "update_time", "timestamp")),
         }
