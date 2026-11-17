@@ -1,7 +1,7 @@
 {
   "id": "openalgo",
   "name": "OpenAlgo",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "publisher": "tradewithmadhan",
   "description": "Your OpenAlgo deployment in OpenTrader: the market segments of your account (NSE, BSE, NFO, MCX…) on the charts and its trading from the charts.",
   "api": 2,
@@ -18,6 +18,12 @@
     { "key": "exchanges", "label": "Exchanges to serve", "type": "text",
       "default": "NSE,BSE,NFO,BFO,MCX,CDS,BCD,NCO,NCDEX,NSE_INDEX,BSE_INDEX,MCX_INDEX",
       "help": "Comma-separated, the OpenAlgo segments exactly as their names appear in the instrument master (the index segments included: NSE_INDEX etc.). Symbols of other exchanges are not served; remove one your broker does not support." },
+    { "key": "historyDaysMinute", "label": "History request cap — minutes (days)", "type": "text", "default": "30",
+      "help": "The days of history one /history request may span for the minute tables. Your deployment serves 30; if that changes, set it here and long windows re-chunk accordingly. A blank or bad value keeps 30." },
+    { "key": "historyDaysSeconds", "label": "History request cap — seconds (days)", "type": "text", "default": "3",
+      "help": "The days of history one /history request may span for the seconds tables (about 3 here). A blank or bad value keeps 3." },
+    { "key": "historyDaysDaily", "label": "History request cap — day charts (days)", "type": "text", "default": "365",
+      "help": "The days of history one /history request may span for the day, week and month tables. A blank or bad value keeps 365." },
     { "key": "product", "label": "Default product", "type": "select", "default": "MIS",
       "options": [
         { "value": "MIS", "label": "MIS (intraday)" },

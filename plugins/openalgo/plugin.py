@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.15"
+PLUGIN_VERSION = "0.1.16"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -1243,15 +1243,24 @@ class OpenAlgoSource:
                 days.append([day, b[1], b[2], b[3], b[4], b[5] or 0])
         return days[-count_back:] if count_back else days
 
+    def _cap(self, key, default):
+        """A per-request history cap from the settings, in days (a deployment that changes its
+        caps is a setting, not a build). A blank, bad or non-positive value keeps the default."""
+        try:
+            v = int(float(self.settings.get(key) or default))
+        except (TypeError, ValueError):
+            return default
+        return v if v > 0 else default
+
     def _window(self, exchange, symbol, interval, daily, frm, to, count_back, depth, max_days=None):
         """History window with date-chunking (per-request caps) + split-retry on 5xx."""
         if max_days is None:
             if interval.upper() in ("D", "W", "M"):
-                max_days = 365
+                max_days = self._cap("historyDaysDaily", 365)
             elif interval.lower().endswith("s"):
-                max_days = 3
+                max_days = self._cap("historyDaysSeconds", 3)
             else:
-                max_days = 30
+                max_days = self._cap("historyDaysMinute", 30)
         if depth > 0 or (to - frm) // 86400 + 1 <= max_days:
             return self._window_one(exchange, symbol, interval, daily, frm, to, count_back, depth)
         out = []
