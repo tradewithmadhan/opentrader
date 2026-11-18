@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.16"
+PLUGIN_VERSION = "0.1.17"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -1281,8 +1281,8 @@ class OpenAlgoSource:
         return merged
 
     def _window_one(self, exchange, symbol, interval, daily, frm, to, count_back, depth):
-        """A single history window: one per-request call, paged to its span (the deployment
-        caps rows per call); split-retried on 5xx by `_window`'s chunks."""
+        """A single history window: one per-request call, paged to its span when the source's
+        answer does not cover it; split-retried on 5xx by `_window`'s chunks."""
         return self._window_page(exchange, symbol, interval, daily, frm, to, count_back, depth, 12)
 
     def _window_fetch(self, exchange, symbol, interval, daily, frm, to, count_back, depth):
@@ -1358,11 +1358,12 @@ class OpenAlgoSource:
         return close_ts  # unreachable
 
     def _window_page(self, exchange, symbol, interval, daily, frm, to, count_back, depth, guard):
-        """The window's bars, paged to its span in session time. The deployment caps rows per
-        call (~780) and answers the window's newest rows: page toward the uncovered side, one
-        call per page, until the window spans (or the source's history ends). This replaces the
-        binary split, which refetched the covered half at every level — a 2880-bar ask cost
-        ~7-10 calls where paging takes ~4. The span is judged in session time: raw window edges
+        """The window's bars, paged to its span in session time. One call is the normal answer:
+        the API serves a whole date range at once (verified live: 30 days of 1m came back as
+        7,981 rows in one call). Paging only runs when that answer does not span the window —
+        history that starts inside it, a source that truncates its rows — and then walks one
+        call per page toward the uncovered side until the window spans (or the source's history
+        ends). The span is judged in session time: raw window edges
         misfire (an evening `frm`'s first bar is the next session's 09:15; an after-close `to`
         sits between bar stamps), and complete answers were split for nothing. A bar at T
         covers [T, T+period), the period the last two bars' gap."""
