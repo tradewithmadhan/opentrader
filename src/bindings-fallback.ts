@@ -21,6 +21,8 @@ export type Candle = any;
 export type SymbolSearchResult = any;
 export type TickerInfo = any;
 export type Snapshot = any;
+/** The system line of Settings > About / the diagnostics (app_update.rs `SystemInfo`). */
+export type SystemInfo = any;
 export type DividendEvent = any;
 export type SplitEvent = any;
 export type NewsItem = any;
@@ -301,6 +303,8 @@ export type Manifest = {
   provides: Capability[];
   /** A data plugin's symbols are `<exchange>:<ticker>`. */
   exchange: string | null;
+  /** A data plugin serving several exchanges, in place of `exchange`. */
+  exchanges?: string[];
   runtime: Runtime;
   install: InstallStep[];
   settings: SettingField[];
