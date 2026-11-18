@@ -51,6 +51,19 @@ too, put its body in `opentrader_core::commands`, add its name to `SERVED` there
 - Cherry-picking upstream commits: strip the trailing `(#NNN)` PR reference from the message
   (`git cherry-pick -n`, then re-commit) so the push does not cross-reference and ping the upstream PR.
 
+## Indicators in `indicators/`
+
+- Back up once a change is confirmed working on the chart: copy `<name>.js` to `<name>_backup.js`.
+- Keep only the previous backup: the next accepted change replaces it (one backup per indicator, never a growing set).
+- No spaces in file names: use `_` (`MadhaN_Pivot_Study.js`, and its `MadhaN_Pivot_Study_backup.js`).
+
+## Plugins in `plugins/`
+
+- Test a plugin change with the regression suites in `C:\Users\91888\AppData\Local\Temp\opencode\`:
+  `openalgo-lot-test.py`, `openalgo-bars-test.py`, `openalgo-broker-state-test.py`. Their fake history server is
+  honest — it returns the whole requested range like the real API instead of capping rows — so a change that
+  mis-sizes a window, pages wrongly or counts requests wrongly fails there before it reaches a live account.
+
 ## Languages
 
 The components keep their English text; `src/i18n/translator.ts` translates the page as it appears from a dictionary
