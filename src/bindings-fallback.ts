@@ -52,6 +52,7 @@ export type FundamentalPeriods = { end?: string[]; fy?: (number | null)[]; fp?: 
 export type FundamentalMetric = any;
 export type EconomicSeries = any;
 export type EconomicPoint = any;
+export type EconomicCountry = any;
 // The revenue breakdown (crates/core/src/data/market_rest/segments.rs, camelCase serde):
 // one period's figures split by segments, products, geography and customers.
 export type BreakdownRole = { concept: string; total?: number | null; coverage?: number | null };
