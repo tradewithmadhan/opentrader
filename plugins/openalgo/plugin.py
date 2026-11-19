@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.17"
+PLUGIN_VERSION = "0.1.18"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -535,9 +535,14 @@ class OpenAlgoSource:
         for _ in (0, 1):
             sent = False
             conn = self._rest_take(scheme, host, self.REST_TIMEOUT if timeout is None else timeout)
+            # A bodyless GET declares no body type: Flask/Werkzeug answers one carrying
+            # `Content-Type: application/json` with HTTP 400 ("the request … could not
+            # understand"), which is what the masters pull is (verified live on 0.1.17).
+            headers = {"Accept": "application/json"}
+            if payload is not None:
+                headers["Content-Type"] = "application/json"
             try:
-                conn.request(method, path, body=payload,
-                             headers={"Content-Type": "application/json", "Accept": "application/json"})
+                conn.request(method, path, body=payload, headers=headers)
                 sent = True
                 r = conn.getresponse()
                 data = r.read()
@@ -827,7 +832,8 @@ class OpenAlgoSource:
         """The master's row, or the live /symbol answer when the master doesn't list the symbol (a
         fresh listing before the master's next pull). The lookup never waits for a pull: rows already
         here (memory or today's disk cache) answer, so the dialog works while the masters warm.
-        Day-cached; a miss stays None, never fatal."""
+        Only a real answer is day-cached: a miss stays None (never fatal), and a rate limit is
+        raised — cached as a miss it read as "Unknown symbol" for the rest of the day."""
         row = self._instrument_row(ticker)
         if row is not None:
             return row
@@ -843,7 +849,15 @@ class OpenAlgoSource:
             if isinstance(data, dict):
                 row = data
         except PluginError as e:
+            if e.code == BUSY_CODE:
+                # Rate limited is not an answer about the symbol. Cached as a miss it read as
+                # "Unknown symbol" (-32004, final: the app unsubscribes it) for the rest of the
+                # day, which is how a startup burst dropped symbols; raised, it is -32005 and the
+                # app asks again later (#347).
+                raise
             self.log(f"symbol {ticker}: {e}", "warn")
+        if row is None:
+            return None  # a miss stays None, never fatal — and never cached: the app caches its own
         with self.lock:
             self._symbol_rows[ticker] = (today, row)
         return row
@@ -2093,6 +2107,10 @@ class OpenAlgoSource:
             else:
                 bar[2], bar[3] = max(bar[2], quote["high"] or price), min(bar[3], quote["low"] or price)
                 bar[4], bar[5] = price, day_vol
+        # Pushed the moment it lands, not on the stream loop's next pass: a tick a second made the
+        # chart repaint once a second however many the socket carried.
+        if self.plugin is not None:
+            self.plugin.push_quote(ticker)
 
     def _handle_order_update(self, message):
         """An order transition pushed by the broker (fill, cancel, reject). Refresh the
@@ -2206,6 +2224,26 @@ class Plugin:
 
     def push_state(self):
         self.notify("broker.state", self.source.state())
+
+    def push_quote(self, ticker):
+        """One WebSocket tick straight to the app: the chart's last price waits for no poll. The
+        stream loop keeps pushing every second too (the REST fallback's quotes, the books), so a
+        repeated price here is harmless."""
+        if not self.alive:
+            return
+        q = self.source.quote(ticker)
+        if not q:
+            return
+        try:
+            if ticker in self.tickers:
+                self.notify("data.quote", q)
+            if ticker in self.watched:
+                price, tick = q["price"], self.source.tick(ticker)
+                half = tick / 2 if tick else 0.0
+                self.notify("broker.quote", {"ticker": ticker, "bid": round(price - half, 10),
+                                             "ask": round(price + half, 10), "last": price})
+        except OSError:
+            pass  # the app's socket is gone; run() notices and reconnects
 
     def events(self, events):
         for e in events:

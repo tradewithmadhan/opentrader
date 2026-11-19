@@ -59,10 +59,14 @@ too, put its body in `opentrader_core::commands`, add its name to `SERVED` there
 
 ## Plugins in `plugins/`
 
-- Test a plugin change with the regression suites in `C:\Users\91888\AppData\Local\Temp\opencode\`:
-  `openalgo-lot-test.py`, `openalgo-bars-test.py`, `openalgo-broker-state-test.py`. Their fake history server is
-  honest — it returns the whole requested range like the real API instead of capping rows — so a change that
-  mis-sizes a window, pages wrongly or counts requests wrongly fails there before it reaches a live account.
+- Test a plugin change with the regression suites in `plugins/openalgo/tests/` (tracked, so a temp cleanup or a
+  fresh clone cannot lose them): `python plugins/openalgo/tests/run_all.py`. `fake_openalgo.py` is an honest fake
+  deployment — the whole requested history range in one call like the real API instead of capping rows, the real
+  WebSocket handshake, HTTP 400 for a bodyless GET that declares a JSON body type, and 429 for a rate-limited
+  `/symbol` — so a change that mis-sizes a window, pages wrongly, counts requests wrongly or lets a rate limit
+  become "Unknown symbol" fails there before it reaches a live account.
+- Bump `PLUGIN_VERSION` in `plugin.py` and `version` in `opentrader-plugin.json` together, then
+  `python build.py release` from `plugins/openalgo/`.
 
 ## Languages
 

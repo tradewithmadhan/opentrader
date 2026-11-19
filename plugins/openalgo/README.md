@@ -79,6 +79,7 @@ console while you run `plugin.py` by hand.
 | `opentrader-plugin.json` | the release manifest |
 | `opentrader-plugin.dev.json` | the development manifest (external runtime) |
 | `build.py` | the packager: `python build.py dev` / `release` |
+| `tests/` | the regression suites (`python tests/run_all.py`): an honest fake deployment, no account or network |
 
 ## Notes
 
