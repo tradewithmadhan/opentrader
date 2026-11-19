@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.23"
+PLUGIN_VERSION = "0.1.24"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -1655,14 +1655,12 @@ class OpenAlgoSource:
             pos = next((x for x in self.positions if x["id"] == position_id), None)
         if pos is None:
             raise PluginError("No such position")
-        exchange, _, symbol = pos["ticker"].partition(":")
-        if qty is None:  # the whole position: the source's own close
-            self._post("/api/v1/closeposition", {"strategy": self.settings.get("strategy") or "OpenTrader"})
-            events = [{"kind": "placed", "ticker": pos["ticker"], "side": "sell" if pos["side"] == "buy" else "buy",
-                       "type": "market", "qty": pos["qty"]}]
-        else:  # a part of it: a market order the other way (its answer carries the events)
-            events = self.place({"ticker": pos["ticker"], "side": "sell" if pos["side"] == "buy" else "buy",
-                                 "type": "market", "qty": qty})[1]
+        # OpenAlgo's /api/v1/closeposition closes *every* position for the strategy,
+        # not just this one. Close the specific position with a market order the other
+        # way instead, so only this position's quantity is squared off.
+        close_qty = pos["qty"] if qty is None else qty
+        events = self.place({"ticker": pos["ticker"], "side": "sell" if pos["side"] == "buy" else "buy",
+                             "type": "market", "qty": close_qty})[1]
         self.force_poll()
         return events
 
