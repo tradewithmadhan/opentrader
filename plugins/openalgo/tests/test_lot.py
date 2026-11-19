@@ -58,7 +58,10 @@ class Lots(unittest.TestCase):
         self.assertEqual(body["quantity"], 150, "2 contracts of a 75-lot are 150 units")
         self.assertEqual(body["action"], "BUY")
         self.assertEqual(body["pricetype"], "LIMIT")
-        self.assertEqual(body["validity"], "DAY")
+        # OpenAlgo's placeorder does not accept a validity field (verified live:
+        # "Unknown field: validity"), so the plugin no longer sends one. The
+        # duration picked in the ticket is tracked locally (order["duration"])
+        # but not forwarded to the broker.
         self.assertEqual(body["product"], "NRML")
         self.assertEqual(body["symbol"], "NIFTY25NOVFUT")
         self.assertEqual(body["exchange"], "NFO")

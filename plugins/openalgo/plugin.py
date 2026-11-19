@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.21"
+PLUGIN_VERSION = "0.1.22"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -1575,7 +1575,9 @@ class OpenAlgoSource:
             "quantity": int(qty * lot),
             "price": num(p.get("limitPrice")) or 0,
             "trigger_price": num(p.get("stopPrice")) or 0,
-            "validity": VALIDITY[duration],
+            # OpenAlgo's placeorder does not accept a validity field (verified live:
+            # "Unknown field: validity"). The duration picked in the ticket is tracked
+            # locally (order["duration"]) but not sent to the broker.
             # the API wants these two even though they say nothing new here: action repeats the side
             # and strategy is a free tag (verified live — without them placeorder answers a field error)
             "action": side.upper(),
@@ -1623,7 +1625,7 @@ class OpenAlgoSource:
             "quantity": int((num(p.get("qty")) or order["qty"]) * (num(first_of(self._symbol_row(order["ticker"]), "lotsize", "lot_size")) or 1.0)),
             "price": num(p.get("limitPrice")) or num(order.get("limitPrice")) or 0,
             "trigger_price": num(p.get("stopPrice")) or num(order.get("stopPrice")) or 0,
-            "validity": VALIDITY[duration],
+            # OpenAlgo's modifyorder does not accept a validity field (verified live).
             "action": order["side"].upper(),
             "strategy": self.settings.get("strategy") or "OpenTrader",
             # the API wants the field even though the plugin never sets one (verified live)
