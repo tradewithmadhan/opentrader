@@ -2248,6 +2248,8 @@ fn tick_of(symbol: &str, q: &OaQuote) -> Option<TradeTick> {
         trade_time: None,
         trade_high: None,
         trade_low: None,
+        day_high: q.high.filter(|v| v.is_finite() && *v > 0.0),
+        day_low: q.low.filter(|v| v.is_finite() && *v > 0.0),
     })
 }
 
