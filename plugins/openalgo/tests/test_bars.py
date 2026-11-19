@@ -112,8 +112,9 @@ class Windows(unittest.TestCase):
 
 
 class Daily(unittest.TestCase):
-    """The deployment's D endpoint answers one row per window: the days are synthesized from
-    the hour bars it serves fully."""
+    """The source's D endpoint serves a whole range like the intraday ones: one call, no synthesis
+    from the hour bars (0.1.19 — the old fallback cost a slow 1h request per day chart and timed
+    out on MCX)."""
 
     def setUp(self):
         self.fake = fake_openalgo.FakeOpenAlgo()
@@ -122,26 +123,47 @@ class Daily(unittest.TestCase):
     def tearDown(self):
         self.fake.close()
 
-    def test_days_are_folded_from_the_hours_the_source_serves(self):
-        frm, to = midnight("2026-10-01"), midnight("2026-10-05")
+    def test_a_day_window_is_one_d_call(self):
+        frm, to = midnight("2026-10-01"), midnight("2026-10-30")
         bars = self.source.bars(SYMBOL, "1D", frm, to, 0)
 
-        days = [b[0] for b in bars]
-        self.assertEqual(days, [midnight("2026-10-01"), midnight("2026-10-02"), midnight("2026-10-05")],
-                         "weekdays only, one bar per trading day")
-        first = bars[0]
-        self.assertEqual(first[1], 100.0, "open: the first hour's open")
-        self.assertEqual(first[4], 111.0, "close: the last hour's close")
-        self.assertEqual(first[2], 116.0, "high: the hours' highest")
-        self.assertEqual(first[3], 90.0, "low: the hours' lowest")
-        self.assertEqual(first[5], 70.0, "volume: the hours summed")
-        self.assertTrue(self.source._d_synth.get("NSE"), "the probe is remembered per exchange")
+        self.assertEqual(self.fake.count("/api/v1/history"), 1)
+        self.assertEqual(self.fake.sent("/api/v1/history")[0]["body"]["interval"], "D")
+        self.assertEqual(len(bars), self.fake.expected_bars("D", "2026-10-01", "2026-10-30"))
+        self.assertEqual(bars[0], [midnight("2026-10-01"), 100.0, 110.0, 90.0, 105.0, 10.0],
+                         "the source's own day bar, at IST midnight")
 
-    def test_short_day_windows_keep_the_source_row(self):
-        frm, to = midnight("2026-10-01"), midnight("2026-10-03")
+    def test_history_gets_the_long_timeout(self):
+        seen = {}
+        original = self.source._rest
+
+        def spy(method, path, body, timeout=None):
+            seen[(method, path)] = timeout
+            return original(method, path, body, timeout)
+
+        self.source._rest = spy
+        self.source.bars(SYMBOL, "1D", midnight("2026-10-01"), midnight("2026-10-05"), 0)
+
+        self.assertEqual(seen[("POST", "/api/v1/history")], plugin.OpenAlgoSource.HISTORY_TIMEOUT,
+                         "a cold history call takes ~16 s; the 10 s default would drop the chart")
+        self.assertGreater(plugin.OpenAlgoSource.HISTORY_TIMEOUT, plugin.OpenAlgoSource.REST_TIMEOUT)
+
+    def test_a_window_wider_than_a_year_walks_d_by_year_and_caches(self):
+        frm, to = midnight("2024-01-01"), midnight("2026-01-01")
         bars = self.source.bars(SYMBOL, "1D", frm, to, 0)
-        self.assertEqual(len(bars), 1, "a 2-day window takes the D endpoint's own answer")
-        self.assertFalse(self.source._d_synth.get("NSE"))
+
+        calls = self.fake.sent("/api/v1/history")
+        self.assertGreaterEqual(len(calls), 2, "one call per year walked")
+        self.assertTrue(all(c["body"]["interval"] == "D" for c in calls),
+                        "the D endpoint answers every chunk: no hour or minute synthesis")
+        self.assertGreater(len(bars), 400)
+        self.assertEqual(bars[0][0], midnight("2024-01-01"))
+        self.assertEqual(bars[-1][0], midnight("2026-01-01"))
+
+        again = self.source.bars(SYMBOL, "1D", frm, to, 0)
+        self.assertEqual(len(self.fake.sent("/api/v1/history")), len(calls),
+                         "a year already walked is cached")
+        self.assertEqual(again, bars)
 
 
 if __name__ == "__main__":

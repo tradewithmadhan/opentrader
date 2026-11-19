@@ -237,7 +237,6 @@ class FakeOpenAlgo:
         self.busy_symbol = False  # /symbol answers HTTP 429 (the rate limit)
         self.history_max_days = None  # a deployment whose one call is capped to the tail
         self.history_floor = None  # "YYYY-MM-DD": nothing older is served
-        self.daily_single_row = True  # the real deployment's D endpoint: one row per window
         self.bar_cap = None  # a hard row cap per call (a truncating deployment)
         self.quotes = {}  # ticker -> the REST /quotes fields
         self.intervals = {"minutes": ["1m", "3m", "5m", "15m"], "hours": ["1h"],
@@ -282,8 +281,6 @@ class FakeOpenAlgo:
 
     # ── history ──
     def history_rows(self, interval, start_date, end_date):
-        if self.daily_single_row and interval.upper() in ("D", "W", "M"):
-            return [_bar(ist_day(end_date), 0)]
         start, end = ist_day(start_date), ist_day(end_date)
         if self.history_floor:
             start = max(start, ist_day(self.history_floor))

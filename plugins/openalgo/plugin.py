@@ -28,17 +28,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.18"
+PLUGIN_VERSION = "0.1.19"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
 
 TZ_IST = timezone(timedelta(hours=5, minutes=30), "Asia/Kolkata")
 
-# The oldest bars the deployment serves: the intraday floor (daily bars are synthesized from the
-# hour endpoint, so they stop here too — the D endpoint answers one row for any window, the plugin
-# builds the days from the hour bars). `history` (below, the app's #347 contract) is measured from
-# it: the app then asks nothing older and only as many bars as fit the window.
+# The oldest bars the deployment serves: its intraday floor, which its daily (D) bars reach too.
+# `history` (below, the app's #347 contract) is measured from it: the app then asks nothing older
+# and only as many bars as fit the window.
 HISTORY_FLOOR = datetime(2021, 11, 13, tzinfo=TZ_IST)
 
 # ── the market's clock: bars and sessions are keyed in the exchange's time zone (India: one) ──
@@ -400,7 +399,6 @@ class OpenAlgoSource:
         self.ws_shape_warned = False  # the "no price read" warn says its piece only once
         self.ws_quiet_warned = False  # the "connected but no tick" warn says its piece only once
         self._daily_cache = {}  # (exchange, symbol, interval, start date, end date) → a folded year of day bars
-        self._d_synth = {}  # exchange — the D endpoint answers one row per window there: days synthesize
         self._holiday_rows = {}  # year → (IST day fetched, the raw calendar rows of every exchange)
         self._timings = {}  # date → (IST day fetched, [timing rows])
         self._sessions = {}  # (calendar exchange, IST day) → the built session dict
@@ -495,6 +493,10 @@ class OpenAlgoSource:
     # (or a connect that stalls) is retried once on a fresh one.
 
     REST_TIMEOUT = 10.0  # connect + read of one /api/v1 call (the masters pull passes its own)
+    # A deployment's first history call after an idle spell walks a cold path (verified live: once
+    # 42 s for a 30-day D window, 0.1 s right after) — the app gives data.bars 60 s, so history
+    # gets 55 instead; quotes, books and orders keep the short default.
+    HISTORY_TIMEOUT = 55.0
     REST_POOL = 6  # idle connections kept; beyond this a connection is used once and closed
 
     def _rest_open(self, scheme, host, timeout):
@@ -561,7 +563,7 @@ class OpenAlgoSource:
                     break  # the request may have reached the server: never send it twice
         raise PluginError(f"OpenAlgo is not reachable ({_clean(str(last), self._key())})")
 
-    def _post(self, path, body, whole=False):
+    def _post(self, path, body, whole=False, timeout=None):
         """One OpenAlgo /api/v1 call; returns its `data` — or the whole answer with `whole`
         (placeorder's order id sits at the top level, verified live)."""
         key = self._key()
@@ -569,7 +571,7 @@ class OpenAlgoSource:
             raise PluginError("The OpenAlgo plugin has no API URL or key yet — fill them in Settings > Plugins")
         payload = dict(body)
         payload["apikey"] = key
-        status, raw = self._rest("POST", path, payload)
+        status, raw = self._rest("POST", path, payload, timeout)
         if status in (429, 503):
             # The gateway's rate limit (or a proxy in front of it): busy, the app backs off.
             raise PluginError(f"OpenAlgo answered HTTP {status} — rate limited, the app will ask again later", BUSY_CODE)
@@ -1165,50 +1167,18 @@ class OpenAlgoSource:
             raise
 
     def _daily(self, exchange, symbol, interval, frm, to, count_back):
-        """A day window's bars. Deployments whose D endpoint answers only its last day (verified live: this one
-        answers a single row for every window) get their days synthesized from the intraday bars it serves
-        fully — hourly when the intervals table has one, else the finest minute table, chunked. The probe is
-        remembered per exchange: one wasted call, then the days synthesize straight away."""
+        """A day window's bars, from the source's own D (day / week / month) endpoint: it serves the
+        whole range in one call like the intraday ones (verified live: 5 days → 5 rows, 30 days → 22
+        rows, each at its trading day's midnight). A window wider than a year is walked in year
+        chunks — cached — so the host does not refetch the same years on every step."""
         if to - frm > 365 * 86400:
-            # The app asks every open day-chart for 7560 bars (decades). Serving only the window's
-            # last year made the host walk back a year at a time, re-fetching and re-synthesizing
-            # the same years on every step and every reload. Fold whole years here instead —
-            # cached — and stop where the source's intraday history ends.
             return self._daily_long(exchange, symbol, interval, frm, to, count_back)
-        with self.lock:
-            synth = self._d_synth.get(exchange)
-        bars = None if synth else self._window(exchange, symbol, interval, True, frm, to, count_back, 0)
-        if not synth and (len(bars) >= 2 or to - frm <= 3 * 86400):
-            return bars
-        with self.lock:
-            self._d_synth[exchange] = True
-        tables = self._interval_tables()
-        hour = tables["hours"].get(1)
-        if hour:
-            try:
-                return self._days_of(self._window(exchange, symbol, hour, False, frm, to, 0, 0, 365), count_back)
-            except PluginError as e:
-                self.log(f"history {exchange}:{symbol} {interval}: synthesizing from {hour} failed ({e}); the day bar alone", "warn")
-                return bars or []
-        minute = min(tables["minutes"], default=0)
-        if not minute:
-            return bars or []
-        try:
-            intraday, start = [], frm
-            chunk = 30 * 86400  # the source's minute range cap (the app provider's, mirrored)
-            while start <= to:
-                end = min(start + chunk, to)
-                intraday += self._window(exchange, symbol, tables["minutes"][minute], False, start, end, 0, 0)
-                start = end + 1
-            return self._days_of(intraday, count_back)
-        except PluginError as e:
-            self.log(f"history {exchange}:{symbol} {interval}: synthesizing from {tables['minutes'][minute]} failed ({e}); the day bar alone", "warn")
-            return bars or []
+        return self._window(exchange, symbol, interval, True, frm, to, count_back, 0)
 
     def _daily_long(self, exchange, symbol, interval, frm, to, count_back):
-        """A window longer than a year: year chunks walked back from `to`, each folded and cached, until
-        `frm`, enough bars, or the source's intraday history ends (an empty chunk, or an older one with
-        only a stray row or two — this deployment echoes one row per window, that is not history)."""
+        """A window longer than a year: year chunks walked back from `to`, each cached, until `frm`,
+        enough bars, or the source's daily history ends (an empty chunk, or an older one with only a
+        stray row or two — a row an adapter echoed, not history)."""
         out = []
         end = to
         first = True
@@ -1217,7 +1187,7 @@ class OpenAlgoSource:
             bars = self._daily_chunk(exchange, symbol, interval, start, end)
             if not bars:
                 if start > frm:
-                    self.log(f"history {exchange}:{symbol} {interval}: the source has no intraday rows "
+                    self.log(f"history {exchange}:{symbol} {interval}: the source has no daily bars "
                              f"before {ist_date(end)} — daily history stops there")
                 break
             if not first and len(bars) < 10:
@@ -1230,7 +1200,7 @@ class OpenAlgoSource:
         return out[-count_back:] if count_back else out
 
     def _daily_chunk(self, exchange, symbol, interval, frm, to):
-        """One ≤365-day daily window, folded and cached per (symbol, interval, the window's IST dates)."""
+        """One ≤365-day daily window, cached per (symbol, interval, the window's IST dates)."""
         key = (exchange, symbol, interval, ist_date(frm), ist_date(to))
         with self.lock:
             cached = self._daily_cache.get(key)
@@ -1242,20 +1212,6 @@ class OpenAlgoSource:
                 self._daily_cache.clear()
             self._daily_cache[key] = bars
         return bars
-
-    def _days_of(self, intraday, count_back):
-        """Intraday bars folded into days: open the first, close the last, high/low the extremes, volume
-        summed; a day bar sits at its trading day's midnight in the market's clock."""
-        days = []
-        for b in sorted(intraday, key=lambda x: x[0]):
-            day = ist_midnight(int(b[0]))
-            if days and days[-1][0] == day:
-                days[-1][2] = max(days[-1][2], b[2])
-                days[-1][3] = min(days[-1][3], b[3])
-                days[-1][4], days[-1][5] = b[4], (days[-1][5] or 0) + (b[5] or 0)
-            else:
-                days.append([day, b[1], b[2], b[3], b[4], b[5] or 0])
-        return days[-count_back:] if count_back else days
 
     def _cap(self, key, default):
         """A per-request history cap from the settings, in days (a deployment that changes its
@@ -1306,7 +1262,7 @@ class OpenAlgoSource:
             "start_date": ist_date(frm), "end_date": ist_date(to),
         }
         try:
-            data = self._post("/api/v1/history", body)
+            data = self._post("/api/v1/history", body, timeout=self.HISTORY_TIMEOUT)
         except PluginError:
             if depth == 0:
                 raise  # the first window's error is what reaches the user
