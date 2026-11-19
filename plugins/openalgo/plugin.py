@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.22"
+PLUGIN_VERSION = "0.1.23"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -200,7 +200,7 @@ def display_name(name, row):
     parts.append(expiry)
     return " ".join(parts)
 
-PRICE_TYPES = {"market": "MARKET", "limit": "LIMIT", "stop": "STOP", "stoplimit": "STOP-LIMIT"}
+PRICE_TYPES = {"market": "MARKET", "limit": "LIMIT", "stop": "SL-M", "stoplimit": "SL", "stop_limit": "SL"}
 PRICE_KINDS = {  # the source's price type → the wire's (sl-m / sl-l are some adapters' spellings)
     "market": "market", "limit": "limit", "stop": "stop", "stoplimit": "stopLimit",
     "sl-m": "stop", "slm": "stop", "sl-l": "stopLimit", "sll": "stopLimit",
@@ -1571,7 +1571,7 @@ class OpenAlgoSource:
         body = {
             "symbol": symbol, "exchange": exchange,
             "product": product,
-            "pricetype": PRICE_TYPES.get(kind, "LIMIT"),
+            "pricetype": ("SL" if (kind == "stop" and num(p.get("limitPrice"))) else PRICE_TYPES.get(kind, "LIMIT")),
             "quantity": int(qty * lot),
             "price": num(p.get("limitPrice")) or 0,
             "trigger_price": num(p.get("stopPrice")) or 0,
@@ -1621,7 +1621,7 @@ class OpenAlgoSource:
         body = {
             "orderid": order["id"], "symbol": symbol, "exchange": exchange,
             "product": product,
-            "pricetype": PRICE_TYPES.get(order["type"], "LIMIT"),
+            "pricetype": ("SL" if (order["type"] == "stop" and (num(p.get("limitPrice")) or num(order.get("limitPrice")))) else PRICE_TYPES.get(order["type"], "LIMIT")),
             "quantity": int((num(p.get("qty")) or order["qty"]) * (num(first_of(self._symbol_row(order["ticker"]), "lotsize", "lot_size")) or 1.0)),
             "price": num(p.get("limitPrice")) or num(order.get("limitPrice")) or 0,
             "trigger_price": num(p.get("stopPrice")) or num(order.get("stopPrice")) or 0,
