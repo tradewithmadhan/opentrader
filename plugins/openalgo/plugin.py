@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.19"
+PLUGIN_VERSION = "0.1.20"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -165,18 +165,20 @@ FALLBACK_SECONDS = {}
 # the app's built-in OpenAlgo provider does (verified live: /history answers exchange=NSE_INDEX).
 INDEX_SEGMENTS = {"NSE": "NSE_INDEX", "BSE": "BSE_INDEX", "MCX": "MCX_INDEX"}
 
-KINDS = {  # instrument type → the app's search-row type (the dialog's tabs read it)
+KINDS = {  # instrument type → the app's search-row / symbol-info type (the dialog's tabs and
+    # the "Type" row read it; the strings must match the app's `securityTypeLabel` vocabulary
+    # exactly — "option" is singular there, "options" would render no Type at all).
     "EQ": "stock", "BE": "stock", "SM": "stock", "MF": "fund", "MFP": "fund",
     "IDX": "index", "IND": "index",
     "FUT": "futures", "FUTCUR": "futures",
-    "CE": "options", "PE": "options", "OPT": "options", "OPTFUT": "options", "OPTCUR": "options",
+    "CE": "option", "PE": "option", "OPT": "option", "OPTFUT": "option", "OPTCUR": "option",
     "CUR": "forex",
 }
 
 FILTER_KINDS = {  # the dialog's Type chip code → the app kind it asks for (mirrors the provider's type_allows)
     "EQ": "stock", "STOCK": "stock",
     "FUT": "futures", "FUTURES": "futures",
-    "CE": "options", "PE": "options", "OPT": "options", "OPTIONS": "options",
+    "CE": "option", "PE": "option", "OPT": "option", "OPTIONS": "option", "OPTION": "option",
     "IX": "index", "INDEX": "index", "INDICES": "index",
 }
 
