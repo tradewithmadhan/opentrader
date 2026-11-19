@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.20"
+PLUGIN_VERSION = "0.1.21"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -439,13 +439,18 @@ class OpenAlgoSource:
         t = self.ws_thread
         return bool(t and t.is_alive())
 
-    def log(self, message, level="info"):
-        """A line in the plugin's log: through the connection when it is up, else to stdout (run by hand)."""
+    def log(self, message, level="info", category="api"):
+        """A line in the plugin's log: through the connection when it is up, else to stdout (run by hand).
+        Also appended to the per-category file (openalgo-api.log / openalgo-ws.log) when enabled in settings,
+        so an AI agent or the user can read it without the in-memory ring buffer."""
         p = self.plugin
         if p and p.alive:
-            p.log(message, level)
+            p.log(message, level, category)
         else:
             print(message, flush=True)
+            if self._log_enabled(category):
+                ts = datetime.now(TZ_IST).strftime("%Y-%m-%d %H:%M:%S")
+                self._write_log(category, f"{ts} [{level}] {_clean(str(message), self._key())}")
 
     def _start_ws(self, gen):
         """(Re)start the stream thread: a new generation makes the old loop leave (settings changed)."""
@@ -459,6 +464,46 @@ class OpenAlgoSource:
 
     def _key(self):
         return self.settings.get("apiKey", "")
+
+    def _log_dir(self):
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return Path(base) / "OpenTraderPlugins"
+
+    def _log_enabled(self, category):
+        # category: "api" or "ws". Settings arrive as text ("true"/"false"); fall back to the
+        # manifest defaults when the key is missing (e.g. run by hand, or an older app build).
+        if category == "ws":
+            if self.settings.get("logWs") is None:
+                return True
+            return str(self.settings.get("logWs")).strip().lower() == "true"
+        if category == "debug":
+            if self.settings.get("logDebug") is None:
+                return os.environ.get("OPENALGO_DEBUG") == "1"
+            return str(self.settings.get("logDebug")).strip().lower() == "true" or os.environ.get("OPENALGO_DEBUG") == "1"
+        if self.settings.get("logApi") is None:
+            return True
+        return str(self.settings.get("logApi")).strip().lower() == "true"
+
+    def _log_path(self, category):
+        name = "openalgo-ws.log" if category == "ws" else "openalgo-api.log"
+        return self._log_dir() / name
+
+    def _write_log(self, category, line):
+        try:
+            d = self._log_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            p = self._log_path(category)
+            # rolling cap: keep the last ~500 KB once the file passes ~1 MB
+            try:
+                if p.exists() and p.stat().st_size > 1024 * 1024:
+                    data = p.read_bytes()
+                    p.write_bytes(data[-512 * 1024:])
+            except OSError:
+                pass
+            with p.open("a", encoding="utf-8") as f:
+                f.write(line.rstrip("\n") + "\n")
+        except OSError:
+            pass  # logging must never break the plugin
 
     # ── day-stamped disk cache (the mirror of the built-in provider's daily files:
     #    an app restart inside a day makes no network call for these) ──
@@ -1817,7 +1862,7 @@ class OpenAlgoSource:
             except Exception as e:  # noqa: BLE001 - the stream is best effort; it retries
                 with self.lock:
                     self.ws = None
-                self.log(f"OpenAlgo stream reconnecting ({_clean(str(e), key)})", "warn")
+                self.log(f"OpenAlgo stream reconnecting ({_clean(str(e), key)})", "warn", "ws")
             if generation != self.ws_generation:
                 return
             time.sleep(3)
@@ -1862,7 +1907,7 @@ class OpenAlgoSource:
             self.last_ws_tick = time.time()  # the connect counts as life: the quiet clock starts here,
             # not at 0 — otherwise the first data.subscribe after a cold start reads the quiet check
             # as "no tick since forever" and fires the REST fallback the same second
-        self.log(f"OpenAlgo stream connected ({urllib.parse.urlsplit(url).netloc})")
+        self.log(f"OpenAlgo stream connected ({urllib.parse.urlsplit(url).netloc})", "info", "ws")
 
         def send_text(text):
             data = text.encode("utf-8")
@@ -1892,20 +1937,26 @@ class OpenAlgoSource:
                 symbols = [{"exchange": t.split(":", 1)[0], "symbol": t.split(":", 1)[1]}
                            for t in sorted(wanted) if ":" in t]
                 text = json.dumps({"action": "subscribe", "mode": "Quote", "symbols": symbols})
-                if DEBUG:
-                    print(f"[ws >] {_clean(text, key)}", flush=True)
+                if DEBUG or self._log_enabled("debug"):
+                    msg = f"[ws >] {_clean(text, key)}"
+                    print(msg, flush=True)
+                    self._write_log("ws", f"{datetime.now(TZ_IST).strftime('%Y-%m-%d %H:%M:%S')} [debug] {msg}")
                 send_text(text)
             with self.lock:
                 self.ws_subscribed = set(wanted)
 
         send_text(json.dumps({"action": "authenticate", "api_key": key}))
-        if DEBUG:
-            print("[ws >] authenticate (key redacted)", flush=True)
+        if DEBUG or self._log_enabled("debug"):
+            msg = "[ws >] authenticate (key redacted)"
+            print(msg, flush=True)
+            self._write_log("ws", f"{datetime.now(TZ_IST).strftime('%Y-%m-%d %H:%M:%S')} [debug] {msg}")
         # Order updates (fills, cancels, rejections) are pushed on the same socket
         # after authenticating — account-level, no symbols involved.
         send_text(json.dumps({"action": "subscribe_orders", "request_id": "orders-1"}))
-        if DEBUG:
-            print("[ws >] subscribe_orders", flush=True)
+        if DEBUG or self._log_enabled("debug"):
+            msg = "[ws >] subscribe_orders"
+            print(msg, flush=True)
+            self._write_log("ws", f"{datetime.now(TZ_IST).strftime('%Y-%m-%d %H:%M:%S')} [debug] {msg}")
         last_ping = 0.0
         told_empty = False
         buffer = b""
@@ -1933,7 +1984,7 @@ class OpenAlgoSource:
                 resync(wanted)  # the whole set again: the protocol has no incremental add / drop
             if not wanted and not told_empty:
                 told_empty = True  # the price cache stays empty until something subscribes
-                self.log("stream: the app has not subscribed symbols yet — open a chart or add one to the watchlist")
+                self.log("stream: the app has not subscribed symbols yet - open a chart or add one to the watchlist", "info", "ws")
             if now - last_ping > 20:
                 last_ping = now  # the provider pings every 20 s; a silent socket dies quietly otherwise
                 send_control(0x89)
@@ -1976,8 +2027,10 @@ class OpenAlgoSource:
             return (), rest
         if opcode == 0x1:
             return payload, rest
-        if opcode == 0x2 and DEBUG:  # binary: the shapes above assume JSON text; show what arrived instead
-            print(f"[ws <] binary frame: {payload[:60].hex()}", flush=True)
+        if opcode == 0x2 and (DEBUG or self._log_enabled("debug")):  # binary: the shapes above assume JSON text; show what arrived instead
+            msg = f"[ws <] binary frame: {payload[:60].hex()}"
+            print(msg, flush=True)
+            self._write_log("ws", f"{datetime.now(TZ_IST).strftime('%Y-%m-%d %H:%M:%S')} [debug] {msg}")
         return (), rest  # binary, pong, fragments: not ours
 
     def _ws_message(self, data):
@@ -1989,8 +2042,10 @@ class OpenAlgoSource:
         absent, so the two fall back through each other and the last quote. Run with OPENALGO_DEBUG=1 to
         see the raw traffic.
         """
-        if DEBUG:
-            print(f"[ws <] {_clean(data.decode('utf-8', 'replace'), self._key())[:300]}", flush=True)
+        if DEBUG or self._log_enabled("debug"):
+            msg = f"[ws <] {_clean(data.decode('utf-8', 'replace'), self._key())[:300]}"
+            print(msg, flush=True)
+            self._write_log("ws", f"{datetime.now(TZ_IST).strftime('%Y-%m-%d %H:%M:%S')} [debug] {msg}")
         try:
             message = json.loads(data.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
@@ -2021,7 +2076,7 @@ class OpenAlgoSource:
             if not self.ws_shape_warned:
                 self.ws_shape_warned = True  # once: a market_data message without a price
                 self.log("stream: a market_data message arrived without a price (run with OPENALGO_DEBUG=1 "
-                         "to see the raw traffic)", "warn")
+                         "to see the raw traffic)", "warn", "ws")
             return
         self.last_ws_tick = time.time()  # the socket feeds prices; the REST fallback stands down
         ts = num(first_of(r, "ltt", "timestamp", "ts", "time"))
@@ -2173,12 +2228,22 @@ class Plugin:
     def notify(self, method, params):
         self.send({"jsonrpc": "2.0", "method": method, "params": params})
 
-    def log(self, message, level="info"):
-        """A line in the plugin's log in Settings (stdout reaches it too, but without a level)."""
+    def log(self, message, level="info", category="api"):
+        """A line in the plugin's log in Settings (stdout reaches it too, but without a level).
+        Also appended to the per-category file (openalgo-api.log / openalgo-ws.log) when enabled
+        in settings, so an AI agent or the user can read it from disk."""
         if self.alive:
             self.notify("log", {"level": level, "message": message})
         else:
             print(message, flush=True)
+        src = getattr(self, "source", None)
+        if src is not None and getattr(src, "_log_enabled", None):
+            try:
+                if src._log_enabled(category):
+                    ts = datetime.now(TZ_IST)
+                    src._write_log(category, f"{ts.strftime('%Y-%m-%d %H:%M:%S')} [{level}] {_clean(str(message), src._key())}")
+            except Exception:
+                pass
 
     def push_state(self):
         self.notify("broker.state", self.source.state())
@@ -2273,7 +2338,7 @@ class Plugin:
             self.tickers = {t for t in raw if self.source.known(t)}
             dropped = len(raw) - len(self.tickers)
             if dropped:
-                self.log("data.subscribe: dropped %d stale symbol(s) (e.g. NSE:BANKNIFTY -> use NSE_INDEX:BANKNIFTY)" % dropped)
+                self.log("data.subscribe: dropped %d stale symbol(s) (e.g. NSE:BANKNIFTY -> use NSE_INDEX:BANKNIFTY)" % dropped, "info", "ws")
             self.log("data.subscribe: %d tickers" % len(self.tickers))
             self.forward_subscription()
         elif method == "broker.watchQuote":
@@ -2390,5 +2455,23 @@ class Plugin:
             time.sleep(3)
 
 
+def _reset_logs():
+    """Truncate the per-category log files once per process start, so each app launch
+    begins with a fresh log (the files are capped at ~1 MB anyway)."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    d = Path(base) / "OpenTraderPlugins"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        for name in ("openalgo-api.log", "openalgo-ws.log"):
+            p = d / name
+            try:
+                p.write_text("", encoding="utf-8")
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 if __name__ == "__main__":
+    _reset_logs()
     Plugin(OpenAlgoSource()).run()

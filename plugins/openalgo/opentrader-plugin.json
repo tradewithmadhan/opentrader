@@ -1,7 +1,7 @@
 {
   "id": "openalgo",
   "name": "OpenAlgo",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "publisher": "tradewithmadhan",
   "description": "Your OpenAlgo deployment in OpenTrader: the market segments of your account (NSE, BSE, NFO, MCX…) on the charts and its trading from the charts.",
   "api": 2,
@@ -30,7 +30,13 @@
         { "value": "CNC", "label": "CNC (delivery)" },
         { "value": "NRML", "label": "NRML (carryforward)" }
       ],
-      "help": "The product type an order starts from — the order ticket picks one per order (per segment: MIS or CNC on an equity, MIS or NRML on a derivative) and remembers the last pick." }
+      "help": "The product type an order starts from — the order ticket picks one per order (per segment: MIS or CNC on an equity, MIS or NRML on a derivative) and remembers the last pick." },
+    { "key": "logApi", "label": "Log REST/API to file", "type": "bool", "default": "true",
+      "help": "Writes REST and history calls (and their errors) to openalgo-api.log in the OpenTraderPlugins folder, so an AI agent or you can read them. The API key is never written." },
+    { "key": "logWs", "label": "Log WebSocket to file", "type": "bool", "default": "true",
+      "help": "Writes stream connect/disconnect, subscribe pruning and message-shape warnings to openalgo-ws.log." },
+    { "key": "logDebug", "label": "Log raw stream traffic", "type": "bool", "default": "false",
+      "help": "Also dump the raw WebSocket messages (key redacted) to openalgo-ws.log. Very verbose; use only while debugging." }
   ],
   "homepage": "https://github.com/tradewithmadhan/opentrader",
   "platforms": ["windows"]
