@@ -374,6 +374,9 @@ class Instruments:
 
 class OpenAlgoSource:
     POLL_EVERY = 60.0  # the books refresh on order_update pushes; this is only a slow fallback
+    # TODO (Option B): make this a setting ("pollInterval", default 60, 0 = disabled). When 0,
+    # skip the periodic branch in on_tick() entirely and rely only on force_poll() + the
+    # order_update push. Reduces 4 API calls/min on slower deployments. User-requested.
 
     def __init__(self):
         self.plugin = None  # set by Plugin: the connection the log lines go through
