@@ -90,7 +90,7 @@ export async function getDailyHistoryBefore(
 }
 
 /** Reference data changes at most once a day: an answer is reused for an hour. */
-const INFO_TTL_MS = 60 * 60_000;
+const INFO_TTL_MS = 5 * 60_000;
 
 /** Ticker info requests, one per symbol: every caller waiting out a lost
  *  connection shares one retry loop, and the answer serves every caller for
