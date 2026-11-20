@@ -1,6 +1,6 @@
 # Bug report — for filing on tradewithmadhan/opentrader (or deepentropy/opentrader)
 
-> Status: **FIXED upstream** in `737663cc` (#370, "Trading lines: order lines drag with a broker plugin, project order dragged by its label"). No need to re-file.
+> Status: **FIXED upstream** in `737663cc` (#370, "Trading lines: order lines drag with a broker plugin, project order dragged by its label"). Adopted in this fork via cherry-pick of `737663cc` and `382d69b9` (#370).
 
 Title of the issue: **Order price lines on the chart: dragging doesn't modify the order, and new-order price lines can't be dragged at all**
 
