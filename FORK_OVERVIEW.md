@@ -259,7 +259,9 @@ we kept ours — those files still differ from upstream tip but contain the same
 ### 4. Version / packaging
 Why: `1e9b76f4` bumped `package.json`, `package-lock.json`, `Cargo.toml`, `Cargo.lock`, `tauri.conf.json` to 0.4.29
 so the built exe reports the right version and the updater stops offering an older upstream release. `drawingRef`
-was deliberately kept at `v0.10.1` because the sibling drawing checkout is 0.10.1.
+was first left at `v0.10.1` to match the sibling checkout, then updated to `v0.11.1` once that checkout was moved to
+the same tag and the whole suite was re-run green — the rule now is to bump library versions together with upstream
+syncs, not leave them behind.
 
 ### 5. i18n (`src/i18n/**`)
 Why: every new UI text must be in the catalog and all six dictionaries (tests enforce it). The catalog was
