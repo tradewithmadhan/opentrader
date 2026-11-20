@@ -542,6 +542,64 @@ export type BrokerQuote = { ticker: string; bid: number | null; ask: number | nu
 
 // ── Runtime stubs (reject / no-op outside the Tauri shell) ──────────────────
 
+
+/**
+ * Browser-only bridge: the app's datafeed paths still call Tauri commands
+ * (getMinuteHistory, setChartSubscription…). With no backend, route those to
+ * the active `source()` — sample in a plain browser, OpenAlgo with ?source=openalgo
+ * — instead of rejecting. Only data commands are bridged; app/plugin/trading
+ * commands still need the real backend.
+ */
+const DATA_COMMANDS: Record<string, (s: any, a: any[]) => Promise<any>> = {
+  setChartSubscription: (s, a) => s.setChartSubscription(a[1] ?? null, String(a[0] ?? "0")),
+  setWatchlistSubscription: (s, a) => s.setWatchlistSubscription(a[0] ?? []),
+  getSecondHistory: async (s, a) => ({ bars: await s.secondAggs(a[0], a[1], a[2], a[3] ?? true), partial: false }),
+  getSecondHistoryTail: (s, a) => s.secondTail(a[0], a[1], a[2], a[3] ?? true),
+  getAggregatesBefore: (s, a) => s.aggregatesBefore(a[0], a[1], a[2], a[3], a[4], a[5] ?? true),
+  getDailyHistoryBefore: (s, a) => s.dailyBefore(a[0], a[1], a[2], a[3] ?? true),
+  getMinuteHistory: async (s, a) => ({ bars: await s.minuteAggs(a[0], a[2], a[1], a[3] ?? true), partial: false }),
+  getDailyHistory: async (s, a) => ({ bars: await s.dailyAggs(a[0], a[1], a[2] ?? true), partial: false }),
+  getTickerInfo: (s, a) => s.tickerInfo(a[0]),
+  getTickerSnapshot: (s, a) => s.tickerSnapshot(a[0]),
+  searchTickers: (s, a) => s.search(a[0], a[1] ?? null),
+  getDividends: (s, a) => s.dividends(a[0]),
+  getSplits: (s, a) => s.splits(a[0]),
+  getLatestNews: (s, a) => s.latestNews(a[0], a[1] ?? 1),
+};
+
+async function bridgedCommand(name: string, args: any[]): Promise<any> {
+  const fn = DATA_COMMANDS[name];
+  if (!fn) return missing(name)();
+  try {
+    const { source } = await import("./data/sources");
+    const s = source();
+    // Never recurse into the Tauri source from a backend-less build.
+    if (s.name === "massive") return missing(name)();
+    return { status: "ok", data: await fn(s, args) } as any;
+  } catch (e) {
+    return { status: "error", error: e instanceof Error ? e.message : String(e) } as any;
+  }
+}
+
+const LIVE_EVENTS: Record<string, (s: any, fn: (e: any) => void) => Promise<() => void>> = {
+  chartAggregate: (s, fn) => s.onChartAggregate((e: any) => fn({ payload: e })),
+  secondAggregate: (s, fn) => s.onSecondAggregate((e: any) => fn({ payload: e })),
+  tradeTick: (s, fn) => s.onTradeTick((e: any) => fn({ payload: e })),
+};
+
+async function bridgedEvent(name: string, fn: (e: any) => void): Promise<() => void> {
+  const fnFor = LIVE_EVENTS[name];
+  if (!fnFor) return () => {};
+  try {
+    const { source } = await import("./data/sources");
+    const s = source();
+    if (s.name === "massive") return () => {};
+    return await fnFor(s, fn);
+  } catch {
+    return () => {};
+  }
+}
+
 function missing(name: string): () => Promise<never> {
   return () =>
     Promise.reject(
@@ -666,6 +724,7 @@ export const commands: {
       if (prop === "then") return undefined;
       if (prop === "getSymbolSession") return bridgedSymbolSession;
       if (prop === "getFundingStatus") return bridgedFundingStatus;
+      if (prop in DATA_COMMANDS) return (...a: any[]) => bridgedCommand(String(prop), a);
       return missing(String(prop));
     },
   },
@@ -757,7 +816,7 @@ export const events = new Proxy(
   {
     get: (_t, prop: string) => {
       if (prop === "then") return undefined;
-      return { listen: () => Promise.resolve(() => {}) };
+      return { listen: (fn: (e: any) => void) => bridgedEvent(String(prop), fn) };
     },
   },
 ) as {
