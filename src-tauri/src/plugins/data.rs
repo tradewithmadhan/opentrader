@@ -737,8 +737,7 @@ fn found_rows(
                 market: Some(market_of(&f.kind).to_string()),
                 locale: None,
                 exchange: Some(exchange.to_string()),
-                // The plugin's security type ("stock", "index", "futures"…) reaches the dialog: the tabs
-                // filter on it (an openalgo-source row reads nothing else).
+                // The plugin's own type: the row's label (cfd, forex, fund…).
                 r#type: Some(f.kind.clone()).filter(|k| !k.is_empty()),
             })
         })
