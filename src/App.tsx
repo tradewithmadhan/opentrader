@@ -96,7 +96,11 @@ import { replayBroker } from "./data/trading/replay-broker";
 import { pluginBroker } from "./data/trading/plugin-broker";
 import { events } from "./bindings";
 import { forgetUnknownSymbols } from "./data/unknown-symbols";
+<<<<<<< HEAD
 import { refreshPluginSessions } from "./data/session/symbol-sessions";
+=======
+import { wakeRetries } from "./data/connection";
+>>>>>>> 5565d13b (Data plugins: restored charts and watchlists wait for a plugin still starting (#371))
 import { createDrawingStore } from "./window/drawings/drawing-store";
 import { createChartBridge } from "./window/right-rail/community/chart-bridge";
 import { setChartBridge } from "./data/community/chart-share";
@@ -441,11 +445,14 @@ function App() {
 
   // A data plugin that connects again may know its symbols again (an expired contract returns): each window
   // forgets the symbols it gave up on and asks for them once more; it may also describe its symbols otherwise
-  // (an update: #340's bar grid), so the sessions are read again and the charts reload when one changed.
+  // (an update: #340's bar grid), so the sessions are read again and the charts reload when one changed. The
+  // requests waiting for a plugin that was not connected yet (restored charts and watchlists at start, #371) are
+  // asked again at once.
   onMount(() => {
     if (!isTauri()) return;
     const stop = events.pluginsChanged.listen(() => {
       forgetUnknownSymbols();
+      wakeRetries();
       void refreshPluginSessions().then((changed) => changed && emitAppEvent("chart-reload-data"));
     });
     onCleanup(() => void stop.then((f) => f()));
