@@ -19,7 +19,7 @@ import { ticketDurationPref, ticketFieldPrefs } from "./trading-ui";
 import { ANY_INSTRUMENT, capabilitiesOf, instrumentOf, pickDuration, type Instrument, type TradingCapabilities } from "./capabilities";
 import { qtyMessage } from "./qty-message";
 import type { Tradability } from "./replay-broker";
-import { ORDER_LABEL, type OrderRequest, type Side, type TradingEvent, type TradingExecution, type TradingOrder, type TradingPosition, type TradingQuote } from "./types";
+import { ORDER_LABEL, type Book, type OrderRequest, type Side, type TradingEvent, type TradingExecution, type TradingOrder, type TradingPosition, type TradingQuote } from "./types";
 
 const POSITION_ID = "position";
 
@@ -42,7 +42,7 @@ export const pluginBroker = createRoot(() => {
   const charts = new Map<number, () => string | undefined>();
   /** Chart symbol → the broker's ticker (null: not traded there); "pending" while asked. */
   const tickers = new Map<string, string | null | "pending">();
-  const bidAsk = new Map<string, { bid: number | null; ask: number | null; last: number | null }>();
+  const bidAsk = new Map<string, { bid: number | null; ask: number | null; last: number | null; depth: Book | null }>();
   const lastPrice = new Map<string, number>();
   const metas = new Map<string, { description: string; iconUrl: string | null; stock: boolean } | "loading">();
   /** Broker ticker → how it trades (`broker_instrument`); "pending" while asked. */
@@ -81,7 +81,7 @@ export const pluginBroker = createRoot(() => {
     });
     void events.brokerQuote.listen((e) => {
       const q = e.payload;
-      bidAsk.set(q.ticker, { bid: q.bid ?? null, ask: q.ask ?? null, last: q.last ?? null });
+      bidAsk.set(q.ticker, { bid: q.bid ?? null, ask: q.ask ?? null, last: q.last ?? null, depth: q.depth ?? null });
       bump();
     });
     void onTradeTick((t) => {
@@ -416,7 +416,7 @@ export const pluginBroker = createRoot(() => {
       const q = t ? bidAsk.get(t) : undefined;
       const last = q?.last ?? lastPrice.get(sym.toUpperCase()) ?? q?.bid ?? null;
       if (last === null && !q) return null;
-      return { symbol: sym, bid: q?.bid ?? last, ask: q?.ask ?? last, last: last ?? q?.bid ?? q?.ask ?? null, minTick: cachedSymbolSessions(sym)?.mintick ?? 0.01 };
+      return { symbol: sym, bid: q?.bid ?? last, ask: q?.ask ?? last, last: last ?? q?.bid ?? q?.ask ?? null, minTick: cachedSymbolSessions(sym)?.mintick ?? 0.01, depth: q?.depth ?? null };
     },
     currency: (_paneId?: number | null): string => {
       version();

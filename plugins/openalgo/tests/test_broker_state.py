@@ -177,6 +177,10 @@ class TicketQuotes(unittest.TestCase):
         self.assertEqual(quotes[0]["bid"], 249.9, "the best buy level, not the tick-size spread")
         self.assertEqual(quotes[0]["ask"], 250.1, "the best sell level, not the tick-size spread")
         self.assertEqual(quotes[0]["last"], 250.0)
+        self.assertEqual(quotes[0]["depth"], {
+            "buy": [{"price": 249.9, "qty": 3}, {"price": 249.8, "qty": 2}],
+            "sell": [{"price": 250.1, "qty": 2}, {"price": 250.2, "qty": 1}],
+        }, "the ladder's size columns get the whole book, best level first")
 
     def test_the_rest_fallback_keeps_the_brokers_bid_and_ask(self):
         self.app.on_notification("broker.watchQuote", {"tickers": [FUT]})

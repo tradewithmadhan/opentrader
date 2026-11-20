@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { TradingOrder } from "../../../data/trading/types";
 import {
   centeredTop,
+  bookRows,
+  bookTotal,
   contextItems,
   countText,
   labelActive,
@@ -94,6 +96,21 @@ describe("DOM ladder", () => {
       "Buy 1 QQQ @ Market",
     ]);
     expect(contextItems("sell", 717, "2", "QQQ", 0.01, (p) => p.toFixed(2))[2].label).toBe("Sell 2 QQQ @ 717.00 Stop 716.99 Limit");
+  });
+
+  it("puts the book's resting quantity on its price rows", () => {
+    const book = {
+      buy: [{ price: 717.11, qty: 12 }, { price: 717.1, qty: 5 }, { price: 717.1, qty: 3 }],
+      sell: [{ price: 717.13, qty: 8 }],
+    };
+    const bids = bookRows(book.buy, 0.01);
+    expect(bids.get(71711)).toBe(12);
+    expect(bids.get(71710)).toBe(8); // two levels on one price add up
+    expect(bookRows(book.sell, 0.01).get(71713)).toBe(8);
+    expect(bookTotal(book.buy)).toBe(20);
+    expect(bookTotal(book.sell)).toBe(8);
+    expect(bookTotal([])).toBeNull();
+    expect(bookTotal(null)).toBeNull();
   });
 
   it("scrolls a row per 100 px of wheel", () => {

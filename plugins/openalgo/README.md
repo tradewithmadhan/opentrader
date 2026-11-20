@@ -62,14 +62,17 @@ No guessing left: the stream speaks this exactly.
 2. The whole subscription set, on every change: `{"action": "unsubscribe_all"}`, then
    `{"action": "subscribe", "mode": 3, "depth": 5, "symbols": [{"exchange": "NSE", "symbol": "SBIN-EQ"}, …]}`
    — the venue halves, the key not in the frames. Mode 3 is the five-level depth stream: its best bid / ask
-   is the order ticket's ladder. The auth answer's `supported_features.depth` decides this; a broker without
-   it gets `"mode": "Quote"` instead, and the ladder falls back to the tick-size spread.
+   is the order ticket's ladder, and its levels are the ladder's size cells and totals. The auth answer's
+   `supported_features.depth` decides this; a broker without it gets `"mode": "Quote"` instead, and the
+   ladder falls back to the tick-size spread.
 3. A ping frame every 20 s; the server's pings are answered with pongs.
 4. Incoming: `{"type": "market_data", "symbol": …, "exchange": …, "data": {open, high, low, ltp, volume,
    prev_close?, close, depth?}}` — on ticks `close` is the previous day's close and `prev_close` is often
    absent, so the two fall back through each other and the last quote. `depth` is `{buy: [...], sell: [...]}`,
-   five levels each; the first buy / sell level becomes the ticket's bid / ask. A bare echo resolves through
-   the subscription when exactly one listing matches; an ambiguous one is dropped (the provider's identity rule).
+   five levels each (`{price, quantity, orders}`): each level's `price` and `quantity` reach `broker.quote`
+   as `depth.{buy,sell}[{price, qty}]`, best first, and the first buy / sell level is also the ticket's
+   bid / ask. A bare echo resolves through the subscription when exactly one listing matches; an ambiguous
+   one is dropped (the provider's identity rule).
 
 `OPENALGO_DEBUG=1` prints all of this raw (`[ws >]` outgoing with the key redacted, `[ws <]` incoming) on the
 console while you run `plugin.py` by hand.

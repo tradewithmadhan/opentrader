@@ -1,16 +1,16 @@
 /*
  * DOM (depth of market) ladder of the order ticket's DOM tab: one row per
  * price tick around the market (reference app 3.4.1). Rows are price
- * indexes (price / tick); the top row's index scrolls. The replay broker
- * quotes one level (bid = ask = the last price) with no size, so the bid /
- * ask size cells stay empty and the totals read "-".
+ * indexes (price / tick); the top row's index scrolls. A depth subscription
+ * gives each row its resting quantity (the replay broker quotes one level
+ * with no size, so those cells stay empty and the totals read "-").
  *
  * Colours: prices at or above the best ask read as asks (red), at or below
  * the best bid as bids (blue). Auto-centre: when the best ask comes within 3
  * rows of the top or the best bid within 3 rows of the bottom, the ladder
  * re-centres on the market after 2 s (dynamic mode: on every update).
  */
-import type { OrderType, Side, TradingOrder } from "../../data/trading/types";
+import type { BookLevel, OrderType, Side, TradingOrder } from "../../data/trading/types";
 import { translatePlural, translateWith } from "../../i18n/translator";
 
 /** Row height (px). */
@@ -67,6 +67,30 @@ export function priceSide(i: number, m: DomMarket): "ask" | "bid" | null {
   if (i >= m.ask) return "ask";
   if (i <= m.bid) return "bid";
   return null;
+}
+
+/** The quantity at each row index of one side of the book (a level off the
+ *  tick grid lands on the nearest row). */
+export function bookRows(levels: readonly BookLevel[] | null | undefined, tick: number): Map<number, number> {
+  const rows = new Map<number, number>();
+  for (const level of levels ?? []) {
+    if (!Number.isFinite(level.price) || !Number.isFinite(level.qty) || level.qty <= 0) continue;
+    const i = priceIndex(level.price, tick);
+    rows.set(i, (rows.get(i) ?? 0) + level.qty);
+  }
+  return rows;
+}
+
+/** The quantity of one side of the book, null when it has no level. */
+export function bookTotal(levels: readonly BookLevel[] | null | undefined): number | null {
+  let total = 0;
+  let any = false;
+  for (const level of levels ?? []) {
+    if (!Number.isFinite(level.qty) || level.qty <= 0) continue;
+    total += level.qty;
+    any = true;
+  }
+  return any ? total : null;
 }
 
 /** The hover label of a size cell is tinted ("active"): limit mode above the

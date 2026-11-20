@@ -523,8 +523,12 @@ export type BrokerEvent = {
 };
 /** The Tauri event's payload wrapper. */
 export type BrokerOrderEvent = { event: BrokerEvent };
-/** Bid / ask / last of a ticker the order ticket watches (`broker.quote`). */
-export type BrokerQuote = { ticker: string; bid: number | null; ask: number | null; last: number | null };
+/** One price level of a broker's book: the quantity resting at its price. */
+export type BrokerQuoteLevel = { price: number; qty: number };
+/** The five-level book of a depth subscription, best level first. */
+export type BrokerDepth = { buy: BrokerQuoteLevel[]; sell: BrokerQuoteLevel[] };
+/** Bid / ask / last of a ticker the order ticket watches (`broker.quote`), with the book when the broker streams depth. */
+export type BrokerQuote = { ticker: string; bid: number | null; ask: number | null; last: number | null; depth: BrokerDepth | null };
 
 // ── Runtime stubs (reject / no-op outside the Tauri shell) ──────────────────
 

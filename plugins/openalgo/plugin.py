@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.25"
+PLUGIN_VERSION = "0.1.26"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -107,6 +107,25 @@ def first_of(d, *keys, default=None):
         if k in d and d[k] not in (None, ""):
             return d[k]
     return default
+
+
+def book_levels(depth):
+    """The five-level book as `{"buy": [{price, qty}], "sell": [...]}`, best first, or None
+    when neither side has a usable level (a Quote-mode tick, a broker without depth)."""
+    if not isinstance(depth, dict):
+        return None
+    book = {}
+    for side in ("buy", "sell"):
+        levels = []
+        for level in depth.get(side) or []:
+            if not isinstance(level, dict):
+                continue
+            price = num(level.get("price"))
+            qty = num(first_of(level, "quantity", "qty"))
+            if price is not None and qty is not None:
+                levels.append({"price": price, "qty": qty})
+        book[side] = levels
+    return book if (book["buy"] or book["sell"]) else None
 
 
 def _clean(text, secret):
@@ -1447,6 +1466,14 @@ class OpenAlgoSource:
             q = self.quotes.get(ticker) or {}
         return q.get("bid"), q.get("ask")
 
+    def book(self, ticker):
+        """The last depth tick's five buy / sell levels (best first), or None when the
+        broker has sent no book (the ladder keeps its best price only)."""
+        with self.lock:
+            q = self.quotes.get(ticker) or {}
+            depth = q.get("depth")
+            return {side: list((depth or {}).get(side) or []) for side in ("buy", "sell")} if depth else None
+
     def _minute_bar(self, bar, start, price):
         """The forming minute bar [time,o,h,l,c,v]: the last price only — the WS day side
         (its open / high / low / volume) never touches a minute bar, the way the built-in
@@ -1518,6 +1545,9 @@ class OpenAlgoSource:
                         q["bid"] = num(buys[0].get("price"))
                     if sells and isinstance(sells[0], dict):
                         q["ask"] = num(sells[0].get("price"))
+                    levels = book_levels(depth)
+                    if levels:
+                        q["depth"] = levels
                 self.quotes[ticker] = q
 
     def resolve_symbol(self, symbol, ticker):
@@ -2144,7 +2174,8 @@ class OpenAlgoSource:
                  "bid": num(first_of(r, "bid")), "ask": num(first_of(r, "ask")),
                  "prevClose": prev or (self.quotes.get(ticker) or {}).get("prevClose")}
         # A depth subscription (mode 3) carries five buy / sell levels; the ladder wants the
-        # best of each (and a top-level bid / ask, when the broker sends one instead).
+        # best of each (and a top-level bid / ask, when the broker sends one instead), and the
+        # whole book for the size columns.
         book = r.get("depth")
         if isinstance(book, dict):
             buys, sells = book.get("buy") or [], book.get("sell") or []
@@ -2152,6 +2183,9 @@ class OpenAlgoSource:
                 quote["bid"] = num(buys[0].get("price"))
             if sells and isinstance(sells[0], dict):
                 quote["ask"] = num(sells[0].get("price"))
+            levels = book_levels(book)
+            if levels:
+                quote["depth"] = levels
         with self.lock:
             self.quotes[ticker] = quote
             # Bar formation follows the built-in provider's rules (its `absorb_tick` /
@@ -2332,7 +2366,11 @@ class Plugin:
                     tick = self.source.tick(ticker)
                     half = tick / 2 if tick else 0.0
                     bid, ask = round(price - half, 10), round(price + half, 10)
-                self.notify("broker.quote", {"ticker": ticker, "bid": bid, "ask": ask, "last": price})
+                quote = {"ticker": ticker, "bid": bid, "ask": ask, "last": price}
+                book = self.source.book(ticker)
+                if book:
+                    quote["depth"] = book
+                self.notify("broker.quote", quote)
         except OSError:
             pass  # the app's socket is gone; run() notices and reconnects
 
@@ -2462,7 +2500,11 @@ class Plugin:
                             tick = self.source.tick(q["ticker"])
                             half = tick / 2 if tick else 0.0
                             bid, ask = round(price - half, 10), round(price + half, 10)
-                        self.notify("broker.quote", {"ticker": q["ticker"], "bid": bid, "ask": ask, "last": price})
+                        quote = {"ticker": q["ticker"], "bid": bid, "ask": ask, "last": price}
+                        book = self.source.book(q["ticker"])
+                        if book:
+                            quote["depth"] = book
+                        self.notify("broker.quote", quote)
                 self.events(events)
                 # The broker state reaches the host when its connected flag or its books move,
                 # and at least every 30 s (with open positions, every pass: the open P&L moves

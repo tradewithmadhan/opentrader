@@ -271,7 +271,7 @@ An order notification, shown as a toast:
 
 ### `broker.quote` (plugin → app, notification)
 
-`{"ticker":"EURUSD","bid":1.08110,"ask":1.08118,"last":null}`: the order ticket's bid and ask, for the tickers of `broker.watchQuote`.
+`{"ticker":"EURUSD","bid":1.08110,"ask":1.08118,"last":null}`: the order ticket's bid and ask, for the tickers of `broker.watchQuote`. A broker that streams depth adds its book, best level first: `"depth":{"buy":[{"price":1.08110,"qty":1000}],"sell":[{"price":1.08118,"qty":500}]}` — the ladder's size cells and totals.
 
 ### Requests (app → plugin)
 

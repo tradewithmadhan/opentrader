@@ -27,6 +27,8 @@ import { moveOrder } from "./order-actions";
 import {
   DOM_CENTER_DELAY,
   DOM_ROW_H,
+  bookRows,
+  bookTotal,
   centeredTop,
   clickOrderType,
   contextItems,
@@ -84,6 +86,12 @@ export function DomPanel() {
   const market = createMemo<DomMarket>(() => ({ bid: ix(q()?.bid), ask: ix(q()?.ask), last: ix(q()?.last) }), { bid: NaN, ask: NaN, last: NaN }, {
     equals: (a, b) => Object.is(a.bid, b.bid) && Object.is(a.ask, b.ask) && Object.is(a.last, b.last),
   });
+  // The book of a depth subscription: the resting quantity of each row, and each side's total.
+  const buyRows = createMemo(() => bookRows(q()?.depth?.buy, tick()));
+  const sellRows = createMemo(() => bookRows(q()?.depth?.sell, tick()));
+  const buyTotal = createMemo(() => bookTotal(q()?.depth?.buy));
+  const sellTotal = createMemo(() => bookTotal(q()?.depth?.sell));
+  const totalText = (v: number | null) => (v == null ? "-" : fmtQty(v));
   const orders = (): TradingOrder[] => {
     const id = pane();
     return id === null ? [] : broker.orders(id);
@@ -317,8 +325,6 @@ export function DomPanel() {
   const buyCount = createMemo(() => countText(sideCounts(orders(), "buy")));
   const sellCount = createMemo(() => countText(sideCounts(orders(), "sell")));
   const hasOrders = () => orders().length > 0;
-  /** The replay broker quotes no size: the totals read "-". */
-  const TOTAL = "-";
 
   const [plMode, setPlMode] = createSignal<"money" | "ticks" | "percent">("money");
   const plText = () => {
@@ -352,6 +358,7 @@ export function DomPanel() {
     const price = () => indexPrice(i(), tick(), dec());
     const side = () => priceSide(i(), market());
     const full = (s: "buy" | "sell") => (s === "buy" ? i() === market().bid : i() === market().ask);
+    const size = (s: Side) => (s === "buy" ? buyRows().get(i()) : sellRows().get(i()));
     const rowMarks = () => {
       const list = [...(marks().get(i()) ?? [])];
       const g = ghost();
@@ -381,6 +388,7 @@ export function DomPanel() {
         }}
       >
         <span class="trd-dom-meter" classList={{ "is-full": full(s), "is-active": flashed() === `${s}${i()}` }} />
+        <span class="trd-dom-size">{size(s) == null ? "" : fmtQty(size(s))}</span>
       </span>
     );
     /** Hover label of a size cell, at the outer edge ("Limit" / "Stop"). */
@@ -483,7 +491,7 @@ export function DomPanel() {
             </Show>
           </div>
           <div class="trd-dom-centering">
-            <span class="trd-dom-total is-bid" title="Total buy quantity">{TOTAL}</span>
+            <span class="trd-dom-total is-bid" title="Total buy quantity">{totalText(buyTotal())}</span>
             <span class="trd-dom-switch">
               <svg class="trd-dom-timer" viewBox="-1 -1 2 2" width="2" height="2" aria-hidden="true">
                 <path d={piePath(progress())} />
@@ -502,7 +510,7 @@ export function DomPanel() {
                 </button>
               </Tooltip>
             </span>
-            <span class="trd-dom-total is-ask" title="Total sell quantity">{TOTAL}</span>
+            <span class="trd-dom-total is-ask" title="Total sell quantity">{totalText(sellTotal())}</span>
           </div>
           <div class="trd-dom-cancel is-sell">
             <Tooltip text="Cancel all sell orders" side="top">
