@@ -1,6 +1,6 @@
 # Upstream proposal — for filing on deepentropy/opentrader
 
-Title of the issue: **Data plugins: let a plugin serve its symbols' contract size (point value) — plus small host gaps an Indian-broker plugin hits**
+> Status: **FIXED upstream** — point value in `8786ed6f` (#345), lot sizes/state in `6dd3fbc3` (#342/#343). No need to re-file.
 
 Fork reference: `tradewithmadhan/opentrader`, branch `sample-web-clean`. The OpenAlgo plugin
 (`plugins/openalgo`, Plugin API 2 — data + trading over one REST + WebSocket gateway) is built and

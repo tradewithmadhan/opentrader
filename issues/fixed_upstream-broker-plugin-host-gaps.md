@@ -1,6 +1,6 @@
-# Upstream proposal - for filing on deepentropy/opentrader
+# Upstream proposal — for filing on deepentropy/opentrader
 
-**Filed as deepentropy/opentrader#341 and fixed upstream in `285a391c`.** Adopted into this fork in
+> Status: **FIXED upstream** in `285a391c` (#341). No need to re-file.
 `6b3727cc` and the OpenAlgo plugin in 0.1.9 (`ba00c2bb`): the ticket's product field, lot sizing via
 `broker.instrument` (pointValue now per unit, the lot as qtyStep), `broker.getState`, and -32004 for
 unknown symbols.

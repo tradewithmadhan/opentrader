@@ -1,6 +1,6 @@
 # Upstream proposal — for filing on deepentropy/opentrader
 
-> **Update 17/11/2026 — mostly fixed by upstream #347 (`3485843b`, "Plugin history").** The
+> Status: **MOSTLY FIXED upstream** in `3485843b` (#347, "Plugin history"). The chunk caps / pacing budget remainder is still open.
 > app now keeps a symbol's recent series (one read at a time, fresh <10 s answered at once,
 > scroll-back pages kept 10 min), reads `data.symbolInfo`'s new `history` (calendar days per
 > bar family) to ask nothing older and only bars that fit the window, and backs off on the new

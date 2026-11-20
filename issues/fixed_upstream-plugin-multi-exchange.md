@@ -1,6 +1,6 @@
 # Upstream proposal — for filing on deepentropy/opentrader
 
-Title of the issue: **Plugins: let a data plugin serve more than one exchange**
+> Status: **FIXED upstream** in `5828175b` (#331, "Plugins: a data plugin may serve several exchanges"). No need to re-file.
 
 Paste everything below the line into the issue body.
 

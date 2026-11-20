@@ -1,6 +1,6 @@
-# Upstream proposal - for filing on deepentropy/opentrader
+# Upstream proposal — for filing on deepentropy/opentrader
 
-**Filed (as part of deepentropy/opentrader#341) and fixed upstream in `285a391c` — adopted in the
+> Status: **FIXED upstream** in `285a391c` (#341). No need to re-file.
 fork's `6b3727cc`, plugin 0.1.9.** The design that landed differs from this draft: no `product`
 field on `OrderTicket`, but a generic `capabilities.ticketFields` (the values travel in
 `fields`), and the lot size moved out of `pointValue` into `broker.instrument`'s `qtyStep`.

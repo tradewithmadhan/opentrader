@@ -1,6 +1,6 @@
 # Issue draft — paste into GitHub (deepentropy/opentrader)
 
-**Title:** Scripts get no session corrections/holidays: special sessions (Sunday Muhurat etc.) are swallowed by the previous trading day in `time("D")` / `time_tradingday` / daily resampling
+> Status: **FIXED upstream** in `4b78f6e8` (#268, "Scripts: session corrections and holidays reach time("D"), time_close, time_tradingday and daily resampling"). No need to re-file.
 
 **Labels suggestion:** `bug`, `oakscript`, `sessions`
 
