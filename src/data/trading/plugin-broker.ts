@@ -20,7 +20,7 @@ import { ANY_INSTRUMENT, capabilitiesOf, instrumentOf, pickDuration, type Instru
 import { applyDepth, type DepthBook } from "./depth-book";
 import { qtyMessage } from "./qty-message";
 import type { Tradability } from "./replay-broker";
-import { ORDER_LABEL, type Book, type OrderRequest, type Side, type TradingEvent, type TradingExecution, type TradingOrder, type TradingPosition, type TradingQuote } from "./types";
+import { ORDER_LABEL, type OrderRequest, type Side, type TradingEvent, type TradingExecution, type TradingOrder, type TradingPosition, type TradingQuote } from "./types";
 
 const POSITION_ID = "position";
 
@@ -43,7 +43,7 @@ export const pluginBroker = createRoot(() => {
   const charts = new Map<number, () => string | undefined>();
   /** Chart symbol → the broker's ticker (null: not traded there); "pending" while asked. */
   const tickers = new Map<string, string | null | "pending">();
-  const bidAsk = new Map<string, { bid: number | null; ask: number | null; last: number | null; depth: Book | null }>();
+  const bidAsk = new Map<string, { bid: number | null; ask: number | null; last: number | null }>();
   const lastPrice = new Map<string, number>();
   /** Broker ticker → its order book (`broker.depth`), while the DOM shows it. */
   const books = new Map<string, DepthBook>();
@@ -89,7 +89,7 @@ export const pluginBroker = createRoot(() => {
     });
     void events.brokerQuote.listen((e) => {
       const q = e.payload;
-      bidAsk.set(q.ticker, { bid: q.bid ?? null, ask: q.ask ?? null, last: q.last ?? null, depth: q.depth ?? null });
+      bidAsk.set(q.ticker, { bid: q.bid ?? null, ask: q.ask ?? null, last: q.last ?? null });
       bump();
     });
     void events.brokerDepth.listen((e) => {
@@ -445,7 +445,7 @@ export const pluginBroker = createRoot(() => {
       const q = t ? bidAsk.get(t) : undefined;
       const last = q?.last ?? lastPrice.get(sym.toUpperCase()) ?? q?.bid ?? null;
       if (last === null && !q) return null;
-      return { symbol: sym, bid: q?.bid ?? last, ask: q?.ask ?? last, last: last ?? q?.bid ?? q?.ask ?? null, minTick: cachedSymbolSessions(sym)?.mintick ?? 0.01, depth: q?.depth ?? null };
+      return { symbol: sym, bid: q?.bid ?? last, ask: q?.ask ?? last, last: last ?? q?.bid ?? q?.ask ?? null, minTick: cachedSymbolSessions(sym)?.mintick ?? 0.01 };
     },
     /** The focused chart's order book, null while the broker sent none. */
     depth: (): DepthBook | null => {

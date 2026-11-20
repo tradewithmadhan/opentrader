@@ -2314,6 +2314,7 @@ class Plugin:
         self.send_lock = threading.Lock()
         self.tickers = set()  # data.subscribe
         self.watched = set()  # broker.watchQuote
+        self.watched_depth = set()  # broker.watchDepth (the DOM's open tabs)
         self.alive = False
         self.pushed_connected = False  # what the last broker.state push reported
         self.last_state_push = 0.0
@@ -2367,12 +2368,21 @@ class Plugin:
                     half = tick / 2 if tick else 0.0
                     bid, ask = round(price - half, 10), round(price + half, 10)
                 quote = {"ticker": ticker, "bid": bid, "ask": ask, "last": price}
-                book = self.source.book(ticker)
-                if book:
-                    quote["depth"] = book
                 self.notify("broker.quote", quote)
+                self.push_depth(ticker)
         except OSError:
             pass  # the app's socket is gone; run() notices and reconnects
+
+    def push_depth(self, ticker):
+        """The DOM's order book: a snapshot of the five levels, mapped to the protocol's
+        bids / asks (the plugin keeps the broker's buy / sell names internally)."""
+        if not self.alive or ticker not in self.watched_depth:
+            return
+        book = self.source.book(ticker)
+        if not book:
+            return
+        self.notify("broker.depth", {"ticker": ticker, "snapshot": True,
+                                     "bids": book.get("buy") or [], "asks": book.get("sell") or []})
 
     def events(self, events):
         for e in events:
@@ -2451,10 +2461,14 @@ class Plugin:
             self.watched = set(p.get("tickers", []))
             self.log("broker.watchQuote: %d tickers" % len(self.watched))
             self.forward_subscription()
+        elif method == "broker.watchDepth":
+            self.watched_depth = set(p.get("tickers", []))
+            self.log("broker.watchDepth: %d tickers" % len(self.watched_depth))
+            self.forward_subscription()
 
     def forward_subscription(self):
         """The stream's subscription is the union of the data symbols and the ticket's."""
-        self.source.subscribed = self.tickers | self.watched
+        self.source.subscribed = self.tickers | self.watched | self.watched_depth
 
     # ── streaming: live prices, the ticket's bid / ask, the books ──
     def stream(self):
@@ -2501,10 +2515,8 @@ class Plugin:
                             half = tick / 2 if tick else 0.0
                             bid, ask = round(price - half, 10), round(price + half, 10)
                         quote = {"ticker": q["ticker"], "bid": bid, "ask": ask, "last": price}
-                        book = self.source.book(q["ticker"])
-                        if book:
-                            quote["depth"] = book
                         self.notify("broker.quote", quote)
+                        self.push_depth(q["ticker"])
                 self.events(events)
                 # The broker state reaches the host when its connected flag or its books move,
                 # and at least every 30 s (with open positions, every pass: the open P&L moves

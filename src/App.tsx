@@ -96,11 +96,8 @@ import { replayBroker } from "./data/trading/replay-broker";
 import { pluginBroker } from "./data/trading/plugin-broker";
 import { events } from "./bindings";
 import { forgetUnknownSymbols } from "./data/unknown-symbols";
-<<<<<<< HEAD
 import { refreshPluginSessions } from "./data/session/symbol-sessions";
-=======
 import { wakeRetries } from "./data/connection";
->>>>>>> 5565d13b (Data plugins: restored charts and watchlists wait for a plugin still starting (#371))
 import { createDrawingStore } from "./window/drawings/drawing-store";
 import { createChartBridge } from "./window/right-rail/community/chart-bridge";
 import { setChartBridge } from "./data/community/chart-share";

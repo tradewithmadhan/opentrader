@@ -72,24 +72,7 @@ pub struct BrokerOrderEvent {
     pub event: BrokerEvent,
 }
 
-/// One price level of a broker's book: the quantity resting at its price.
-#[derive(Clone, Serialize, Deserialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
-pub struct BrokerQuoteLevel {
-    pub price: f64,
-    pub qty: f64,
-}
-
-/// The five-level book of a depth subscription, best level first.
-#[derive(Clone, Serialize, Deserialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
-pub struct BrokerDepth {
-    pub buy: Vec<BrokerQuoteLevel>,
-    pub sell: Vec<BrokerQuoteLevel>,
-}
-
-/// Bid / ask / last of a ticker the order ticket watches (`broker.quote`), with the book
-/// when the broker streams depth.
+/// Bid / ask / last of a ticker the order ticket watches (`broker.quote`).
 #[derive(Clone, Serialize, Deserialize, specta::Type, Event)]
 #[serde(rename_all = "camelCase")]
 pub struct BrokerQuote {
@@ -97,9 +80,6 @@ pub struct BrokerQuote {
     pub bid: Option<f64>,
     pub ask: Option<f64>,
     pub last: Option<f64>,
-    /// Left out by a broker without depth (or an older plugin): the ladder keeps the best prices only.
-    #[serde(default)]
-    pub depth: Option<BrokerDepth>,
 }
 
 /// One price level of an order book: the quantity resting at that price, in units.

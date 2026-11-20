@@ -301,7 +301,7 @@ export const replayBroker = createRoot(() => {
       const tick = m?.mintick ?? 0.01;
       const acc = accounts.get(id);
       const last = acc && acc.symbol === p.symbol ? acc.last : Math.round(p.last.close / tick) * tick;
-      return { symbol: p.symbol, bid: last, ask: last, last, minTick: tick, depth: null };
+      return { symbol: p.symbol, bid: last, ask: last, last, minTick: tick };
     },
     currency: (paneId = activeId()): string => {
       version();

@@ -57,15 +57,7 @@ export type TradingQuote = {
   ask: number | null;
   last: number | null;
   minTick: number;
-  /** The book of a depth subscription, best level first (null: the broker streams no depth). */
-  depth: Book | null;
 };
-
-/** One price level of a broker's book: the quantity resting at its price. */
-export type BookLevel = { price: number; qty: number };
-
-/** A broker's buy / sell book, best level first. */
-export type Book = { buy: BookLevel[]; sell: BookLevel[] };
 
 /** What the order ticket sends. */
 export type OrderRequest = {

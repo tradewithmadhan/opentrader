@@ -164,6 +164,7 @@ class TicketQuotes(unittest.TestCase):
 
     def test_a_watched_ticker_uses_the_stream_depth(self):
         self.app.on_notification("broker.watchQuote", {"tickers": [FUT]})
+        self.app.on_notification("broker.watchDepth", {"tickers": [FUT]})
         self.source._ws_message(json.dumps({
             "type": "market_data", "symbol": "NIFTY25NOVFUT", "exchange": "NFO",
             "data": {"ltp": 250.0, "volume": 1200,
@@ -177,10 +178,13 @@ class TicketQuotes(unittest.TestCase):
         self.assertEqual(quotes[0]["bid"], 249.9, "the best buy level, not the tick-size spread")
         self.assertEqual(quotes[0]["ask"], 250.1, "the best sell level, not the tick-size spread")
         self.assertEqual(quotes[0]["last"], 250.0)
-        self.assertEqual(quotes[0]["depth"], {
-            "buy": [{"price": 249.9, "qty": 3}, {"price": 249.8, "qty": 2}],
-            "sell": [{"price": 250.1, "qty": 2}, {"price": 250.2, "qty": 1}],
-        }, "the ladder's size columns get the whole book, best level first")
+        self.assertNotIn("depth", quotes[0], "the book rides its own broker.depth message")
+        books = self.app.sock.payloads("broker.depth")
+        self.assertEqual(len(books), 1)
+        self.assertEqual(books[0]["ticker"], FUT)
+        self.assertTrue(books[0]["snapshot"])
+        self.assertEqual(books[0]["bids"], [{"price": 249.9, "qty": 3}, {"price": 249.8, "qty": 2}])
+        self.assertEqual(books[0]["asks"], [{"price": 250.1, "qty": 2}, {"price": 250.2, "qty": 1}])
 
     def test_the_rest_fallback_keeps_the_brokers_bid_and_ask(self):
         self.app.on_notification("broker.watchQuote", {"tickers": [FUT]})

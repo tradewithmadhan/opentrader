@@ -416,6 +416,12 @@ export type BrokerCapabilities = {
   ticketFields?: TicketField[];
   /** How long an order stays working (time in force), the ticket's selector. None: the plugin's own. */
   durations?: OrderDuration[];
+  /** A stop order may sit on either side of the market (a buy stop below the ask). */
+  stopOrdersBothSides?: boolean;
+  /** The same for the stop price of a stop limit order. */
+  stopLimitOrdersBothSides?: boolean;
+  /** A limit order may not cross the market (a buy limit above the ask). */
+  strictLimitPrice?: boolean;
 };
 export type Position = {
   id: string;
@@ -524,11 +530,11 @@ export type BrokerEvent = {
 /** The Tauri event's payload wrapper. */
 export type BrokerOrderEvent = { event: BrokerEvent };
 /** One price level of a broker's book: the quantity resting at its price. */
-export type BrokerQuoteLevel = { price: number; qty: number };
-/** The five-level book of a depth subscription, best level first. */
-export type BrokerDepth = { buy: BrokerQuoteLevel[]; sell: BrokerQuoteLevel[] };
-/** Bid / ask / last of a ticker the order ticket watches (`broker.quote`), with the book when the broker streams depth. */
-export type BrokerQuote = { ticker: string; bid: number | null; ask: number | null; last: number | null; depth: BrokerDepth | null };
+export type DepthLevel = { price: number; qty: number };
+/** The order book of a ticker the DOM shows (`broker.depth`): the whole book (`snapshot`), or the levels that changed, a quantity of 0 removing its level. */
+export type BrokerDepth = { ticker: string; snapshot: boolean; bids: DepthLevel[]; asks: DepthLevel[] };
+/** Bid / ask / last of a ticker the order ticket watches (`broker.quote`). */
+export type BrokerQuote = { ticker: string; bid: number | null; ask: number | null; last: number | null };
 
 // ── Runtime stubs (reject / no-op outside the Tauri shell) ──────────────────
 
@@ -644,6 +650,7 @@ export const commands: {
   brokerClosePosition(positionId: string, qty: number | null): Promise<CommandResult<void>>;
   brokerSetPositionBrackets(positionId: string, takeProfit: number | null, stopLoss: number | null): Promise<CommandResult<void>>;
   brokerWatchQuotes(tickers: string[]): Promise<CommandResult<void>>;
+  brokerWatchDepth(tickers: string[]): Promise<CommandResult<void>>;
   brokerSetSymbolMap(id: string, map: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
   brokerRefreshState(): Promise<void>;
   brokerInstrument(ticker: string): Promise<CommandResult<Instrument>>;
@@ -730,6 +737,7 @@ export const commands: {
   brokerClosePosition(positionId: string, qty: number | null): Promise<CommandResult<void>>;
   brokerSetPositionBrackets(positionId: string, takeProfit: number | null, stopLoss: number | null): Promise<CommandResult<void>>;
   brokerWatchQuotes(tickers: string[]): Promise<CommandResult<void>>;
+  brokerWatchDepth(tickers: string[]): Promise<CommandResult<void>>;
   brokerSetSymbolMap(id: string, map: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
   brokerRefreshState(): Promise<void>;
   brokerInstrument(ticker: string): Promise<CommandResult<Instrument>>;
@@ -752,4 +760,5 @@ export const events = new Proxy(
   brokerStatus: EventListen<BrokerStatus>;
   brokerOrderEvent: EventListen<BrokerOrderEvent>;
   brokerQuote: EventListen<BrokerQuote>;
+  brokerDepth: EventListen<BrokerDepth>;
 } & Record<string, EventListen<any>>;
