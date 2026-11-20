@@ -28,7 +28,7 @@ let systemFolder: Promise<string | null> | null = null;
 export function downloadsFolder(): Promise<string | null> {
   if (settings.downloadFolder) return Promise.resolve(settings.downloadFolder);
   systemFolder ??= commands.downloadsDefaultFolder().catch(() => null);
-  return systemFolder;
+  return systemFolder!;
 }
 
 /** "C:\a\b.csv" → "C:\a". */

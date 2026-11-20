@@ -530,6 +530,10 @@ export type BrokerEvent = {
 /** The Tauri event's payload wrapper. */
 export type BrokerOrderEvent = { event: BrokerEvent };
 /** One price level of a broker's book: the quantity resting at its price. */
+/** One tick of a data plugin's symbol (#376): UNIX milliseconds, price, volume. */
+export type Tick = { timeMs: number; price: number; volume: number };
+/** The live ticks of a charted plugin symbol (`data.tick`). */
+export type PluginTicks = { symbol: string; ticks: Tick[] };
 export type DepthLevel = { price: number; qty: number };
 /** The order book of a ticker the DOM shows (`broker.depth`): the whole book (`snapshot`), or the levels that changed, a quantity of 0 removing its level. */
 export type BrokerDepth = { ticker: string; snapshot: boolean; bids: DepthLevel[]; asks: DepthLevel[] };
@@ -761,4 +765,5 @@ export const events = new Proxy(
   brokerOrderEvent: EventListen<BrokerOrderEvent>;
   brokerQuote: EventListen<BrokerQuote>;
   brokerDepth: EventListen<BrokerDepth>;
+  pluginTicks: EventListen<PluginTicks>;
 } & Record<string, EventListen<any>>;

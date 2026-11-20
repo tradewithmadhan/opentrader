@@ -147,6 +147,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             plugins::broker::broker_set_position_brackets,
             plugins::broker::broker_watch_quotes,
             plugins::broker::broker_watch_depth,
+            plugins::data::plugin_ticks,
+            plugins::data::plugin_watch_ticks,
             plugins::broker::broker_set_symbol_map,
             plugins::broker::broker_refresh_state,
             plugins::broker::broker_instrument,
@@ -170,6 +172,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             plugins::broker::BrokerOrderEvent,
             plugins::broker::BrokerQuote,
             plugins::broker::BrokerDepth,
+            plugins::data::PluginTicks,
         ])
 }
 
