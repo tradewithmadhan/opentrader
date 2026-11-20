@@ -150,6 +150,7 @@ class FakeWs:
                     break
                 with self.lock:
                     self.frames.append(frame)
+                self._respond(frame)
             try:
                 part = conn.recv(65536)
             except OSError:
@@ -157,6 +158,29 @@ class FakeWs:
             if not part:
                 return
             buf += part
+
+    def _respond(self, frame):
+        """The real stream's answers to the plugin's actions: an auth answer (with the
+        broker's features, so the plugin picks depth or quote mode) and a subscribe answer."""
+        opcode, payload = frame
+        if opcode != 0x1:
+            return
+        try:
+            action = json.loads(payload.decode("utf-8"))
+        except ValueError:
+            return
+        if action.get("action") == "authenticate":
+            self.send_json({"type": "auth", "status": "success",
+                            "supported_features": {"ltp": True, "quote": True, "depth": True}})
+        elif action.get("action") == "subscribe":
+            symbols = action.get("symbols") or []
+            self.send_json({"type": "subscribe", "status": "success",
+                            "subscriptions": [{
+                                "symbol": s.get("symbol"), "exchange": s.get("exchange"),
+                                "status": "success",
+                                "mode": "Depth" if action.get("mode") == 3 else "Quote",
+                                "depth": action.get("depth"),
+                            } for s in symbols]})
 
     @staticmethod
     def _frame(buf):

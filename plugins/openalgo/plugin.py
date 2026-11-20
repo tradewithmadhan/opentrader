@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.24"
+PLUGIN_VERSION = "0.1.25"
 API = 2  # the Plugin API version this plugin speaks (whole symbols)
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
@@ -1425,7 +1425,9 @@ class OpenAlgoSource:
         return bars
 
     def quote(self, ticker):
-        """The last price and the forming minute / day bar, from the WebSocket cache."""
+        """The last price and the forming minute / day bar, from the WebSocket cache. A depth
+        subscription (mode 3) also carries the best bid / ask, which the order ticket's ladder
+        shows; a plain quote stream has none."""
         with self.lock:
             q = self.quotes.get(ticker)
             minute = list(self.minute_bars.get(ticker) or [])
@@ -1434,8 +1436,16 @@ class OpenAlgoSource:
             return None
         now = int(time.time())
         return {"ticker": ticker, "time": now, "price": q["price"], "prevClose": q.get("prevClose"),
+                "bid": q.get("bid"), "ask": q.get("ask"),
                 "minute": self._minute_bar(minute, now // 60 * 60, q["price"]),
                 "day": self._complete(day, ist_midnight(now), q)}
+
+    def best_bid_ask(self, ticker):
+        """The stream's best bid / ask from the last depth message, or (None, None) when the
+        broker sent none (a Quote-mode subscription, or a REST answer without depth)."""
+        with self.lock:
+            q = self.quotes.get(ticker) or {}
+        return q.get("bid"), q.get("ask")
 
     def _minute_bar(self, bar, start, price):
         """The forming minute bar [time,o,h,l,c,v]: the last price only — the WS day side
@@ -1497,6 +1507,17 @@ class OpenAlgoSource:
                     q["low"] = num(answer.get("low"))
                 if answer.get("volume") is not None:
                     q["volume"] = num(answer.get("volume"))
+                if answer.get("bid") is not None:
+                    q["bid"] = num(answer.get("bid"))
+                if answer.get("ask") is not None:
+                    q["ask"] = num(answer.get("ask"))
+                depth = answer.get("depth")
+                if isinstance(depth, dict):
+                    buys, sells = depth.get("buy") or [], depth.get("sell") or []
+                    if buys and isinstance(buys[0], dict):
+                        q["bid"] = num(buys[0].get("price"))
+                    if sells and isinstance(sells[0], dict):
+                        q["ask"] = num(sells[0].get("price"))
                 self.quotes[ticker] = q
 
     def resolve_symbol(self, symbol, ticker):
@@ -1932,6 +1953,10 @@ class OpenAlgoSource:
             mask = os.urandom(4)
             sock.sendall(bytes(bytearray([opcode, 0x80]) + mask))
 
+        # Market depth (mode 3, five levels) gives the ticket's ladder a real bid / ask; the
+        # auth answer says whether this broker streams it. Until the answer, ask for it.
+        depth = True
+
         # The verified protocol (the app's built-in provider, working live): authenticate with the key on open,
         # then the whole set — `unsubscribe_all` and `subscribe` with the venue halves, no key in the frames.
         def resync(wanted):
@@ -1939,7 +1964,10 @@ class OpenAlgoSource:
             if wanted:
                 symbols = [{"exchange": t.split(":", 1)[0], "symbol": t.split(":", 1)[1]}
                            for t in sorted(wanted) if ":" in t]
-                text = json.dumps({"action": "subscribe", "mode": "Quote", "symbols": symbols})
+                request = {"action": "subscribe", "mode": 3 if depth else "Quote", "symbols": symbols}
+                if depth:
+                    request["depth"] = 5
+                text = json.dumps(request)
                 if DEBUG or self._log_enabled("debug"):
                     msg = f"[ws >] {_clean(text, key)}"
                     print(msg, flush=True)
@@ -1953,6 +1981,31 @@ class OpenAlgoSource:
             msg = "[ws >] authenticate (key redacted)"
             print(msg, flush=True)
             self._write_log("ws", f"{datetime.now(TZ_IST).strftime('%Y-%m-%d %H:%M:%S')} [debug] {msg}")
+        # The auth answer lists the broker's features: `depth` decides the subscription mode.
+        # Read it before subscribing; a stream that does not answer in time keeps depth on.
+        buffer = b""
+        sock.settimeout(3.0)
+        try:
+            while True:
+                part = sock.recv(65536)
+                if not part:
+                    raise PluginError("the stream closed during authentication")
+                buffer += part
+                frame, buffer = self._ws_frame(buffer)
+                if frame is None or frame == ():
+                    continue
+                try:
+                    answer = json.loads(frame.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if answer.get("type") == "auth":
+                    features = answer.get("supported_features") or {}
+                    depth = bool(features.get("depth", False))
+                    self.log(f"stream: authenticated ({', '.join(sorted(k for k, on in features.items() if on)) or 'no features listed'})", "info", "ws")
+                    break
+        except socket.timeout:
+            pass  # an older stream does not answer: the subscription says whether it takes depth
+        sock.settimeout(1.0)
         # Order updates (fills, cancels, rejections) are pushed on the same socket
         # after authenticating — account-level, no symbols involved.
         send_text(json.dumps({"action": "subscribe_orders", "request_id": "orders-1"}))
@@ -1962,7 +2015,6 @@ class OpenAlgoSource:
             self._write_log("ws", f"{datetime.now(TZ_IST).strftime('%Y-%m-%d %H:%M:%S')} [debug] {msg}")
         last_ping = 0.0
         told_empty = False
-        buffer = b""
         while generation == self.ws_generation:
             try:
                 part = sock.recv(65536)
@@ -2089,7 +2141,17 @@ class OpenAlgoSource:
                  "open": num(first_of(r, "open")), "high": num(first_of(r, "high")),
                  "low": num(first_of(r, "low")), "close": num(first_of(r, "close")),
                  "volume": num(first_of(r, "volume"), 0) or 0,
+                 "bid": num(first_of(r, "bid")), "ask": num(first_of(r, "ask")),
                  "prevClose": prev or (self.quotes.get(ticker) or {}).get("prevClose")}
+        # A depth subscription (mode 3) carries five buy / sell levels; the ladder wants the
+        # best of each (and a top-level bid / ask, when the broker sends one instead).
+        book = r.get("depth")
+        if isinstance(book, dict):
+            buys, sells = book.get("buy") or [], book.get("sell") or []
+            if buys and isinstance(buys[0], dict):
+                quote["bid"] = num(buys[0].get("price"))
+            if sells and isinstance(sells[0], dict):
+                quote["ask"] = num(sells[0].get("price"))
         with self.lock:
             self.quotes[ticker] = quote
             # Bar formation follows the built-in provider's rules (its `absorb_tick` /
@@ -2264,10 +2326,13 @@ class Plugin:
             if ticker in self.tickers:
                 self.notify("data.quote", q)
             if ticker in self.watched:
-                price, tick = q["price"], self.source.tick(ticker)
-                half = tick / 2 if tick else 0.0
-                self.notify("broker.quote", {"ticker": ticker, "bid": round(price - half, 10),
-                                             "ask": round(price + half, 10), "last": price})
+                price = q["price"]
+                bid, ask = self.source.best_bid_ask(ticker)
+                if bid is None or ask is None:  # a quote stream without depth: the tick-size spread
+                    tick = self.source.tick(ticker)
+                    half = tick / 2 if tick else 0.0
+                    bid, ask = round(price - half, 10), round(price + half, 10)
+                self.notify("broker.quote", {"ticker": ticker, "bid": bid, "ask": ask, "last": price})
         except OSError:
             pass  # the app's socket is gone; run() notices and reconnects
 
@@ -2391,10 +2456,13 @@ class Plugin:
                     if q["ticker"] in self.tickers:
                         self.notify("data.quote", q)
                     if q["ticker"] in self.watched:
-                        price, tick = q["price"], self.source.tick(q["ticker"])
-                        half = tick / 2 if tick else 0.0
-                        self.notify("broker.quote", {"ticker": q["ticker"], "bid": round(price - half, 10),
-                                                     "ask": round(price + half, 10), "last": price})
+                        price = q["price"]
+                        bid, ask = q.get("bid"), q.get("ask")
+                        if bid is None or ask is None:  # a quote stream without depth: the tick-size spread
+                            tick = self.source.tick(q["ticker"])
+                            half = tick / 2 if tick else 0.0
+                            bid, ask = round(price - half, 10), round(price + half, 10)
+                        self.notify("broker.quote", {"ticker": q["ticker"], "bid": bid, "ask": ask, "last": price})
                 self.events(events)
                 # The broker state reaches the host when its connected flag or its books move,
                 # and at least every 30 s (with open positions, every pass: the open P&L moves

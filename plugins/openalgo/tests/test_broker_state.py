@@ -162,6 +162,32 @@ class TicketQuotes(unittest.TestCase):
         self.assertEqual(quotes[0]["last"], 250.0)
         self.assertEqual(self.source.subscribed, {FUT})
 
+    def test_a_watched_ticker_uses_the_stream_depth(self):
+        self.app.on_notification("broker.watchQuote", {"tickers": [FUT]})
+        self.source._ws_message(json.dumps({
+            "type": "market_data", "symbol": "NIFTY25NOVFUT", "exchange": "NFO",
+            "data": {"ltp": 250.0, "volume": 1200,
+                     "depth": {"buy": [{"price": 249.9, "quantity": 3, "orders": 1},
+                                       {"price": 249.8, "quantity": 2, "orders": 1}],
+                               "sell": [{"price": 250.1, "quantity": 2, "orders": 1},
+                                        {"price": 250.2, "quantity": 1, "orders": 1}]}},
+        }).encode())
+
+        quotes = self.app.sock.payloads("broker.quote")
+        self.assertEqual(quotes[0]["bid"], 249.9, "the best buy level, not the tick-size spread")
+        self.assertEqual(quotes[0]["ask"], 250.1, "the best sell level, not the tick-size spread")
+        self.assertEqual(quotes[0]["last"], 250.0)
+
+    def test_the_rest_fallback_keeps_the_brokers_bid_and_ask(self):
+        self.app.on_notification("broker.watchQuote", {"tickers": [FUT]})
+        self.fake.quotes[FUT] = {"ltp": 250.0, "bid": 249.9, "ask": 250.1}
+        self.source.poll_quotes_rest()
+        self.app.push_quote(FUT)
+
+        quotes = self.app.sock.payloads("broker.quote")
+        self.assertEqual(quotes[-1]["bid"], 249.9, "the REST answer's own bid, not the tick-size spread")
+        self.assertEqual(quotes[-1]["ask"], 250.1, "the REST answer's own ask, not the tick-size spread")
+
     def test_a_subscription_drops_stale_symbols(self):
         self.app.on_notification("data.subscribe", {
             "tickers": [EQ, "MCX:GOLD1!", "NSE:NIFTY"],

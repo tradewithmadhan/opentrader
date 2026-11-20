@@ -83,6 +83,16 @@ class TicksReachTheAppAtOnce(unittest.TestCase):
         self.assertTrue(arrived, "10 ticks on the socket = 10 pushes, without the 1 s loop")
         self.assertLess(elapsed, 1.0, "the socket's tick rate is the chart's rate")
 
+    def test_the_stream_subscribes_five_depth_levels(self):
+        self.source.configure(harness.settings(self.fake))
+        self.assertTrue(self.fake.ws.connected.wait(5.0), "the fake stream accepted the connection")
+        self.assertTrue(harness.wait_until(
+            lambda: any(a.get("action") == "subscribe" for a in self.fake.ws.actions()), 5.0),
+            "the plugin subscribed the chart's symbol")
+        subscribe = [a for a in self.fake.ws.actions() if a.get("action") == "subscribe"][-1]
+        self.assertEqual(subscribe.get("mode"), 3, "depth mode, so the ladder gets a real bid / ask")
+        self.assertEqual(subscribe.get("depth"), 5)
+
     def test_the_rest_fallback_still_pushes(self):
         self.fake.quotes[EQ] = {"ltp": 2499.0, "prev_close": 2490.0}
         self.source.ws = None  # no socket: the loop's REST poll is the source
