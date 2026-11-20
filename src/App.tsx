@@ -90,6 +90,7 @@ import { setDiagnosticsHost } from "./data/diagnostics";
 import { ReplaySettingsDialog } from "./window/replay/ReplaySettingsDialog";
 import { ReplayEndDialog } from "./window/replay/ReplayEndDialog";
 import { OrderTicket } from "./window/trading/OrderTicket";
+import { BrokerPicker } from "./window/trading/BrokerPicker";
 import { TradingToasts } from "./window/trading/TradingToasts";
 import { SavedFileToast } from "./window/shell/SavedFileToast";
 import { tradingUi } from "./data/trading/trading-ui";
@@ -1175,6 +1176,10 @@ function App() {
       <DialogHost />
       <ReplaySettingsDialog />
       <ReplayEndDialog />
+      {/* Here, not under the Trade button: leaving replay for a broker hides the button when no plugin is enabled. */}
+      <Show when={tradingUi.brokerPicker()}>
+        <BrokerPicker />
+      </Show>
       <TradingToasts />
       <SavedFileToast />
       <Show when={symbolInfoFor()}>{(s) => <SymbolInfoDialog symbol={s()} onClose={() => setSymbolInfoFor(null)} />}</Show>
