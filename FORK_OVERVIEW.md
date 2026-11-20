@@ -176,7 +176,7 @@ Compare with `git diff upstream/main HEAD`.
 ## Why the differences exist
 
 - Your fork has a **different git root** and was synced in periodic batches, not as a normal fork. Many upstream features arrived under fork-port commit messages, so a naive subject/patch-id comparison calls them 'missing' even though they are present.
-- Where our version is **newer** than upstream's (e.g. tick charts, alerts, exports, point value), we kept ours to avoid regressions. The upstream commit is listed in the table for reference.
+- Conflict policy is by **what the change does**, not commit age. Where our version is genuinely newer or fork-specific (tick charts, alerts, exports, point value, OpenAlgo code), we kept ours — the upstream commit is listed in the table for reference. Where upstream later enhanced or fixed something we had implemented locally, we took theirs and ported our extras forward (e.g. our `643ba2b7` DOM depth fix was replaced by upstream `a8a78a4b` and the plugin adapted to `broker.depth`). A superseded commit that conflicts everywhere is dropped only after verifying its functionality is already present.
 - Fork-only files are the OpenAlgo plugin, the app-side plugin host, the OpenAlgo data provider, the binding fallback and the fork's own docs/tests/settings tabs.
 
 ## Our commits since the 0.4.28 base

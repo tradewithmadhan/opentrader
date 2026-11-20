@@ -61,9 +61,18 @@ matter to this fork. `FORK_OVERVIEW.md` records what is in the fork and why each
 - Fetch first (`git fetch upstream`). List the range with `git log --oneline <base>..upstream/main`, then cherry-pick
   in chronological order. A commit whose feature is already present under a fork-port message will apply as an empty
   change — that is fine; verify by checking the code, not the commit subject. Do not bulk-apply a whole range.
-- Conflicts: keep our side when our implementation is newer (a fork feature or a later upstream pick); take theirs
-  when the code is genuinely missing. A superseded commit (e.g. an old branding or data-access rewrite) that conflicts
-  everywhere can be dropped with `git reset --hard HEAD` after confirming the functionality is already in the fork.
+- Conflicts: decide by **what the change does**, not by which commit is newer. Read both sides
+  (`git diff --cc <file>`, `git show <upstream-commit>:<file>`) before choosing.
+  - If upstream's version is an enhancement or fix to code we also have, take theirs as the base and re-apply our
+    fork-specific extras on top. A fork-local fix does not stay just because it came first: when upstream fixes the
+    same thing later, adopt the upstream version and port our extras forward. Example: our DOM depth fix (`643ba2b7`)
+    was replaced by upstream's `a8a78a4b`, then the OpenAlgo plugin was adapted to its `broker.depth` protocol.
+    The `fixed_*` issue drafts record where this has already happened.
+  - If our side is genuinely newer, or fork-specific (OpenAlgo provider, bindings fallback, branding, web build),
+    keep ours. A commit that conflicts everywhere and is superseded (e.g. an old branding or data-access rewrite)
+    can be dropped with `git reset --hard HEAD` — but only after confirming its functionality is already in the fork.
+  - After taking upstream's side of any file, re-check that our extras are still present (grep for them) and re-run
+    the tests. A conflict marker left in a source file or a silently dropped fork feature is the failure mode here.
 - Version bumps come with the sync: update `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`,
   `src-tauri/Cargo.lock` and `src-tauri/tauri.conf.json` together. Keep the exe's version equal to the fork's
   declared version — the updater endpoint points at upstream releases, so an old version offers an update that would
