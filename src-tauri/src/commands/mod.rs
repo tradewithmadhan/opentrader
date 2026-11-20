@@ -1,5 +1,6 @@
 pub mod alerts;
 pub mod events;
+pub mod files;
 pub mod funding;
 pub mod history;
 pub mod images;
