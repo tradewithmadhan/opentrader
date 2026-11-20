@@ -51,6 +51,41 @@ too, put its body in `opentrader_core::commands`, add its name to `SERVED` there
 - Cherry-picking upstream commits: strip the trailing `(#NNN)` PR reference from the message
   (`git cherry-pick -n`, then re-commit) so the push does not cross-reference and ping the upstream PR.
 
+## Syncing from upstream
+
+This fork has a **different git root** from `upstream/main` (it was assembled by importing releases, not forked), so
+`git merge` is an unrelated-histories merge. Sync by cherry-picking, one commit at a time, oldest first. Work through
+**every** upstream commit since the last sync — including version bumps and library updates, not just the fixes that
+matter to this fork. `FORK_OVERVIEW.md` records what is in the fork and why each file differs.
+
+- Fetch first (`git fetch upstream`). List the range with `git log --oneline <base>..upstream/main`, then cherry-pick
+  in chronological order. A commit whose feature is already present under a fork-port message will apply as an empty
+  change — that is fine; verify by checking the code, not the commit subject. Do not bulk-apply a whole range.
+- Conflicts: keep our side when our implementation is newer (a fork feature or a later upstream pick); take theirs
+  when the code is genuinely missing. A superseded commit (e.g. an old branding or data-access rewrite) that conflicts
+  everywhere can be dropped with `git reset --hard HEAD` after confirming the functionality is already in the fork.
+- Version bumps come with the sync: update `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`,
+  `src-tauri/Cargo.lock` and `src-tauri/tauri.conf.json` together. Keep the exe's version equal to the fork's
+  declared version — the updater endpoint points at upstream releases, so an old version offers an update that would
+  replace the fork with upstream.
+- Library bumps come with the version bump: compare `dependencies`, `devDependencies` and `overrides` in `package.json`
+  with upstream. `config.drawingRef` is the git tag of the drawing core used by CI and release builds; move the sibling
+  checkout (`../lightweight-charts-drawing`) to the **same tag** before testing, or local tests check one version while
+  CI builds another. `vite.config.ts` imports the drawing core from that sibling, not from the tag.
+- Bindings: upstream generates `src/bindings.ts` with `cargo test --lib export_bindings` and does not commit it. This
+  fork keeps a hand-maintained copy and a tracked `src/bindings-fallback.ts`. When upstream adds/changes a Rust type,
+  event or command (e.g. `BrokerDepth`, `broker.depth`, `broker_watch_depth`, `PluginTicks`), add the matching type,
+  event listener and command signature to **both** files. Without this, TS type-checks but the event never fires at
+  runtime (there is no `cargo` in this shell to regenerate it).
+- i18n after any UI change: `npm run i18n:extract`, merge new keys into all six dictionaries (upstream's dictionaries
+  plus the fork's own translated texts), then `npm run i18n:prune`. Keep fork-only base words/sense entries that study
+  tests use. The catalog test is the completeness gate.
+- Tests after a sync batch, before pushing: `npx tsc --noEmit -p tsconfig.json`, `npx vitest run`,
+  `python plugins/openalgo/tests/run_all.py`. A broker-protocol change also needs a live probe against the running
+  plugin (never print the API key). Rust compile is left to CI here.
+- Issue drafts: when upstream fixes something we drafted, mark its file `FIXED upstream` with the commit/PR and rename
+  it with a `fixed_` prefix. Update `FORK_OVERVIEW.md` when the set of added/modified files changes materially.
+
 ## Indicators in `indicators/`
 
 - Back up once a change is confirmed working on the chart: copy `<name>.js` to `<name>_backup.js`.
