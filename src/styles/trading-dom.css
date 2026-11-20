@@ -176,13 +176,7 @@ html.theme-light {
 .trd-dom-meter.is-full { width: 100%; }
 .trd-dom-size {
   position: relative;
-  z-index: 1;
-  display: block;
-  overflow: hidden;
-  line-height: 17px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 .trd-dom-cell.is-buy .trd-dom-meter.is-active {
   background: var(--trd-dom-buy-meter-active);

@@ -13,6 +13,9 @@
  * click centres; the wheel scrolls a row per 100 px. Off-centre, the ladder
  * re-centres on the market after 2 s (the pie on the switch); dynamic mode
  * keeps it centred. Hovering a size cell draws the price on the chart.
+ * A broker that sends its order book fills the size cells, their meters and
+ * the totals (#372): the book is asked of it while the tab is open.
+ * Order types, moves and modifications are the broker's (#320).
  */
 import { Index, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, type JSX } from "solid-js";
 import { Tooltip } from "../../components/Tooltip";
@@ -22,19 +25,20 @@ import { setTicketQty, ticketQty, tradingUi } from "../../data/trading/trading-u
 import type { OrderType, Side, TradingOrder } from "../../data/trading/types";
 import { ChartContextMenu } from "../chart/ChartContextMenu";
 import { confirmCancelOrder, confirmClosePosition } from "./confirm";
-import { fmtPrice, fmtQty, tickDecimals, tickerOf } from "./format";
+import { fmtPrice, fmtQty, fmtSize, tickDecimals, tickerOf } from "./format";
 import { moveOrder } from "./order-actions";
+import { canMove } from "../../data/trading/capabilities";
 import {
   DOM_CENTER_DELAY,
   DOM_ROW_H,
-  bookRows,
-  bookTotal,
   centeredTop,
   clickOrderType,
   contextItems,
   countText,
+  depthRows,
   indexPrice,
   labelActive,
+  meterShare,
   needsCenter,
   orderMarks,
   priceIndex,
@@ -83,15 +87,24 @@ export function DomPanel() {
   const tick = () => q()?.minTick ?? 0.01;
   const dec = () => Math.max(2, tickDecimals(tick()) ?? 2);
   const ix = (p: number | null | undefined) => (p == null || !Number.isFinite(p) ? NaN : priceIndex(p, tick()));
-  const market = createMemo<DomMarket>(() => ({ bid: ix(q()?.bid), ask: ix(q()?.ask), last: ix(q()?.last) }), { bid: NaN, ask: NaN, last: NaN }, {
+  // The broker's order book while the tab is open; its best levels are the bid and ask.
+  onCleanup(broker.watchDepth());
+  const depth = createMemo(() => {
+    const book = broker.depth();
+    return book ? depthRows(book, tick()) : null;
+  });
+  const sizeDecimals = () => tickDecimals(broker.instrument().qtyStep) ?? 0;
+  const market = createMemo<DomMarket>(
+    () => {
+      const d = depth();
+      const bid = d && Number.isFinite(d.bestBid) ? d.bestBid : ix(q()?.bid);
+      const ask = d && Number.isFinite(d.bestAsk) ? d.bestAsk : ix(q()?.ask);
+      return { bid, ask, last: ix(q()?.last) };
+    },
+    { bid: NaN, ask: NaN, last: NaN },
+    {
     equals: (a, b) => Object.is(a.bid, b.bid) && Object.is(a.ask, b.ask) && Object.is(a.last, b.last),
   });
-  // The book of a depth subscription: the resting quantity of each row, and each side's total.
-  const buyRows = createMemo(() => bookRows(q()?.depth?.buy, tick()));
-  const sellRows = createMemo(() => bookRows(q()?.depth?.sell, tick()));
-  const buyTotal = createMemo(() => bookTotal(q()?.depth?.buy));
-  const sellTotal = createMemo(() => bookTotal(q()?.depth?.sell));
-  const totalText = (v: number | null) => (v == null ? "-" : fmtQty(v));
   const orders = (): TradingOrder[] => {
     const id = pane();
     return id === null ? [] : broker.orders(id);
@@ -190,7 +203,7 @@ export function DomPanel() {
    *  dialog, filled in (reference app). */
   const place = (side: Side, type: OrderType, price: number | null, limit: number | null = null) => {
     const sym = broker.symbol();
-    if (!sym || !broker.tradability().ok) return;
+    if (!sym || !broker.tradability().ok || !takes(type)) return;
     if (!tradingPrefs.prefs().oneClick) {
       const f = (v: number | null) => (v == null ? "" : v.toFixed(dec()));
       tradingUi.openOrderDialog({
@@ -217,6 +230,8 @@ export function DomPanel() {
     });
   };
   const oneClick = () => tradingPrefs.prefs().oneClick;
+  /** The broker takes this order type (#320). */
+  const takes = (type: OrderType) => broker.capabilities().orderTypes.includes(type);
   const cancel = (o: TradingOrder) => {
     const id = pane();
     if (id === null) return;
@@ -268,6 +283,8 @@ export function DomPanel() {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
+    // A broker that cannot modify it: no drag, and no order dialog on a click.
+    if (!canMove(broker.capabilities(), mk.order)) return;
     const from = ix(mk.order[mk.field]);
     const y0 = e.clientY;
     let moved = false;
@@ -325,6 +342,11 @@ export function DomPanel() {
   const buyCount = createMemo(() => countText(sideCounts(orders(), "buy")));
   const sellCount = createMemo(() => countText(sideCounts(orders(), "sell")));
   const hasOrders = () => orders().length > 0;
+  /** The book's totals; "-" without a book (the replay broker quotes no size). */
+  const total = (s: "bid" | "ask") => {
+    const d = depth();
+    return d ? fmtSize(s === "bid" ? d.totalBid : d.totalAsk, sizeDecimals()) : "-";
+  };
 
   const [plMode, setPlMode] = createSignal<"money" | "ticks" | "percent">("money");
   const plText = () => {
@@ -358,7 +380,10 @@ export function DomPanel() {
     const price = () => indexPrice(i(), tick(), dec());
     const side = () => priceSide(i(), market());
     const full = (s: "buy" | "sell") => (s === "buy" ? i() === market().bid : i() === market().ask);
-    const size = (s: Side) => (s === "buy" ? buyRows().get(i()) : sellRows().get(i()));
+    const size = (s: Side) => {
+      const d = depth();
+      return d ? (s === "buy" ? d.bids : d.asks).get(i()) : undefined;
+    };
     const rowMarks = () => {
       const list = [...(marks().get(i()) ?? [])];
       const g = ghost();
@@ -387,8 +412,12 @@ export function DomPanel() {
           tradingUi.setDomHover(null);
         }}
       >
-        <span class="trd-dom-meter" classList={{ "is-full": full(s), "is-active": flashed() === `${s}${i()}` }} />
-        <span class="trd-dom-size">{size(s) == null ? "" : fmtQty(size(s))}</span>
+        <span
+          class="trd-dom-meter"
+          classList={{ "is-full": !depth() && full(s), "is-active": flashed() === `${s}${i()}` }}
+          style={depth() ? { width: `${meterShare(size(s), depth()!.max) * 100}%` } : undefined}
+        />
+        <Show when={size(s)}>{(n) => <span class="trd-dom-size ot-value">{fmtSize(n(), sizeDecimals())}</span>}</Show>
       </span>
     );
     /** Hover label of a size cell, at the outer edge ("Limit" / "Stop"). */
@@ -491,7 +520,7 @@ export function DomPanel() {
             </Show>
           </div>
           <div class="trd-dom-centering">
-            <span class="trd-dom-total is-bid" title="Total buy quantity">{totalText(buyTotal())}</span>
+            <span class="trd-dom-total is-bid" title="Total buy quantity">{total("bid")}</span>
             <span class="trd-dom-switch">
               <svg class="trd-dom-timer" viewBox="-1 -1 2 2" width="2" height="2" aria-hidden="true">
                 <path d={piePath(progress())} />
@@ -510,7 +539,7 @@ export function DomPanel() {
                 </button>
               </Tooltip>
             </span>
-            <span class="trd-dom-total is-ask" title="Total sell quantity">{totalText(sellTotal())}</span>
+            <span class="trd-dom-total is-ask" title="Total sell quantity">{total("ask")}</span>
           </div>
           <div class="trd-dom-cancel is-sell">
             <Tooltip text="Cancel all sell orders" side="top">
@@ -575,13 +604,13 @@ export function DomPanel() {
         </div>
         <div class="trd-dom-btns is-market">
           <Tooltip text="Buy market" side="top">
-            <button type="button" class="trd-dom-btn is-primary is-buy" onClick={() => place("buy", "market", null)}>
+            <button type="button" class="trd-dom-btn is-primary is-buy" aria-disabled={!takes("market")} onClick={() => place("buy", "market", null)}>
               Buy Mkt
             </button>
           </Tooltip>
           <DomQty />
           <Tooltip text="Sell market" side="top">
-            <button type="button" class="trd-dom-btn is-primary is-sell" onClick={() => place("sell", "market", null)}>
+            <button type="button" class="trd-dom-btn is-primary is-sell" aria-disabled={!takes("market")} onClick={() => place("sell", "market", null)}>
               Sell Mkt
             </button>
           </Tooltip>
@@ -594,12 +623,14 @@ export function DomPanel() {
             x={m().x}
             y={m().y}
             onClose={() => setMenu(null)}
-            nodes={contextItems(m().side, m().price, fmtQty(ticketQty()), ticker(), tick(), (p) => fmtPrice(p, tick())).map((it, n) => ({
-              kind: "item" as const,
-              id: `dom-${n}`,
-              label: it.label,
-              onSelect: () => place(m().side, it.type, it.price, it.limit),
-            }))}
+            nodes={contextItems(m().side, m().price, fmtQty(ticketQty()), ticker(), tick(), (p) => fmtPrice(p, tick()))
+              .filter((it) => takes(it.type))
+              .map((it, n) => ({
+                kind: "item" as const,
+                id: `dom-${n}`,
+                label: it.label,
+                onSelect: () => place(m().side, it.type, it.price, it.limit),
+              }))}
           />
         )}
       </Show>
