@@ -96,8 +96,32 @@ console while you run `plugin.py` by hand.
 
 - The API key is sent only inside request payloads; every log line and error goes through a redaction
   (`_clean`) that strips it before it leaves the process.
-- The instrument master is pulled once per segment per day, cached in memory and on disk under
-  `{localAppData}\OpenTraderPlugins\openalgo-cache`.
+- The instrument master is pulled once per segment per day, cached in memory and on disk under the plugin's
+  data folder (`OPENTRADER_PLUGIN_DATA`, with a `{localAppData}\OpenTraderPlugins\openalgo` fallback when the
+  plugin is run by hand).
 - A long history request runs beside the quote stream: the source locks its own parts, so the template's outer
   lock is not taken in `handle` (two more deviations are documented at the top of `plugin.py`).
 - Dates in the app's UI read dd/mm/yyyy; history windows and daily bars are keyed to IST midnight.
+
+## Future: browser login for a direct broker plugin (not used by OpenAlgo)
+
+OpenAlgo authenticates with an API key, so this plugin never opens a browser. **If a future direct-broker plugin
+needs an OAuth / browser login, it can be done entirely from the plugin side with API 3 — no app change is
+required.** The pattern (the same RFC 8252 loopback flow the app uses for Community sign-in):
+
+1. Bind a loopback HTTP server on `127.0.0.1:0` (a free port) inside the plugin process.
+2. Open the broker's login URL in the system browser with
+   `redirect_uri=http://127.0.0.1:<port>/callback` (Python `webbrowser.open`).
+3. The browser redirects back with a one-time `code`; the plugin reads it from the request query, answers the
+   browser with a small "you can close this tab" page, and exchanges the code for the access/refresh token.
+4. Keep the token in `OPENTRADER_PLUGIN_DATA` (API 3 gives a per-plugin folder, removed with the plugin) with
+   restrictive file permissions. The app's credential store is not reachable from a plugin programmatically —
+   password settings are for values the user types in Settings — so the plugin's own data folder is the storage.
+5. Use `plugin.prompt` (message-only) to show "Approve in the browser…" while waiting, and `plugin.promptDone`
+   when the token arrives. `plugin.promptAnswer` is only for a code the user types back manually.
+
+Scope and risks: works for brokers with an OAuth redirect-URI login; brokers with only API-key + TOTP don't need
+it. The broker must allow `http://127.0.0.1` as a redirect URI (standard for native apps). It is desktop-only —
+a web build cannot open a system browser or a local listener. Programmatic token storage in the app's
+credential store would need a new app/protocol feature (a plugin-facing auth API), which upstream has not added;
+adopt that instead if it appears, to avoid a fork-only protocol.
