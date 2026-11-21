@@ -281,7 +281,7 @@ export type Runtime =
 
 export type FolderTarget = { title: string; suggest: string | null; expect: string | null };
 export type InstallStep = { copy: string; to: FolderTarget };
-export type SettingKind = "text" | "number" | "bool" | "select";
+export type SettingKind = "text" | "number" | "bool" | "select" | "password";
 export type SettingOption = { value: string; label: string };
 /** One field of the plugin's settings form; values travel as text. */
 export type SettingField = {
@@ -291,6 +291,8 @@ export type SettingField = {
   default: string | null;
   options: SettingOption[];
   help: string | null;
+  /** Plugin API 3: shown only while these settings have one of the listed values. */
+  when?: Record<string, string[]>;
 };
 export type Manifest = {
   id: string;
@@ -327,6 +329,8 @@ export type PluginInfo = {
   /** The version the plugin gave when it connected. */
   connectedVersion: string | null;
   settings: Record<string, string>;
+  /** Plugin API 3: settings kept in the credential store, never read back. */
+  savedSecrets: string[];
   /** The files the installation copied outside the plugin's folder. */
   copied: string[];
   /** A broker plugin's tickers for chart symbols ("NASDAQ:AAPL" → "AAPL.US"). */
@@ -695,6 +699,8 @@ export const commands: {
   pluginInstallFile(path: string): Promise<CommandResult<PluginsStatus>>;
   pluginSetEnabled(id: string, on: boolean): Promise<CommandResult<PluginsStatus>>;
   pluginSetSettings(id: string, settings: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
+  pluginForgetSecret(id: string, key: string): Promise<CommandResult<PluginsStatus>>;
+  pluginPromptAnswer(plugin: string, id: string, value: string | null): Promise<void>;
   pluginNewToken(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginRemove(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginFolderCandidates(id: string, step: number): Promise<CommandResult<string[]>>;
@@ -783,6 +789,8 @@ export const commands: {
   pluginInstallFile(path: string): Promise<CommandResult<PluginsStatus>>;
   pluginSetEnabled(id: string, on: boolean): Promise<CommandResult<PluginsStatus>>;
   pluginSetSettings(id: string, settings: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
+  pluginForgetSecret(id: string, key: string): Promise<CommandResult<PluginsStatus>>;
+  pluginPromptAnswer(plugin: string, id: string, value: string | null): Promise<void>;
   pluginNewToken(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginRemove(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginFolderCandidates(id: string, step: number): Promise<CommandResult<string[]>>;
