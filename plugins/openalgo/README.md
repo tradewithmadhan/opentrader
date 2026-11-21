@@ -2,8 +2,11 @@
 
 Your OpenAlgo deployment in OpenTrader: the OpenAlgo segments of your broker account (NSE, BSE, NFO, BFO, MCX,
 CDS, BCD, NCO, NCDEX — and the index segments NSE_INDEX, BSE_INDEX, MCX_INDEX) on the charts, and its trading
-from the charts. One file, Python 3.9+, standard library only. Plugin API 2, so the app speaks whole symbols
-(`NSE:SBIN-EQ`): the exchange prefix is the app's exchange, the ticker is OpenAlgo's symbol. The wire behavior
+from the charts. One file, Python 3.9+, standard library only. Plugin API 3 (whole symbols, `NSE:SBIN-EQ`):
+the app speaks whole symbols — the exchange prefix is the app's exchange, the ticker is OpenAlgo's symbol.
+The **API key** is a password setting, kept in the system credential store and never shown again, so it must
+be re-entered once when upgrading from 0.1.27. Logs and the instrument cache live in the plugin's own data
+folder (removed when the plugin is removed). The wire behavior
 mirrors the app's built-in OpenAlgo provider (verified live), index symbols included: an index keeps its own
 prefix, `NSE_INDEX:NIFTY`.
 
@@ -29,8 +32,9 @@ python build.py dev        # dist/openalgo-dev.zip
 
 1. OpenTrader → Settings → Plugins → Install from file → `dist\openalgo-dev.zip`.
 2. Fill the settings: **API URL** (REST base, `http://127.0.0.1:5000`), **WebSocket URL** (full URL including any
-   path, `wss://your-domain/ws`), **API key**, the exchanges to serve (the OpenAlgo segments exactly as the
-   instrument master names them — the index segments included), and the default product.
+   path, `wss://your-domain/ws`), **API key** (masked, saved in the credential store), the exchanges to serve
+   (the OpenAlgo segments exactly as the instrument master names them — the index segments included), and the
+   default product.
 3. Run the plugin by hand (the app writes where to connect):
    ```powershell
    python plugin.py

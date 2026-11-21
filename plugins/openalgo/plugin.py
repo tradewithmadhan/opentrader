@@ -28,8 +28,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.27"
-API = 2  # the Plugin API version this plugin speaks (whole symbols)
+PLUGIN_VERSION = "0.1.28"
+API = 3  # Plugin API 3: password settings in the credential store, per-plugin data folder
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
 
@@ -85,6 +85,13 @@ def local_app_data():
     if sys.platform == "darwin":
         return os.path.expanduser("~/Library/Application Support")
     return os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+
+def plugin_data_dir():
+    """Plugin API 3 gives each plugin a data folder, removed with the plugin. Running by
+    hand (no app) keeps the old per-user folder so development and the regression suite
+    still work without the app's environment."""
+    env = os.environ.get("OPENTRADER_PLUGIN_DATA")
+    return Path(env) if env else Path(local_app_data()) / "OpenTraderPlugins" / "openalgo"
 
 
 def num(v, default=None):
@@ -248,7 +255,7 @@ class Instruments:
         self.lock = threading.RLock()
         self.rows = {}  # master exchange → [row dict]
         self.day = {}  # master exchange → the day it was fetched
-        self.cache_dir = Path(local_app_data()) / "OpenTraderPlugins" / "openalgo-cache"
+        self.cache_dir = plugin_data_dir() / "cache"
         self.worker = None  # the segments are fetched one after another (a deployment rate-limits parallel pulls)
         self.loading = {}  # master exchange → the Event of its running pull (callers wait instead of refetching)
         self.unavailable = {}  # master exchange → until when (monotonic) a failed pull is not retried
@@ -488,8 +495,7 @@ class OpenAlgoSource:
         return self.settings.get("apiKey", "")
 
     def _log_dir(self):
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        return Path(base) / "OpenTraderPlugins"
+        return plugin_data_dir()
 
     def _log_enabled(self, category):
         # category: "api" or "ws". Settings arrive as text ("true"/"false"); fall back to the
@@ -530,7 +536,7 @@ class OpenAlgoSource:
     # ── day-stamped disk cache (the mirror of the built-in provider's daily files:
     #    an app restart inside a day makes no network call for these) ──
     def _daily_path(self, name):
-        return Path(local_app_data()) / "OpenTraderPlugins" / "openalgo-cache" / "daily" / f"{name}.json"
+        return plugin_data_dir() / "cache" / "daily" / f"{name}.json"
 
     def _read_daily(self, name, today):
         """The day-stamped file's data when it was pulled today, else None."""
@@ -2583,8 +2589,7 @@ class Plugin:
 def _reset_logs():
     """Truncate the per-category log files once per process start, so each app launch
     begins with a fresh log (the files are capped at ~1 MB anyway)."""
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    d = Path(base) / "OpenTraderPlugins"
+    d = plugin_data_dir()
     try:
         d.mkdir(parents=True, exist_ok=True)
         for name in ("openalgo-api.log", "openalgo-ws.log"):
