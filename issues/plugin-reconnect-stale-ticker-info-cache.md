@@ -1,50 +1,29 @@
-# Bug report — for filing on deepentropy/opentrader
+# Comment for issue #371 — deepentropy/opentrader
 
-> Drafted 21/11/2026. Confirmed present in upstream/main (0.4.30). Paste everything below the line into the issue body.
+> Drafted 21/11/2026 as a follow-up comment on
+> https://github.com/deepentropy/opentrader/issues/371 (still Open). Paste everything below the line into the comment box.
 
-Title of the issue: **Plugin reconnect leaves stale "symbol not found" ticker info cached for an hour**
-
-Paste everything below the line into the issue body.
+Paste everything below the line into the comment box.
 
 ---
 
-### What happens
+One more case in the same family, still present after 5565d13 and 4d2fe69 (I'm on the latest build).
 
-When a data plugin briefly cannot answer `data.symbolInfo` for a symbol — while it is still starting, before its credentials/settings are entered, or during a cold instrument-master load — the app can cache that "not found" answer for a full hour. After the plugin becomes healthy, the Symbol Info dialog (and anything else reading `getTickerInfo`) keeps showing no data for those symbols (no Type row, no other fields) until the hour expires or the app is restarted. Symbols first opened after the plugin is healthy work normally.
+**Symptom.** After a data plugin reconnects — or while its settings/API key are being entered after install — the Symbol Info dialog shows no fields for symbols that were opened during that window (no Type row, no other info). Symbols opened once the plugin is healthy work normally. Restarting the app clears it.
 
-This is easy to hit during plugin setup/upgrade: install a plugin, open a few symbols before entering the API key (or while its master data is still loading), then enter the key — those first symbols stay broken for an hour while newly opened ones are fine.
+**Cause.** This time it's the symbol-info cache, not the pending-request retry or the subscribe order you already fixed. `src/data/datafeed-rest.ts` keeps a failed `getTickerInfo` for a full hour when the error is a "not found":
 
-### Root cause
+```ts
+const INFO_TTL_MS = 60 * 60_000;
+...
+if (isNotFoundError(e)) entry.at = Date.now();   // line 113: cached for another hour
+```
 
-Two separate caches remember "symbol doesn't exist", but only one is invalidated when a plugin reconnects:
+On `events.pluginsChanged`, `App.tsx` calls `forgetUnknownSymbols()`, but that only clears the `unknown` set in `unknown-symbols.ts`; it has no access to `datafeed-rest.ts`'s private `infoCache`. So a plugin that was briefly unable to answer `data.symbolInfo` (cold master before the key was entered, plugin still starting) leaves a poisoned "no info" entry for an hour, even though the plugin is now answering correctly.
 
-- `src/data/unknown-symbols.ts` → the `unknown` set — cleared by `forgetUnknownSymbols()` from the `pluginsChanged` listener in `App.tsx`.
-- `src/data/datafeed-rest.ts` → the `infoCache` map — **not cleared on plugin change**. A failed `getTickerInfo` whose error matches `NOT_FOUND` is deliberately kept for the full `INFO_TTL_MS`:
+In my case the plugin's live `/symbol` fallback does return a valid row with the correct `type` (stock / index / futures / option) — verified live — so the stale client cache is the cause, not the data source.
 
-  ```ts
-  const INFO_TTL_MS = 60 * 60_000;
-  ...
-  p.then(
-    () => { entry.at = Date.now(); },
-    (e) => {
-      if (isNotFoundError(e)) entry.at = Date.now(); // kept for another hour
-      else if (infoCache.get(symbol) === entry) infoCache.delete(symbol);
-      noteSymbolError(symbol, e);
-    },
-  );
-  ```
-
-`forgetUnknownSymbols()` clears only the `unknown` signal in `unknown-symbols.ts`; it has no access to `datafeed-rest.ts`'s private `infoCache`. So after a plugin reconnect, the symbol is no longer "unknown" but its cached failed info promise is still served.
-
-### Why it matters
-
-- A data plugin that connects after the window (or whose settings are completed after install) leaves a stale, final-looking "no info" for every symbol touched during that window.
-- The Symbol Info dialog silently omits fields; users read it as a broken symbol / bad data.
-- It contradicts the intent already documented in `App.tsx`: "a plugin that connects again may know its symbols again … the sessions are read again and the charts reload when one changed" — symbol info is the one thing not refreshed.
-
-### Suggested fix
-
-Export a cache clear from `src/data/datafeed-rest.ts` and call it in the `pluginsChanged` listener:
+**Suggested fix**, small and in the same spirit as `forgetUnknownSymbols()`:
 
 ```ts
 // datafeed-rest.ts
@@ -58,10 +37,6 @@ wakeRetries();
 void refreshPluginSessions().then((changed) => changed && emitAppEvent("chart-reload-data"));
 ```
 
-Optionally reset `snapshotCache` in the same place for the same reason. A test can assert that after `clearTickerInfo()`, a second `getTickerInfo(symbol)` re-invokes the command rather than returning the cached "not found".
+A test can assert that after `clearTickerInfo()` a second `getTickerInfo(symbol)` re-invokes the command instead of returning the cached miss. Optionally clear `snapshotCache` there too for the same reason.
 
-### Additional context
-
-- Observed with a broker plugin installed via Settings > Plugins on 0.4.30; the first symbols opened before the API key was entered stayed blank in the Symbol Info dialog for ~1 hour, while symbols opened afterwards were correct.
-- The plugin itself returns a correct `type` for every symbol once configured (verified live: stock / index / futures / option), so the stale client cache is the cause, not the data source.
-- Related: #371 (restored charts/watchlists wait for a starting plugin) fixed the retry path for bars/quotes; this is the sibling gap for symbol info.
+Happy to confirm with OpenAlgo once it ships, as with the earlier two fixes.
