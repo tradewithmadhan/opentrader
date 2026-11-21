@@ -331,6 +331,8 @@ export type PluginInfo = {
   settings: Record<string, string>;
   /** Plugin API 3: settings kept in the credential store, never read back. */
   savedSecrets: string[];
+  /** Plugin API 3: what the user turned off of chart data / trading. */
+  off: Capability[];
   /** The files the installation copied outside the plugin's folder. */
   copied: string[];
   /** A broker plugin's tickers for chart symbols ("NASDAQ:AAPL" → "AAPL.US"). */
@@ -701,6 +703,7 @@ export const commands: {
   pluginSetSettings(id: string, settings: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
   pluginForgetSecret(id: string, key: string): Promise<CommandResult<PluginsStatus>>;
   pluginPromptAnswer(plugin: string, id: string, value: string | null): Promise<void>;
+  pluginSetCapability(id: string, capability: Capability, on: boolean): Promise<CommandResult<PluginsStatus>>;
   pluginNewToken(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginRemove(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginFolderCandidates(id: string, step: number): Promise<CommandResult<string[]>>;
@@ -791,6 +794,7 @@ export const commands: {
   pluginSetSettings(id: string, settings: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
   pluginForgetSecret(id: string, key: string): Promise<CommandResult<PluginsStatus>>;
   pluginPromptAnswer(plugin: string, id: string, value: string | null): Promise<void>;
+  pluginSetCapability(id: string, capability: Capability, on: boolean): Promise<CommandResult<PluginsStatus>>;
   pluginNewToken(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginRemove(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginFolderCandidates(id: string, step: number): Promise<CommandResult<string[]>>;
