@@ -251,7 +251,8 @@ Why: keep the fork on current upstream while keeping our extras. Adopted by cher
 - #370 order-line drag + ticket price rules, #371 restored charts wait for a starting plugin (plus its follow-up: settings before subscriptions, watchlists of a plugin starting with the app),
 - #367/#368 studies legend, #369 downloads-folder exports, #372/#374 DOM book and grouping,
 - #375–#378 MT5/IBKR catalog, tick charts, tick-based Bar Replay, #331 symbol search,
-- #379 Plugin API 3 (password settings, conditional settings, plugin data folder, prompts) and #380 per-capability plugin on/off switches; IBKR 0.3.0. API 3 keeps earlier plugins (our OpenAlgo API 2) working unchanged.
+- #379 Plugin API 3 (password settings, conditional settings, plugin data folder, prompts) and #380 per-capability plugin on/off switches; IBKR 0.3.0.
+- Plugin API 4 (#381): data plugins send ready-made watchlists (our OpenAlgo plugin still speaks API 3; older-version plugins keep working).
 - plus earlier pre-base commits that were genuinely missing: #310 far-date window, #156 Replay broker buttons,
   #325 OakScript Logs start date, #340 plugin bar grid test, #350 chart links.
 Where our version was newer (point value #345, tick-size watchlist #319, plugin intervals #318, alerts, etc.),
