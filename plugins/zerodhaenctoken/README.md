@@ -124,8 +124,13 @@ least 2024 (verified live).
 For NSE symbols the depth is tightened per symbol from NSE's official listing lists (`EQUITY_L.csv` and
 `SME_EQUITY_L.csv`, fetched once a day and cached): a stock listed 30 days ago declares 30 days of history instead
 of 30 years, so the app never asks for years before its listing. Symbols without a listing row, and other
-exchanges, use the maxima. The two listing lists are small and their cache is pruned with the other day-stamped
-files.
+exchanges, use the configured maxima. The two listing lists are small and their cache is pruned with the other
+day-stamped files.
+
+To avoid a burst of Kite calls (rate limits), each `data.bars` request returns only the **newest chunk** of the
+asked window — one day call (≤1900 days) or one intraday call (≤30 days). The protocol lets a plugin return fewer,
+newest bars; the app then asks for older pages as the user scrolls, so the full per-symbol history is still
+reachable one chunk at a time.
 
 ## Corporate-action events
 

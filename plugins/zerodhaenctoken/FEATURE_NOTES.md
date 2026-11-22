@@ -1,33 +1,31 @@
-# Feature note: lazy daily-history loading for plugin symbols (upstream app change)
+# Note: lazy daily-history loading
 
-Status: **not implemented in the plugin**. The eager behaviour is kept intentionally.
+Status: **implemented plugin-side**. No upstream app change is required.
 
-## Observed
+## The problem
 
-On a symbol change, OpenTrader asks for the whole daily history in one call:
+On a symbol change, OpenTrader asks for a wide daily window in one call:
 
 ```
 data.bars BSE:TCS 1D: 4651 bars (03/01/2000-22/11/2026, countBack=7015, 54 events)
 ```
 
-The plugin then splits that window into 1900-day Kite requests (4 calls here), merges them and returns the bars.
-All of those requests happen immediately, before the user scrolls.
+Filling that whole window means several 1900-day Kite requests at once, which risks Kite's rate limit. The app
+hardcodes `DAILY_FULL_DAYS = 7560` (`src/data/datafeed.ts:112`), and `history` in `data.symbolInfo` is a hard
+scroll-back clamp (`reachable()` in `src-tauri/src/plugins/data.rs:511`), so lowering the declared depth would stop
+scrolling rather than defer loading.
 
-## Why the plugin cannot make this lazy
+## The fix
 
-- `src/data/datafeed.ts:112` sets `DAILY_FULL_DAYS = 7560`; `dailyConfig("1D")` (line 154) uses it for the initial
-  daily load. The app, not the plugin, chooses this window.
-- `history` in `data.symbolInfo` is not an "initial window" hint. The backend clamps the requested `from` to
-  `now - history` in `src-tauri/src/plugins/data.rs:491` (`reachable()`), so reducing `history.day` would make
-  scrolling stop at that depth rather than load older pages later.
-- Older pages do exist — `getDailyHistoryBefore` → `plugins::before` (`data.rs:629`) calls `data.bars` with an older
-  window — but the initial 7560-day request already covers everything, so they are never needed on a day chart.
+The plugin protocol explicitly allows a `data.bars` answer with **fewer, newest bars**: "You may return fewer, the
+newest ones: the app then asks for the older ones before the oldest bar you returned when the chart needs them" (PROTOCOL.md, `data.bars`). So `bars()` now fetches only the newest chunk of the requested window:
 
-## Proposed upstream change
+- day: at most `historyDaysDaily` days (default 1900) — one Kite call
+- intraday: at most `historyDaysMinute` days (default 30) — one Kite call
 
-For symbols served by a data plugin, use a small initial daily window (e.g. 400 days, as
-`getLastYearDailyBars` already does at `src/data/datafeed.ts:724-733`) and let `getDailyHistoryBefore` page older
-windows when the user scrolls. Then this plugin would fetch one 1900-day chunk at open and the rest on demand,
-avoiding a burst of Kite calls that can hit its rate limit.
+When the user scrolls back, the chart calls `getBarsBefore` (`src/window/chart/view/history.ts:230`) →
+`plugins::before` (`data.rs:629`) with an older `to`, and the plugin serves the next older chunk. The per-symbol
+`history` depth still comes from NSE's listing dates (capped at 30 years of days / 5 years of minutes), so the app
+keeps allowing scroll-back all the way to each symbol's listing.
 
-Until that app change lands, the plugin keeps the eager full-history code path.
+Result: one Kite request on symbol change, one per scroll page, no rate-limit burst, full listing-based history still reachable.

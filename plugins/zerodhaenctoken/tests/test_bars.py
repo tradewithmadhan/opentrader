@@ -58,23 +58,30 @@ class Windows(unittest.TestCase):
             self.source.settings["historyDaysMinute"] = bad
             self.assertEqual(self.source._cap("historyDaysMinute", 30), 30)
 
-    def test_day_windows_are_chunked_by_the_daily_cap(self):
-        self.source.settings["historyDaysDaily"] = "100"
-        frm, to = midnight("2026-06-01"), midnight("2026-11-01")
-        bars = self.source.bars("NSE:RELIANCE", "1D", frm, to, 0)
-        self.assertEqual(self.fake.count("/oms/instruments/historical/738561/day"), 2)
-        stamps = [b[0] for b in bars]
-        self.assertEqual(stamps, sorted(set(stamps)))
-
-    def test_a_window_wider_than_the_cap_is_chunked_without_repeats(self):
+    def test_only_the_newest_chunk_loads_first_and_scroll_loads_older_pages(self):
         self.source.settings["historyDaysMinute"] = "2"
         frm, to = midnight("2026-10-01"), midnight("2026-10-05")
-        bars = self.source.bars(SYMBOL, "15", frm, to, 0)
+        first = self.source.bars(SYMBOL, "15", frm, to, 0)
+        self.assertEqual(self.fake.count("/oms/instruments/historical/738561/15minute"), 1,
+                         "one Kite call on the initial load, not one per chunk")
+        self.assertTrue(first)
 
-        self.assertEqual(self.fake.count("/oms/instruments/historical/738561/15minute"), 3)
-        stamps = [b[0] for b in bars]
-        self.assertEqual(stamps, sorted(set(stamps)))
-        self.assertEqual(stamps[0], int(datetime(2026, 10, 1, 9, 15, tzinfo=IST).timestamp()))
+        first_day = datetime.fromtimestamp(first[0][0], IST).date()
+        older_to = int(datetime(first_day.year, first_day.month, first_day.day, tzinfo=IST).timestamp()) - 86400
+        older = self.source.bars(SYMBOL, "15", frm, older_to, 0)
+        self.assertEqual(self.fake.count("/oms/instruments/historical/738561/15minute"), 2,
+                         "the next page is fetched when the chart scrolls back")
+        self.assertTrue(older)
+        self.assertLess(older[-1][0], first[0][0])
+        stamps = [b[0] for b in older + first]
+        self.assertEqual(stamps, sorted(set(stamps)), "pages never repeat a bar")
+
+    def test_day_requests_also_return_one_chunk_at_a_time(self):
+        self.source.settings["historyDaysDaily"] = "100"
+        frm, to = midnight("2026-06-01"), midnight("2026-11-01")
+        first = self.source.bars("NSE:RELIANCE", "1D", frm, to, 0)
+        self.assertEqual(self.fake.count("/oms/instruments/historical/738561/day"), 1)
+        self.assertEqual([b[0] for b in first], sorted({b[0] for b in first}))
 
     def test_a_day_window_uses_the_day_endpoint_at_ist_midnight(self):
         frm, to = midnight("2026-10-01"), midnight("2026-10-30")

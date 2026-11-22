@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.2.19"
+PLUGIN_VERSION = "0.2.20"
 API = 3  # password settings, per-plugin data folder, prompts on token expiry
 DEV_CONNECTION_FILE = "OpenTraderPlugins/zerodhaenctoken-dev.json"
 
@@ -1560,14 +1560,13 @@ class ZerodhaSource:
         chunk_days = (self._cap("historyDaysDaily", 1900) if interval == "day"
                       else self._cap("historyDaysMinute", 30))
         step = chunk_days * 86400
+        # Only the newest chunk of the asked window. The protocol allows returning fewer, newest bars: the app
+        # then asks for older pages as the user scrolls. One Kite call per request keeps us under its rate limit.
+        start = max(frm, to - step + 1)
         merged = {}
-        start = frm
         try:
-            while start <= to:
-                end = min(start + step - 1, to)
-                for bar in self._history_one(row["token"], interval, start, end):
-                    merged[bar[0]] = bar
-                start = end + 1
+            for bar in self._history_one(row["token"], interval, start, to):
+                merged[bar[0]] = bar
         except PluginError as e:
             # The chart only says "no data"; the log says why (same as the OpenAlgo plugin).
             self.log(f"history {ticker} {resolution}: {e}", "warn")
