@@ -1,0 +1,35 @@
+{
+  "id": "zerodhaenctoken",
+  "name": "Zerodha (enctoken, development)",
+  "version": "0.0.19-dev",
+  "publisher": "tradewithmadhan",
+  "description": "The Zerodha enctoken plugin while it is developed: you run plugin.py yourself, the app writes where to connect.",
+  "api": 3,
+  "provides": ["datafeed", "broker"],
+  "exchanges": ["NSE", "BSE", "NFO", "BFO", "CDS", "BCD", "MCX", "NCO", "NSE_INDEX", "BSE_INDEX", "MCX_INDEX", "GLOBAL_INDEX"],
+  "runtime": { "type": "external", "connectionFile": "{localAppData}/OpenTraderPlugins/zerodhaenctoken-dev.json" },
+  "settings": [
+    { "key": "enctoken", "label": "Enctoken", "type": "text", "default": "",
+      "help": "Log in at kite.zerodha.com and copy the 'enctoken' cookie." },
+    { "key": "userId", "label": "Zerodha user ID", "type": "text", "default": "",
+      "help": "Leave blank to read it from the account profile." },
+    { "key": "exchanges", "label": "Segments to serve", "type": "text",
+      "default": "NSE,BSE,NFO,BFO,CDS,BCD,MCX,NCO,NSE_INDEX,BSE_INDEX,MCX_INDEX,GLOBAL_INDEX" },
+    { "key": "product", "label": "Default product", "type": "select", "default": "MIS",
+      "options": [
+        { "value": "MIS", "label": "MIS (intraday)" },
+        { "value": "CNC", "label": "CNC (delivery)" },
+        { "value": "NRML", "label": "NRML (carry forward)" }
+      ] },
+    { "key": "apiUrl", "label": "Kite personal API URL", "type": "text", "default": "https://kite.zerodha.com" },
+    { "key": "wsUrl", "label": "Kite WebSocket URL", "type": "text", "default": "wss://ws.kite.trade" },
+    { "key": "masterUrl", "label": "Instrument master URL", "type": "text", "default": "https://api.kite.trade/instruments" },
+    { "key": "companyDetails", "label": "Company details and logo", "type": "bool", "default": "true" },
+    { "key": "historyDaysMinute", "label": "History request cap — minutes (days)", "type": "text", "default": "30" },
+    { "key": "historyDaysDaily", "label": "History request cap — day charts (days)", "type": "text", "default": "1900" },
+    { "key": "quoteIntervalMs", "label": "Minimum ms between a symbol's chart updates", "type": "text", "default": "0" },
+    { "key": "logApi", "label": "Log REST/API to file", "type": "bool", "default": "true" },
+    { "key": "logWs", "label": "Log WebSocket to file", "type": "bool", "default": "true" },
+    { "key": "logDebug", "label": "Log verbose details", "type": "bool", "default": "false" }
+  ]
+}

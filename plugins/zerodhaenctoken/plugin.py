@@ -1,0 +1,2149 @@
+#!/usr/bin/env python3
+"""OpenTrader plugin: Zerodha Kite personal API with enctoken — market data over REST + WebSocket.
+
+Phase 1 (this file): datafeed only — the instrument master, search, history and live ticks. Trading is added
+later. The enctoken is the cookie from a logged-in kite.zerodha.com session; it goes in a masked setting and is
+never logged. Kite's REST quote endpoints need an OAuth key, so every live price here comes from the Kite ticker
+over wss://ws.kite.trade, exactly as broker/zerodhaenctoken does in OpenAlgo.
+
+The connection layer at the bottom is OpenTrader's plugin template, unchanged, except that requests run on their
+own threads and the source locks only the state each one touches (a slow history call must not hold up ticks).
+
+Run it:
+  - during development:  python plugin.py           (reads the connection file the app writes, see README)
+  - when installed:      the app starts the built executable and passes the connection in the environment.
+"""
+import base64
+import csv
+import gzip
+import hashlib
+import http.client
+import io
+import json
+import os
+import socket
+import ssl
+import struct
+import sys
+import threading
+import time
+import urllib.parse
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+PLUGIN_ID = "zerodhaenctoken"
+PLUGIN_VERSION = "0.2.19"
+API = 3  # password settings, per-plugin data folder, prompts on token expiry
+DEV_CONNECTION_FILE = "OpenTraderPlugins/zerodhaenctoken-dev.json"
+
+TZ_IST = timezone(timedelta(hours=5, minutes=30), "Asia/Kolkata")
+
+# Kite's own web app talks to these endpoints from a browser session. Send the ordinary browser headers
+# alongside the enctoken so the requests read as that same logged-in session, not as an unnamed script.
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36")
+# The ordinary CORS/client-hint headers the Kite web app sends on its own /oms calls. No Cookie header and no
+# Cloudflare clearance token: the enctoken in Authorization is the session, and those cookies cannot be copied
+# reliably (and must never be logged).
+BROWSER_HEADERS = {
+    "User-Agent": BROWSER_UA,
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://kite.zerodha.com",
+    "Referer": "https://kite.zerodha.com/",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Priority": "u=1, i",
+    "Sec-CH-UA": '"Not.A/Brand";v="24", "Chromium";v="158"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+KITE_VERSION = "3.0.0"
+
+# Kite's instruments master and personal API carry no logo, sector or industry. The company-info service used by
+# the app's OpenAlgo plugin fills those in for cash equities; a failed lookup is cached briefly and never fails
+# symbol_info. Tests point this at their fake server.
+COMPANY_API = "https://api.dharun.dev/v1"
+# NSE's official listing lists carry a DATE OF LISTING per symbol, used to cap how far back the app asks for a
+# symbol that has not existed that long. The SME file has slightly different headers and 2-digit years.
+NSE_EQUITY_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+NSE_SME_LIST_URL = "https://nsearchives.nseindia.com/emerge/corporates/content/SME_EQUITY_L.csv"
+HISTORY_DAYS_MAX = {"minute": 1825, "day": 10950}  # Kite serves day bars back to 2000, minute to at least 2024
+# Kite's corporate-actions endpoint refuses ranges over 1095 days, so walk it in 3-year chunks from this year.
+EVENTS_FROM = date(1990, 1, 1)
+EVENTS_CHUNK_DAYS = 1095
+
+# A Kite ticker connection carries at most 3000 instruments. The app can subscribe more (a large watchlist plus
+# charts and alerts), so keep the set within the broker's limit instead of losing the whole stream.
+MAX_TOKENS = 3000
+
+DEFAULT_API_URL = "https://kite.zerodha.com"
+DEFAULT_WS_URL = "wss://ws.kite.trade"
+DEFAULT_MASTER_URL = "https://api.kite.trade/instruments"
+DEFAULT_EXCHANGES = "NSE,BSE,NFO,BFO,CDS,BCD,MCX,NCO,NSE_INDEX,BSE_INDEX,MCX_INDEX,GLOBAL_INDEX"
+
+ALL_EXCHANGES = set(DEFAULT_EXCHANGES.split(","))
+INDEX_EXCHANGES = {"NSE": "NSE_INDEX", "BSE": "BSE_INDEX", "MCX": "MCX_INDEX", "CDS": "CDS_INDEX"}
+
+# Kite segment → the app's search-row type. The strings must match the app's vocabulary exactly.
+KINDS = {
+    "EQ": "stock", "BE": "stock", "SM": "stock", "MF": "fund", "MFP": "fund",
+    "IDX": "index", "IND": "index",
+    "FUT": "futures", "FUTCUR": "futures",
+    "CE": "option", "PE": "option", "OPT": "option", "CUR": "forex",
+}
+
+# Regular session in the market's clock. Indices follow their cash segment.
+SESSIONS = {
+    "NSE": "0915-1530", "BSE": "0915-1530", "NFO": "0915-1530", "BFO": "0915-1530",
+    "NCO": "0915-1530", "CDS": "0900-1700", "BCD": "0900-1700",
+    "MCX": "0900-2330", "GLOBAL_INDEX": "0000-2359:23456",
+}
+
+# Kite's index tradingsymbol → the app symbol users type. Ported from OpenAlgo's master loader.
+NSE_INDEX_NAMES = {
+    "NIFTY 50": "NIFTY", "NIFTY NEXT 50": "NIFTYNXT50", "NIFTY FIN SERVICE": "FINNIFTY",
+    "NIFTY BANK": "BANKNIFTY", "NIFTY MID SELECT": "MIDCPNIFTY", "INDIA VIX": "INDIAVIX",
+    "NIFTY 100": "NIFTY100", "NIFTY 200": "NIFTY200", "NIFTY 500": "NIFTY500",
+    "NIFTY ALPHA 50": "NIFTYALPHA50", "NIFTY AUTO": "NIFTYAUTO", "NIFTY COMMODITIES": "NIFTYCOMMODITIES",
+    "NIFTY CONSUMPTION": "NIFTYCONSUMPTION", "NIFTY CPSE": "NIFTYCPSE", "NIFTY DIV OPPS 50": "NIFTYDIVOPPS50",
+    "NIFTY ENERGY": "NIFTYENERGY", "NIFTY FMCG": "NIFTYFMCG", "NIFTY GROWSECT 15": "NIFTYGROWSECT15",
+    "NIFTY INFRA": "NIFTYINFRA", "NIFTY IT": "NIFTYIT", "NIFTY MEDIA": "NIFTYMEDIA",
+    "NIFTY METAL": "NIFTYMETAL", "NIFTY MNC": "NIFTYMNC", "NIFTY PHARMA": "NIFTYPHARMA",
+    "NIFTY PSE": "NIFTYPSE", "NIFTY PSU BANK": "NIFTYPSUBANK", "NIFTY PVT BANK": "NIFTYPVTBANK",
+    "NIFTY REALTY": "NIFTYREALTY", "NIFTY SERV SECTOR": "NIFTYSERVSECTOR",
+    "NIFTY MID LIQ 15": "NIFTYMIDLIQ15", "NIFTY MIDCAP 50": "NIFTYMIDCAP50",
+    "NIFTY MIDCAP 100": "NIFTYMIDCAP100", "NIFTY MIDCAP 150": "NIFTYMIDCAP150",
+    "NIFTY MIDSML 400": "NIFTYMIDSML400", "NIFTY SMLCAP 50": "NIFTYSMLCAP50",
+    "NIFTY SMLCAP 100": "NIFTYSMLCAP100", "NIFTY SMLCAP 250": "NIFTYSMLCAP250",
+    "NIFTY100 EQL WGT": "NIFTY100EQLWGT", "NIFTY100 LIQ 15": "NIFTY100LIQ15",
+    "NIFTY100 LOWVOL30": "NIFTY100LOWVOL30", "NIFTY100 QUALTY30": "NIFTY100QUALTY30",
+    "NIFTY200 QUALTY30": "NIFTY200QUALTY30", "NIFTY50 DIV POINT": "NIFTY50DIVPOINT",
+    "NIFTY50 EQL WGT": "NIFTY50EQLWGT", "NIFTY50 PR 1X INV": "NIFTY50PR1XINV",
+    "NIFTY50 PR 2X LEV": "NIFTY50PR2XLEV", "NIFTY50 TR 1X INV": "NIFTY50TR1XINV",
+    "NIFTY50 TR 2X LEV": "NIFTY50TR2XLEV", "NIFTY50 VALUE 20": "NIFTY50VALUE20",
+    "NIFTY GS 10YR": "NIFTYGS10YR", "NIFTY GS 10YR CLN": "NIFTYGS10YRCLN",
+    "NIFTY GS 11 15YR": "NIFTYGS1115YR", "NIFTY GS 15YRPLUS": "NIFTYGS15YRPLUS",
+    "NIFTY GS 4 8YR": "NIFTYGS48YR", "NIFTY GS 8 13YR": "NIFTYGS813YR",
+    "NIFTY GS COMPSITE": "NIFTYGSCOMPSITE",
+}
+BSE_INDEX_NAMES = {
+    "SNSX50": "SENSEX50", "SNXT50": "BSESENSEXNEXT50", "MID150": "BSE150MIDCAPINDEX",
+    "LMI250": "BSE250LARGEMIDCAPINDEX", "MSL400": "BSE400MIDSMALLCAPINDEX",
+    "AUTO": "BSEAUTO", "BSE CG": "BSECAPITALGOODS", "CARBON": "BSECARBONEX",
+    "BSE CD": "BSECONSUMERDURABLES", "CPSE": "BSECPSE", "DOL100": "BSEDOLLEX100",
+    "DOL200": "BSEDOLLEX200", "DOL30": "BSEDOLLEX30", "ENERGY": "BSEENERGY",
+    "BSEFMC": "BSEFASTMOVINGCONSUMERGOODS", "FINSER": "BSEFINANCIALSERVICES",
+    "GREENX": "BSEGREENX", "BSE HC": "BSEHEALTHCARE", "INFRA": "BSEINDIAINFRASTRUCTUREINDEX",
+    "INDSTR": "BSEINDUSTRIALS", "BSE IT": "BSEINFORMATIONTECHNOLOGY", "BSEIPO": "BSEIPO",
+    "LRGCAP": "BSELARGECAP", "METAL": "BSEMETAL", "MIDCAP": "BSEMIDCAP",
+    "MIDSEL": "BSEMIDCAPSELECTINDEX", "OILGAS": "BSEOIL&GAS", "POWER": "BSEPOWER",
+    "BSEPSU": "BSEPSU", "REALTY": "BSEREALTY", "SMLCAP": "BSESMALLCAP",
+    "SMLSEL": "BSESMALLCAPSELECTINDEX", "SMEIPO": "BSESMEIPO", "TECK": "BSETECK",
+    "TELCOM": "BSETELECOM",
+}
+GLOBAL_INDEX_NAMES = {"GIFT NIFTY": "GIFTNIFTY"}
+
+# Kite reports lot_size = 1 for every MCX row (quantity is in contracts). The real market lot is needed for
+# pointValue and, later, for turning units into Kite contracts. Ported from OpenAlgo's mcx_contract_size.py.
+MCX_CONTRACT_SIZES = {
+    "ALUMINI": 1, "ALUMINIUM": 5, "CARDAMOM": 100, "COPPER": 2500, "COTTON": 25,
+    "COTTONOIL": 5, "CRUDEOIL": 100, "CRUDEOILM": 10, "ELECDMBL": 50, "GOLD": 1,
+    "GOLDGUINEA": 8, "GOLDM": 100, "GOLDPETAL": 1, "GOLDTEN": 10, "KAPAS": 4,
+    "LEAD": 5, "LEADMINI": 1, "MCXBULLDEX": 30, "MCXMETLDEX": 40, "MENTHAOIL": 360,
+    "NATGASMINI": 250, "NATURALGAS": 1250, "NICKEL": 250, "SILVER": 30,
+    "SILVER100": 100, "SILVERM": 5, "SILVERMIC": 1, "STEELREBAR": 5, "ZINC": 5, "ZINCMINI": 1,
+}
+MCX_SIZE_REVISIONS = {"MCXBULLDEX": ((date(2026, 11, 1), 15),)}
+
+# App resolution → Kite interval token. 60 is deliberately omitted: Kite stamps 60-minute bars from 09:15,
+# while the app's hour grid starts on the clock hour; the app builds 60 from our 15-minute bars instead.
+INTERVALS = {
+    "1": "minute", "3": "3minute", "5": "5minute", "10": "10minute",
+    "15": "15minute", "30": "30minute", "1D": "day",
+}
+SERVED_INTERVALS = list(INTERVALS)
+
+PROFILE_PATH = "/oms/user/profile"
+HISTORY_PATH = "/oms/instruments/historical/{token}/{interval}"
+
+
+class PluginError(Exception):
+    """An error answered to the app; `message` is shown to the user."""
+
+    def __init__(self, message, code=-32000):
+        super().__init__(message)
+        self.code = code
+
+
+class AuthError(Exception):
+    """The enctoken was refused (403/401 or a Kite token error text)."""
+
+
+def num(v, default=None):
+    """A broker number that arrives as a string, blank, or not at all."""
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, (int, float)) and v == v:
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def ist_midnight(ts):
+    """Epoch seconds of `ts`'s trading day's midnight in IST (a daily bar's start)."""
+    day = datetime.fromtimestamp(ts, TZ_IST).date()
+    return int(datetime(day.year, day.month, day.day, tzinfo=TZ_IST).timestamp())
+
+
+def parse_kite_date(text):
+    """Kite's expiry ("2026-11-25" or "25-NOV-26") as a date, or None."""
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%d-%b-%y"):
+        try:
+            return datetime.strptime(text.strip(), fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def mcx_size(name, expiry_text):
+    """Real MCX contract size of an underlying, honouring revisions by expiry."""
+    if not isinstance(name, str):
+        return None
+    root = name.strip().upper()
+    size = MCX_CONTRACT_SIZES.get(root)
+    if size is None:
+        return None
+    expiry = parse_kite_date(expiry_text)
+    if expiry is not None:
+        for effective_from, revised in MCX_SIZE_REVISIONS.get(root, ()):
+            if expiry >= effective_from:
+                size = revised
+    return size
+
+
+def divisor_for_exchange(exchange):
+    """The Kite price divisor: CDS is quoted in 10^7 paise, BCD in 10^4, the rest in paise."""
+    return 10_000_000 if exchange == "CDS" else (10_000 if exchange == "BCD" else 100)
+
+
+def local_app_data():
+    if sys.platform == "win32":
+        return os.environ["LOCALAPPDATA"]
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support")
+    return os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+
+
+def plugin_data_dir():
+    env = os.environ.get("OPENTRADER_PLUGIN_DATA")
+    return Path(env) if env else Path(local_app_data()) / "OpenTraderPlugins" / PLUGIN_ID
+
+
+def parse_master_csv(text):
+    """Kite's public instrument CSV → rows keyed by (app exchange, ticker).
+
+    The app exchange is Kite's exchange; index segments get their own suffix and GLOBAL/NSEIX fold into
+    GLOBAL_INDEX. The ticker is Kite's tradingsymbol, with the major index names shortened the way users type
+    them. `token` is the instrument_token used by both history and the ticker.
+    """
+    out = []
+    for r in csv.DictReader(io.StringIO(text)):
+        kite_exchange = str(r.get("exchange") or "").strip().upper()
+        segment = str(r.get("segment") or "").strip().upper()
+        if segment == "INDICES":
+            app_exchange = INDEX_EXCHANGES.get(kite_exchange, kite_exchange)
+        elif kite_exchange in ("GLOBAL", "NSEIX"):
+            app_exchange = "GLOBAL_INDEX"
+        else:
+            app_exchange = kite_exchange
+        if app_exchange not in ALL_EXCHANGES:
+            continue
+        raw_ticker = str(r.get("tradingsymbol") or "").strip()
+        if not raw_ticker:
+            continue
+        if app_exchange == "NSE_INDEX":
+            ticker = NSE_INDEX_NAMES.get(raw_ticker, raw_ticker)
+        elif app_exchange == "BSE_INDEX":
+            ticker = BSE_INDEX_NAMES.get(raw_ticker, raw_ticker)
+        elif app_exchange == "GLOBAL_INDEX":
+            ticker = GLOBAL_INDEX_NAMES.get(raw_ticker, raw_ticker)
+        else:
+            ticker = raw_ticker
+
+        name = str(r.get("name") or "").strip() or raw_ticker
+        kind_raw = str(r.get("instrument_type") or "").strip().upper()
+        # Kite leaves instrument_type blank on index rows; the segment is the reliable signal.
+        kind = "index" if app_exchange.endswith("_INDEX") else KINDS.get(kind_raw, "stock")
+        tick = num(r.get("tick_size")) or 0.05
+        lot = num(r.get("lot_size")) or 1.0
+        if app_exchange == "MCX":
+            lot = mcx_size(name, str(r.get("expiry") or "")) or lot
+        expiry = str(r.get("expiry") or "").strip()
+        strike = num(r.get("strike"))
+        parts = [name]
+        if kind in ("futures", "option"):
+            # Kite's CSV often carries strike = 0 on futures (and on some options); it is "no strike",
+            # not a real value — showing it reads as "BANKEX 0 FUT ...".
+            if strike is not None and strike > 0:
+                parts.append(f"{strike:g}")
+            if kind_raw:
+                parts.append(kind_raw)
+            if expiry:
+                parts.append(expiry)
+        try:
+            token = int(str(r.get("instrument_token") or "").strip())
+        except ValueError:
+            continue
+        out.append({
+            "exchange": app_exchange, "ticker": ticker, "token": token,
+            "kite_exchange": kite_exchange, "name": name, "description": " ".join(parts),
+            "type": kind, "tick": tick, "lot": lot, "expiry": expiry,
+        })
+    return out
+
+
+class Instruments:
+    """The instrument master: one public CSV per day, cached in the plugin's data folder."""
+
+    def __init__(self, source):
+        self.source = source
+        self.lock = threading.RLock()
+        self.rows = []
+        self.by_key = {}
+        self.by_token = {}
+        self.by_kite = {}
+        self.token_meta = {}
+        self.catalog = None
+        self.day = None
+        self.loading = None
+
+    def _path(self, day):
+        # Versioned: a plugin update must not keep yesterday's normalisation of the same day's master.
+        return plugin_data_dir() / "cache" / f"master-{PLUGIN_VERSION}-{day}.json"
+
+    def ensure(self):
+        """Load today's master (memory → disk → Kite). Several callers share one fetch."""
+        today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
+        with self.lock:
+            if self.day == today:
+                return self.rows
+            if self.loading is None:
+                self.loading = threading.Event()
+                mine = True
+            else:
+                mine = False
+        if not mine:
+            self.loading.wait(60)
+            with self.lock:
+                return self.rows
+        rows = None
+        try:
+            path = self._path(today)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    rows = json.load(f)
+            except (OSError, ValueError):
+                pass
+            if rows is None:
+                text = self.source.fetch_master()
+                rows = parse_master_csv(text)
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(rows, f)
+                except OSError:
+                    pass
+            with self.lock:
+                self.rows = rows
+                self.by_key = {(r["exchange"], r["ticker"]): r for r in rows}
+                self.by_token = {r["token"]: r for r in rows}
+                # Hot path: the tick thread reads this on every packet without taking the instruments lock.
+                self.token_meta = {r["token"]: (f"{r['exchange']}:{r['ticker']}", r["tick"]) for r in rows}
+                self.by_kite = {(r["kite_exchange"], r["ticker"]): r for r in rows}
+                self.catalog = None
+                self.day = today
+                self.source.log(f"instrument master: {len(rows)} rows ready")
+        except Exception as e:
+            self.source.log(f"instrument master: {e}", "warn")
+            with self.lock:
+                if not self.rows:
+                    self.rows = []
+                    self.by_key = {}
+                    self.by_token = {}
+                    self.by_kite = {}
+                    self.token_meta = {}
+        finally:
+            with self.lock:
+                event, self.loading = self.loading, None
+            event.set()
+        return self.rows
+
+    def row(self, ticker):
+        """The row of a whole symbol ("NSE:RELIANCE"), or None."""
+        self.ensure()
+        exchange, sep, symbol = ticker.partition(":")
+        with self.lock:
+            if not sep:
+                return None
+            return self.by_key.get((exchange.upper(), symbol.upper()))
+
+    def token_row(self, token):
+        with self.lock:
+            return self.by_token.get(int(token))
+
+    def kite_row(self, kite_exchange, tradingsymbol):
+        """A book/postback row's Kite exchange + tradingsymbol → the master row (and app symbol)."""
+        self.ensure()
+        key = (str(kite_exchange or "").strip().upper(), str(tradingsymbol or "").strip())
+        with self.lock:
+            return self.by_kite.get(key)
+
+    def catalog_get(self):
+        """Precomputed search list: (ticker upper, name upper, whole symbol, type, description)."""
+        with self.lock:
+            if self.catalog is not None:
+                return self.catalog
+            catalog = [
+                (r["ticker"].upper(), r["name"].upper(), f"{r['exchange']}:{r['ticker']}",
+                 r["type"], r["description"])
+                for r in self.rows
+            ]
+            self.catalog = catalog
+            return catalog
+
+    def search(self, query, exchanges):
+        """Up to 50 rows, ranked symbol-prefix → symbol → name, spread over the segments in setting order."""
+        self.ensure()
+        q = query.strip().upper()
+        prefix, sep, rest = q.partition(":")
+        if sep and prefix in exchanges:
+            q = rest.strip()
+        tiers = ({}, {}, {})
+        for ticker_up, name_up, whole, kind, description in self.catalog_get():
+            exchange = whole.split(":", 1)[0]
+            if exchange not in exchanges:
+                continue
+            hit = (ticker_up, whole, kind, description)
+            if q and ticker_up.startswith(q):
+                tiers[0].setdefault(exchange, []).append(hit)
+            elif q and q in ticker_up:
+                tiers[1].setdefault(exchange, []).append(hit)
+            elif q and q in name_up:
+                tiers[2].setdefault(exchange, []).append(hit)
+            elif not q:
+                tiers[0].setdefault(exchange, []).append(hit)
+        out, seen = [], set()
+        for bucket in tiers:
+            for hits in bucket.values():
+                hits.sort()
+            segs = [bucket[e] for e in exchanges if e in bucket]
+            while segs and len(out) < 50:
+                for hits in list(segs):
+                    while hits:
+                        _, whole, kind, description = hits.pop(0)
+                        if whole in seen:
+                            continue
+                        seen.add(whole)
+                        out.append({"ticker": whole, "description": description, "type": kind})
+                        break
+                    if not hits:
+                        segs.remove(hits)
+        return out
+
+
+class ZerodhaWS:
+    """Minimal Kite ticker over stdlib socket: handshake, masked client frames, binary packet parsing.
+
+    `websocket-client` would be simpler but the template is stdlib-only (PyInstaller builds one file with no
+    extra wheels). The stream runs on its own thread, reconnects with backoff and resubscribes on reconnect.
+    """
+
+    def __init__(self, source):
+        self.source = source
+        self.lock = threading.Lock()
+        self.url = ""
+        self.sock = None
+        self.buf = bytearray()
+        self.tokens = {}  # instrument_token → mode; the whole set the app wants
+        self.connected = False
+        self.last_message = 0.0
+        self.retries = 0
+        self.stop = threading.Event()
+
+    def log(self, message, level="info"):
+        self.source.log(message, level, "ws")
+
+    # ── frames ──
+    def _send_frame(self, opcode, payload, masked=True):
+        n = len(payload)
+        header = bytearray([0x80 | opcode])
+        flag = 0x80 if masked else 0
+        if n < 126:
+            header.append(flag | n)
+        elif n < 65536:
+            header.append(flag | 126)
+            header += struct.pack(">H", n)
+        else:
+            header.append(flag | 127)
+            header += struct.pack(">Q", n)
+        if masked:
+            mask = os.urandom(4)
+            header += mask
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        with self.lock:
+            if self.sock is not None:
+                self.sock.sendall(bytes(header) + payload)
+
+    def _send_json(self, obj):
+        self._send_frame(0x1, json.dumps(obj, separators=(",", ":")).encode("utf-8"))
+
+    def _frames(self):
+        """Yield complete (opcode, payload) frames, leaving partial ones in the buffer."""
+        while True:
+            b = self.buf
+            if len(b) < 2:
+                return
+            opcode = b[0] & 0x0F
+            masked = bool(b[1] & 0x80)
+            n = b[1] & 0x7F
+            at = 2
+            if n == 126:
+                if len(b) < 4:
+                    return
+                n = struct.unpack(">H", b[2:4])[0]
+                at = 4
+            elif n == 127:
+                if len(b) < 10:
+                    return
+                n = struct.unpack(">Q", b[2:10])[0]
+                at = 10
+            mask = b""
+            if masked:
+                if len(b) < at + 4:
+                    return
+                mask = b[at:at + 4]
+                at += 4
+            if len(b) < at + n:
+                return
+            payload = bytes(b[at:at + n])
+            if masked:
+                payload = bytes(x ^ mask[i % 4] for i, x in enumerate(payload))
+            del self.buf[:at + n]
+            yield opcode, payload
+
+    # ── subscriptions ──
+    def update(self, modes):
+        """Replace the subscribed tokens with a token → mode map ('quote' or 'full').
+
+        The order ticket needs a real bid/ask and the DOM needs the book, so those tokens stream in Kite's
+        full mode; chart-only tokens stay in quote mode. The stream carries one mode per token.
+        """
+        new = {int(t): m for t, m in modes.items()}
+        if len(new) > MAX_TOKENS:
+            self.source.log(f"watchlist/charts want {len(new)} tokens; Kite allows {MAX_TOKENS} — "
+                            f"subscribing to the first {MAX_TOKENS}", "warn")
+            new = dict(list(new.items())[:MAX_TOKENS])
+        with self.lock:
+            removed = set(self.tokens) - set(new)
+            added, changed = [], []
+            for token, mode in new.items():
+                if token not in self.tokens:
+                    added.append(token)
+                elif self.tokens[token] != mode:
+                    changed.append(token)
+            self.tokens = new
+        if removed and self.connected:
+            self._send_json({"a": "unsubscribe", "v": sorted(removed)})
+        for group, is_added in ((added, True), (changed, False)):
+            by_mode = {}
+            for token in group:
+                by_mode.setdefault(new[token], []).append(token)
+            for mode, tokens in by_mode.items():
+                if is_added:
+                    self._subscribe(sorted(tokens), mode)
+                elif self.connected:
+                    self._send_json({"a": "mode", "v": [mode, sorted(tokens)]})
+
+    def _subscribe(self, tokens, mode):
+        """Kite takes up to 3000 tokens per connection; batches of 200 keep each frame small."""
+        if not self.connected:
+            return
+        for i in range(0, len(tokens), 200):
+            batch = tokens[i:i + 200]
+            self._send_json({"a": "subscribe", "v": batch})
+            self._send_json({"a": "mode", "v": [mode, batch]})
+            time.sleep(0.05)
+
+    def _resubscribe(self):
+        with self.lock:
+            by_mode = {}
+            for token, mode in self.tokens.items():
+                by_mode.setdefault(mode, []).append(token)
+        for mode, tokens in by_mode.items():
+            self._subscribe(sorted(tokens), mode)
+
+    # ── connection ──
+    def run(self, generation):
+        while self.source.ws_generation == generation and not self.stop.is_set():
+            try:
+                self._once(generation)
+            except AuthError as e:
+                self.log(f"enctoken refused: {e}", "warn")
+                self.source.auth_failed()
+                return
+            except Exception as e:  # noqa: BLE001 - the stream is best effort; it retries
+                self.log(f"stream reconnecting ({self.source.clean(str(e))})", "warn")
+            self.connected = False
+            if self.source.ws_generation != generation or self.stop.is_set():
+                return
+            delay = min(2 * (1.5 ** min(self.retries, 8)), 30)
+            self.retries += 1
+            if self.stop.wait(delay):
+                return
+
+    def _once(self, generation):
+        url = self.source.ws_url()
+        self.url = url
+        parts = urllib.parse.urlsplit(url)
+        secure = parts.scheme == "wss"
+        host = parts.hostname or "127.0.0.1"
+        port = parts.port or (443 if secure else 80)
+        target = parts.path or "/"
+        if parts.query:
+            target += "?" + parts.query
+        raw = socket.create_connection((host, port), timeout=10)
+        sock = ssl.create_default_context().wrap_socket(raw, server_hostname=host) if secure else raw
+        try:
+            challenge = base64.b64encode(os.urandom(16)).decode()
+            sock.sendall((f"GET {target} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+                          f"User-Agent: {BROWSER_UA}\r\n"
+                          f"Accept-Language: {BROWSER_HEADERS['Accept-Language']}\r\n"
+                          "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                          f"Sec-WebSocket-Key: {challenge}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise OSError("the stream closed during the handshake")
+                head += chunk
+            header, _, rest = head.partition(b"\r\n\r\n")
+            status = header.split(b"\r\n", 1)[0]
+            if b" 101" not in status:
+                text = status.decode(errors="replace")
+                if b" 403" in status or b" 401" in status:
+                    raise AuthError(text)
+                raise OSError(text)
+            accept = base64.b64encode(hashlib.sha1(
+                (challenge + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+            if accept.encode() not in header:
+                raise OSError("the stream's WebSocket accept does not match")
+            with self.lock:
+                self.sock = sock
+                self.buf = bytearray(rest)
+                self.connected = True
+                self.last_message = time.time()
+            self.retries = 0
+            self.log("connected")
+            self._resubscribe()
+            sock.settimeout(60)
+            while self.source.ws_generation == generation and not self.stop.is_set():
+                chunk = sock.recv(65536)
+                if not chunk:
+                    raise OSError("the stream closed")
+                self.buf += chunk
+                for opcode, payload in self._frames():
+                    self._frame(opcode, payload)
+        finally:
+            with self.lock:
+                self.sock = None
+                self.connected = False
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _frame(self, opcode, payload):
+        self.last_message = time.time()
+        if opcode == 0x8:  # close
+            raise OSError("the stream sent a close frame")
+        if opcode == 0x9:  # ping → pong
+            self._send_frame(0xA, payload, masked=True)
+            return
+        if opcode == 0xA:
+            return
+        if opcode == 0x1:
+            try:
+                data = json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                return
+            if data.get("type") == "error":
+                text = str(data.get("data") or "")
+                lower = text.lower()
+                if any(x in lower for x in ("403", "401", "token", "unauthor", "forbidden")):
+                    raise AuthError(text)
+                self.log(self.source.clean(text), "warn")
+            elif data.get("type") == "order" and data.get("data"):
+                # Kite pushes order postbacks on the ticker without a subscription (phase 2).
+                self.source.on_order_update(data["data"])
+            return
+        if opcode != 0x2 or len(payload) == 0:
+            return
+        if len(payload) == 1:  # Kite's one-byte heartbeat
+            return
+        ticks = self._parse_binary(payload)
+        if ticks:
+            self.source.on_ticks(ticks)
+
+    def _parse_binary(self, data):
+        if len(data) < 2:
+            return []
+        count = struct.unpack(">H", data[0:2])[0]
+        out, at = [], 2
+        for _ in range(count):
+            if at + 2 > len(data):
+                break
+            n = struct.unpack(">H", data[at:at + 2])[0]
+            at += 2
+            if at + n > len(data):
+                break
+            packet, at = data[at:at + n], at + n
+            token = struct.unpack(">I", packet[0:4])[0] if len(packet) >= 4 else 0
+            divisor = self.source.divisor_for(token)
+            tick = self._parse_packet(packet, divisor)
+            if tick:
+                out.append(tick)
+        return out
+
+    @staticmethod
+    def _parse_packet(packet, divisor):
+        """Kite's binary layouts: 8 = LTP, 28/32 = index, 44 = quote, 184 = full (depth)."""
+        if len(packet) < 8:
+            return None
+        token = struct.unpack(">I", packet[0:4])[0]
+        try:
+            ltp = struct.unpack(">i", packet[4:8])[0] / divisor
+        except struct.error:
+            return None
+        mode = "ltp" if len(packet) == 8 else ("full" if len(packet) >= 184 else "quote")
+        tick = {"instrument_token": token, "last_price": ltp, "mode": mode, "ohlc": {}}
+        if len(packet) in (28, 32):
+            # Index layout: token, ltp, high, low, open, close (previous close), change.
+            f = struct.unpack(">7i", packet[0:28])
+            tick["ohlc"] = {"open": f[4] / 100.0, "high": f[2] / 100.0,
+                            "low": f[3] / 100.0, "close": f[5] / 100.0}
+        if len(packet) >= 44:
+            f = struct.unpack(">11i", packet[0:44])
+            tick.update(volume=f[4], last_traded_quantity=f[2],
+                        average_traded_price=f[3] / divisor,
+                        total_buy_quantity=f[5], total_sell_quantity=f[6])
+            tick["ohlc"] = {"open": f[7] / divisor, "high": f[8] / divisor,
+                            "low": f[9] / divisor, "close": f[10] / divisor}
+        if len(packet) >= 184:
+            depth = {"buy": [], "sell": []}
+            for side, start in (("buy", 64), ("sell", 124)):
+                for i in range(5):
+                    base = start + i * 12
+                    if base + 12 <= len(packet):
+                        qty = struct.unpack(">I", packet[base:base + 4])[0]
+                        price = struct.unpack(">I", packet[base + 4:base + 8])[0] / divisor
+                        orders = struct.unpack(">H", packet[base + 8:base + 10])[0]
+                        depth[side].append({"quantity": qty, "price": price, "orders": orders})
+            tick["depth"] = depth
+        return tick
+
+
+class ZerodhaSource:
+    # ── the source you replace: every method is called from an app request; keep the return shapes ──
+    def __init__(self):
+        self.plugin = None
+        self.lock = threading.RLock()
+        self.settings = {}
+        self.exchanges = []
+        self.enctoken = ""
+        self.user_id = ""
+        self.instruments = Instruments(self)
+        self.quotes = {}  # whole symbol → live price cache and forming bars
+        self.subscribed = set()  # whole symbols from data.subscribe
+        self.ws = None
+        self.ws_generation = 0
+        self.awaiting_token = False
+        self.prompt_id = "enctoken-refresh"
+        # Per-request history caps come from settings (like the OpenAlgo plugin); see _cap().
+        # ── broker (phase 2) ──
+        self.broker_enabled = False
+        self.watched = set()  # broker.watchQuote — ticket bid/ask
+        self.watched_depth = set()  # broker.watchDepth — DOM
+        self.margins = None
+        self.positions = []
+        self.orders = {}  # order id → the app's order dict
+        self.executions = []
+        self.connected_broker = False
+        self.last_poll = 0.0
+        self.broker_poll = None
+        self.order_seq = 0
+        self._profiles = {}  # ticker → {name, sector, industry, oneLine}
+        self._profile_failed_until = 0.0
+        self._listings = {}  # bare symbol → listing epoch seconds
+        self._listings_day = None
+        self.company_details = True
+        self.quote_interval = 0  # ms between data.quote updates per symbol; 0 = every tick
+        self._events = {}  # token → (day, corporate actions)
+        self._prune_caches()
+
+    # ── cache housekeeping ──
+    def _prune_caches(self):
+        """Drop stale day-stamped cache files so a long-running install doesn't accumulate ~30 MB a day."""
+        root = plugin_data_dir() / "cache"
+        today = datetime.now(TZ_IST).date()
+        yesterday = today - timedelta(days=1)
+        removed = 0
+        try:
+            for path in root.glob("master-*.json"):
+                parts = path.stem.split("-")
+                if len(parts) < 5:
+                    continue  # not a master-<version>-<day> file
+                version, day_text = "-".join(parts[1:-3]), "-".join(parts[-3:])
+                try:
+                    day = date.fromisoformat(day_text)
+                except ValueError:
+                    continue
+                if version == PLUGIN_VERSION and day in (today, yesterday):
+                    continue
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+            for path in root.glob("nse-listings-*.json"):
+                day_text = path.stem.rsplit("-", 1)[-1]
+                try:
+                    day = date.fromisoformat(day_text)
+                except ValueError:
+                    continue
+                if day == today:
+                    continue
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+            for path in (root / "events").glob("*-*.json"):
+                parts = path.stem.split("-")
+                if len(parts) < 4:
+                    continue
+                day_text = "-".join(parts[-3:])
+                try:
+                    day = date.fromisoformat(day_text)
+                except ValueError:
+                    continue
+                if day == today:
+                    continue
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        if removed:
+            self.log(f"cache prune: removed {removed} stale file(s)")
+
+    # ── settings and logging ──
+    def clean(self, text):
+        """A message with the enctoken removed (nothing secret reaches the log)."""
+        s = str(text)
+        return s.replace(self.enctoken, "…") if self.enctoken and self.enctoken in s else s
+
+    def _log_enabled(self, category):
+        key = {"api": "logApi", "ws": "logWs", "debug": "logDebug"}.get(category, "logApi")
+        default = "false" if category == "debug" else "true"
+        return str(self.settings.get(key, default)).strip().lower() == "true"
+
+    def _log_path(self, category):
+        return plugin_data_dir() / ("zerodha-ws.log" if category == "ws" else "zerodha-api.log")
+
+    def _write_log(self, category, line):
+        """Append to a per-category file with a rolling ~1 MB cap. Logging must never break the plugin."""
+        try:
+            path = self._log_path(category)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if path.exists() and path.stat().st_size > 1024 * 1024:
+                    data = path.read_bytes()
+                    path.write_bytes(data[-512 * 1024:])
+            except OSError:
+                pass
+            with path.open("a", encoding="utf-8") as f:
+                f.write(line.rstrip("\n") + "\n")
+        except OSError:
+            pass
+
+    def log(self, message, level="info", category="api"):
+        """One line to the app's plugin log, stdout when run by hand, and to a file for live debugging."""
+        text = self.clean(message)
+        p = self.plugin
+        if p and p.alive:
+            p.notify("log", {"level": level, "message": f"[{category}] {text}"})
+        else:
+            print(text, flush=True)
+        if self._log_enabled(category):
+            stamp = datetime.now(TZ_IST).strftime("%Y-%m-%d %H:%M:%S")
+            self._write_log(category, f"{stamp} [{level}] [{category}] {text}")
+
+    def configure(self, settings, provides=None):
+        with self.lock:
+            changed = (settings.get("enctoken") != self.enctoken
+                       or settings.get("userId") != self.user_id
+                       or settings.get("apiUrl") != self.settings.get("apiUrl")
+                       or settings.get("wsUrl") != self.settings.get("wsUrl"))
+            self.settings = dict(settings)
+            self.enctoken = str(settings.get("enctoken") or "").strip()
+            self.user_id = str(settings.get("userId") or "").strip()
+            self.exchanges = [e.strip().upper() for e in
+                              (settings.get("exchanges") or DEFAULT_EXCHANGES).split(",") if e.strip()]
+            self.broker_enabled = "broker" in provides if provides is not None else self.broker_enabled
+            self.company_details = str(settings.get("companyDetails", "true")).strip().lower() == "true"
+            try:
+                self.quote_interval = max(0, int(float(settings.get("quoteIntervalMs", 0) or 0)))
+            except (TypeError, ValueError):
+                self.quote_interval = 0
+            self.awaiting_token = False
+            gen = self.ws_generation + 1
+        self.log(f"configure: enctoken={'set' if self.enctoken else 'empty'}, "
+                 f"user={self.user_id or 'auto'}, exchanges={','.join(self.exchanges)}, "
+                 f"capabilities={','.join(provides) if provides is not None else 'unchanged'}, "
+                 f"broker={'on' if self.broker_enabled else 'off'}")
+        threading.Thread(target=self.instruments.ensure, daemon=True).start()
+        if changed or self.ws is None:
+            self._start_ws(gen)
+        if self.broker_enabled and self.broker_poll is None:
+            self.broker_poll = threading.Thread(target=self._poll_loop, daemon=True, name="ZerodhaPoll")
+            self.broker_poll.start()
+
+    def auth_failed(self):
+        """A 403 on the stream: ask for a fresh enctoken instead of leaving the feed dead until a restart."""
+        with self.lock:
+            if self.awaiting_token:
+                return
+            self.awaiting_token = True
+        self.log("The enctoken was refused — ask for a fresh one from kite.zerodha.com", "warn")
+        p = self.plugin
+        if p and p.alive:
+            p.notify("plugin.prompt", {
+                "id": self.prompt_id, "title": "Zerodha enctoken expired",
+                "message": "Log in at kite.zerodha.com, copy the enctoken cookie, and paste it here.",
+                "input": "password", "image": None,
+            })
+
+    def on_prompt_answer(self, prompt_id, value):
+        if prompt_id != self.prompt_id:
+            return
+        with self.lock:
+            if not self.awaiting_token:
+                return
+            if not value:
+                self.awaiting_token = False
+                self.log("Enctoken refresh cancelled; the stream stays stopped", "warn")
+                return
+            self.enctoken = str(value).strip()
+            self.settings["enctoken"] = self.enctoken
+            self.awaiting_token = False
+            gen = self.ws_generation + 1
+        self.log("Enctoken refreshed; reconnecting")
+        self._start_ws(gen)
+
+    # ── REST ──
+    def _base(self):
+        return str(self.settings.get("apiUrl", DEFAULT_API_URL)).rstrip("/")
+
+    def _master_url(self):
+        return str(self.settings.get("masterUrl", DEFAULT_MASTER_URL))
+
+    def fetch_master(self):
+        """Kite's public instrument CSV — one GET, no auth, optionally gzip-encoded."""
+        url = urllib.parse.urlsplit(self._master_url())
+        secure = url.scheme == "https"
+        host = url.hostname or "api.kite.trade"
+        port = url.port or (443 if secure else 80)
+        target = url.path or "/instruments"
+        if url.query:
+            target += "?" + url.query
+        conn = (http.client.HTTPSConnection(host, port, timeout=30) if secure
+                else http.client.HTTPConnection(host, port, timeout=30))
+        try:
+            headers = dict(BROWSER_HEADERS)
+            headers.update({"Accept": "text/csv,*/*", "Accept-Encoding": "gzip"})
+            conn.request("GET", target, headers=headers)
+            r = conn.getresponse()
+            raw = r.read()
+            if r.status != 200:
+                raise PluginError(f"Instrument master answered HTTP {r.status}")
+            if (r.getheader("Content-Encoding") or "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+            return raw.decode("utf-8", errors="replace")
+        except (OSError, http.client.HTTPException, PluginError) as e:
+            raise PluginError(f"Cannot download the instrument master ({self.clean(str(e))})") from None
+        finally:
+            conn.close()
+
+    def _rest(self, path, method="GET", body=None, timeout=10):
+        """One call on Kite's personal /oms API with the enctoken header; (status, body bytes) or PluginError."""
+        if not self.enctoken:
+            raise PluginError("The Zerodha plugin has no enctoken yet — fill it in Settings > Plugins")
+        base = urllib.parse.urlsplit(self._base())
+        secure = base.scheme == "https"
+        host = base.hostname or "kite.zerodha.com"
+        port = base.port or (443 if secure else 80)
+        conn = (http.client.HTTPSConnection(host, port, timeout=timeout) if secure
+                else http.client.HTTPConnection(host, port, timeout=timeout))
+        try:
+            headers = dict(BROWSER_HEADERS)
+            headers.update({
+                "Authorization": f"enctoken {self.enctoken}",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Encoding": "gzip",  # handled below; no brotli/zstd so the body stays readable
+                "X-Kite-Version": KITE_VERSION,
+            })
+            if self.user_id:
+                headers["X-Kite-Userid"] = self.user_id
+            payload = None
+            if body is not None:
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
+                payload = urllib.parse.urlencode({k: str(v) for k, v in body.items()})
+            conn.request(method, path, body=payload, headers=headers)
+            r = conn.getresponse()
+            raw = r.read()
+            if (r.getheader("Content-Encoding") or "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+            return r.status, raw
+        except (OSError, http.client.HTTPException) as e:
+            raise PluginError(f"Zerodha is not reachable ({self.clean(str(e))})") from None
+        finally:
+            conn.close()
+
+    def _json(self, path, method="GET", body=None, timeout=10):
+        status, raw = self._rest(path, method, body, timeout)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise PluginError(f"Zerodha answered HTTP {status} with no JSON") from None
+        if status in (401, 403) or data.get("error_type") == "TokenException":
+            raise AuthError(str(data.get("message") or f"HTTP {status}"))
+        if status == 429:
+            raise PluginError("Zerodha is rate limiting history — the app will ask again later", -32005)
+        if status >= 500:
+            raise PluginError(f"Zerodha answered HTTP {status} — the app will ask again later", -32005)
+        if str(data.get("status", "")).lower() not in ("success", "ok"):
+            raise PluginError(f"Zerodha: {data.get('message') or 'the request failed'}")
+        return data.get("data", data)
+
+    def profile_user_id(self):
+        """The Zerodha user id the ticker URL needs; a blank setting means look it up once."""
+        if self.user_id:
+            return self.user_id
+        try:
+            data = self._json(PROFILE_PATH)
+            uid = str(data.get("user_id") or "").strip()
+        except AuthError:
+            raise  # an expired enctoken must reach the refresh prompt, not become a generic error
+        except PluginError as e:
+            raise PluginError(f"Cannot read the Zerodha user id — set userId in Settings ({self.clean(str(e))})") from None
+        if not uid:
+            raise PluginError("Zerodha did not return a user id — set userId in Settings")
+        self.user_id = uid
+        return uid
+
+    def ws_url(self):
+        """Kite's ticker URL. A proxy may set wsUrl with its own query; otherwise build it from the enctoken.
+
+        The token is percent-encoded: it contains '+' and '/', which a query parser would otherwise read as a
+        space. Nothing here is logged.
+        """
+        base = str(self.settings.get("wsUrl", DEFAULT_WS_URL)).rstrip("/")
+        if "access_token=" in base:
+            return base
+        uid = self.profile_user_id()
+        return (f"{base}?api_key=kitefront"
+                f"&access_token={urllib.parse.quote(self.enctoken, safe='')}"
+                f"&user_id={urllib.parse.quote(uid, safe='')}")
+
+    # ── company details and logo (Kite has neither; the external service is best effort) ──
+    @staticmethod
+    def _external_json(url, timeout=5):
+        """One public GET, no credentials, no log. None on any problem."""
+        parts = urllib.parse.urlsplit(url)
+        secure = parts.scheme == "https"
+        host = parts.hostname
+        if not host:
+            return None
+        port = parts.port or (443 if secure else 80)
+        target = parts.path or "/"
+        if parts.query:
+            target += "?" + parts.query
+        conn = (http.client.HTTPSConnection(host, port, timeout=timeout) if secure
+                else http.client.HTTPConnection(host, port, timeout=timeout))
+        try:
+            conn.request("GET", target, headers={
+                "User-Agent": BROWSER_UA, "Accept": "application/json", "Accept-Encoding": "gzip",
+            })
+            r = conn.getresponse()
+            raw = r.read()
+            if (r.getheader("Content-Encoding") or "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+            if r.status != 200:
+                return None
+            return json.loads(raw.decode("utf-8"))
+        except Exception:  # noqa: BLE001 - an external enrichment must never break symbol info
+            return None
+        finally:
+            conn.close()
+
+    def _company_profile(self, ticker):
+        """sector/industry/name for a cash equity, cached in memory with a short backoff on failure."""
+        with self.lock:
+            hit = self._profiles.get(ticker)
+            if hit is not None:
+                return hit
+            if time.monotonic() < self._profile_failed_until:
+                return None
+        answer = self._external_json(f"{COMPANY_API}/companies/{urllib.parse.quote(ticker, safe='')}")
+        row = (answer or {}).get("data")
+        profile = None
+        if isinstance(row, dict):
+            profile = {k: str(row[k]) for k in ("name", "company", "sector", "industry", "oneLine") if row.get(k)}
+            if profile.get("company") and not profile.get("name"):
+                profile["name"] = profile["company"]
+        with self.lock:
+            if profile is None:
+                self._profile_failed_until = time.monotonic() + 60.0
+            else:
+                self._profiles[ticker] = profile
+        return profile
+
+    # ── per-symbol history depth from NSE's listing lists ──
+    @staticmethod
+    def _public_csv(url, timeout=20):
+        """A public CSV GET with the same browser headers; '' on any problem."""
+        parts = urllib.parse.urlsplit(url)
+        if not parts.hostname:
+            return ""
+        secure = parts.scheme == "https"
+        conn = (http.client.HTTPSConnection(parts.hostname, parts.port or 443, timeout=timeout) if secure
+                else http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=timeout))
+        try:
+            headers = dict(BROWSER_HEADERS)
+            headers.update({"Accept": "text/csv,*/*", "Referer": "https://www.nseindia.com/"})
+            conn.request("GET", parts.path or "/", headers=headers)
+            r = conn.getresponse()
+            raw = r.read()
+            if (r.getheader("Content-Encoding") or "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+            if r.status != 200:
+                return ""
+            return raw.decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - enrichment must never break symbol info
+            return ""
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _parse_listing_date(text):
+        for fmt in ("%d-%b-%Y", "%d-%b-%y", "%Y-%m-%d"):
+            try:
+                d = datetime.strptime(str(text).strip(), fmt).date()
+                return int(datetime(d.year, d.month, d.day, tzinfo=TZ_IST).timestamp())
+            except (ValueError, TypeError):
+                pass
+        return None
+
+    def _load_listings(self):
+        today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
+        with self.lock:
+            if self._listings_day == today:
+                return
+        path = plugin_data_dir() / "cache" / f"nse-listings-{today}.json"
+        data = None
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            pass
+        if data is None:
+            data = {}
+            for url in (NSE_EQUITY_LIST_URL, NSE_SME_LIST_URL):
+                text = self._public_csv(url)
+                if not text:
+                    continue
+                for raw in csv.DictReader(io.StringIO(text)):
+                    row = {str(k).strip(): str(v or "").strip() for k, v in raw.items() if k}
+                    symbol = row.get("SYMBOL") or ""
+                    date_text = row.get("DATE OF LISTING") or row.get("DATE_OF_LISTING") or ""
+                    if not symbol or not date_text:
+                        continue
+                    when = self._parse_listing_date(date_text)
+                    if when:
+                        data[symbol.upper()] = when
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+            except OSError:
+                pass
+        with self.lock:
+            self._listings, self._listings_day = data, today
+
+    def _listed_text(self, symbol):
+        """dd/mm/yyyy listing date of an NSE symbol, or None (used in longDescription: the app has no field)."""
+        if not symbol:
+            return None
+        self._load_listings()
+        with self.lock:
+            when = self._listings.get(symbol.upper())
+        return datetime.fromtimestamp(when, TZ_IST).strftime("%d/%m/%Y") if when else None
+
+    def _history_depth(self, row):
+        """How far back the app may ask for this symbol, bounded by its listing date and Kite's coverage."""
+        listed = None
+        if row["exchange"] == "NSE":
+            self._load_listings()
+            with self.lock:
+                when = self._listings.get(row["ticker"].upper())
+            if when:
+                listed = max(1, int((time.time() - when) / 86400))
+        day = min(HISTORY_DAYS_MAX["day"], listed) if listed else HISTORY_DAYS_MAX["day"]
+        minute = min(HISTORY_DAYS_MAX["minute"], listed) if listed else HISTORY_DAYS_MAX["minute"]
+        if row["exchange"] == "NCO":
+            return {"day": day}
+        return {"minute": minute, "day": day}
+
+    # ── WebSocket lifecycle ──
+    def _start_ws(self, generation):
+        if self.ws is not None:
+            self.ws.stop.set()
+        self.ws_generation = generation
+        if not self.enctoken:
+            self.log("No enctoken yet — live prices will start once it is set", "warn")
+            return
+        ws = ZerodhaWS(self)
+        self.ws = ws
+        threading.Thread(target=ws.run, args=(generation,), daemon=True, name="ZerodhaWS").start()
+
+    def divisor_for(self, token):
+        row = self.instruments.token_row(token)
+        return divisor_for_exchange(row["kite_exchange"]) if row else 100
+
+    def set_subscriptions(self, tickers):
+        """data.subscribe replaces the whole set; keep tickers we cannot serve yet (master still loading)."""
+        with self.lock:
+            self.subscribed = set(tickers)
+        self.forward_subscription()
+
+    def _ws_modes(self):
+        """Chart symbols stream in quote mode; the ticket and DOM need the full packet with depth."""
+        with self.lock:
+            tickers = set(self.subscribed) | set(self.watched) | set(self.watched_depth)
+            full = set(self.watched) | set(self.watched_depth)
+        modes = {}
+        for ticker in tickers:
+            row = self.instruments.row(ticker)
+            if row:
+                with self.lock:
+                    self.quotes.setdefault(ticker, {})
+                modes[row["token"]] = "full" if ticker in full else "quote"
+        return modes
+
+    def forward_subscription(self):
+        modes = self._ws_modes()
+        if modes:
+            self.log(f"stream subscription: {len(modes)} tokens "
+                     f"({sum(1 for m in modes.values() if m == 'full')} full)", "debug")
+        if self.ws is not None:
+            self.ws.update(modes)
+
+    def set_watch(self, method, tickers):
+        with self.lock:
+            if method == "broker.watchQuote":
+                self.watched = set(tickers)
+            else:
+                self.watched_depth = set(tickers)
+        self.forward_subscription()
+
+    @staticmethod
+    def _bid_ask(q, tick_size):
+        depth = q.get("depth") or {}
+        buy, sell = depth.get("buy") or [], depth.get("sell") or []
+        if buy and sell:
+            return num(buy[0].get("price")), num(sell[0].get("price"))
+        price = q.get("price") or 0
+        return round(price - tick_size, 10), round(price + tick_size, 10)
+
+    @staticmethod
+    def _quote_of(ticker, q):
+        return {
+            "ticker": ticker, "time": int(time.time()), "price": q["price"],
+            "prevClose": q.get("prevClose"),
+            "minute": list(q.get("minute") or []), "day": list(q.get("day") or []),
+        }
+
+    def on_ticks(self, ticks):
+        """Update the cache once per frame, then write all notifications in a single socket call.
+
+        Kite already groups the ticks of a moment in one binary frame. Coalescing here avoids one JSON-RPC
+        message and one sendall per tick when thousands of watchlist symbols are streaming. An optional
+        per-symbol interval (quoteIntervalMs) caps chart updates without touching the ticket's quote or DOM.
+        """
+        p = self.plugin
+        now = int(time.time())
+        now_ms = time.time() * 1000
+        messages = []
+        with self.lock:
+            for t in ticks:
+                token = t.get("instrument_token")
+                price = t.get("last_price") or 0
+                if price <= 0:
+                    continue
+                meta = self.instruments.token_meta.get(token)  # lock-free, replaced atomically on master reload
+                if meta is None:
+                    continue
+                ticker, tick_size = meta
+                if ticker not in self.subscribed and ticker not in self.watched and ticker not in self.watched_depth:
+                    continue
+                q = self.quotes.setdefault(ticker, {})
+                ohlc = t.get("ohlc") or {}
+                prev = ohlc.get("close") or 0
+                if prev > 0:
+                    q["prevClose"] = prev
+                volume = t.get("volume") or 0
+                day_start = ist_midnight(now)
+                d = q.get("day")
+                if not d or d[0] != day_start:
+                    d = [day_start, ohlc.get("open") or price, ohlc.get("high") or price,
+                         ohlc.get("low") or price, price, volume]
+                    q["_last_vol"] = 0
+                else:
+                    d = list(d)
+                    d[2] = max(d[2], ohlc.get("high") or price)
+                    d[3] = min(d[3], ohlc.get("low") or price)
+                    d[4], d[5] = price, volume
+                q["day"] = d
+                minute_start = now // 60 * 60
+                delta = max(0, volume - (q.get("_last_vol") or 0))
+                q["_last_vol"] = volume
+                m = q.get("minute")
+                if not m or m[0] != minute_start:
+                    m = [minute_start, price, price, price, price, delta]
+                else:
+                    m = list(m)
+                    m[2], m[3], m[4] = max(m[2], price), min(m[3], price), price
+                    m[5] = (m[5] or 0) + delta
+                q["minute"] = m
+                q["price"] = price
+                if t.get("depth"):
+                    q["depth"] = t["depth"]
+
+                if ticker in self.subscribed and (
+                        not self.quote_interval or now_ms - (q.get("_last_sent") or 0) >= self.quote_interval):
+                    q["_last_sent"] = now_ms
+                    messages.append({"jsonrpc": "2.0", "method": "data.quote",
+                                     "params": self._quote_of(ticker, q)})
+                if ticker in self.watched or ticker in self.watched_depth:
+                    bid, ask = self._bid_ask(q, tick_size)
+                    messages.append({"jsonrpc": "2.0", "method": "broker.quote",
+                                     "params": {"ticker": ticker, "bid": bid, "ask": ask, "last": price}})
+                if ticker in self.watched_depth:
+                    depth = q.get("depth") or {}
+                    messages.append({"jsonrpc": "2.0", "method": "broker.depth",
+                                     "params": {
+                                         "ticker": ticker, "snapshot": True,
+                                         "bids": [{"price": l["price"], "qty": l["quantity"]}
+                                                  for l in (depth.get("buy") or [])[:5]],
+                                         "asks": [{"price": l["price"], "qty": l["quantity"]}
+                                                  for l in (depth.get("sell") or [])[:5]],
+                                     }})
+        if p and p.alive and messages:
+            p.send_many(messages)
+
+    # ── market data ──
+    def search(self, query):
+        return self.instruments.search(query, self.exchanges)
+
+    def symbol_info(self, ticker):
+        row = self.instruments.row(ticker)
+        if row is None:
+            raise PluginError(f"Unknown symbol {ticker}", -32004)
+        exchange = row["exchange"]
+        scale = max(2, int(round(1 / row["tick"]))) if row["tick"] < 1 else 100
+        info = {
+            "description": row["description"],
+            "type": row["type"],
+            "currency": "INR",
+            "timezone": "Asia/Kolkata",
+            "session": SESSIONS.get(exchange, SESSIONS.get(exchange.split("_")[0], "0915-1530")),
+            "pricescale": scale,
+            "minmov": 1,
+            "pointValue": row["lot"],
+            # Kite's personal API serves no minute bars for NCO: offer only days (weeks/months are built by the
+            # app) so the chart doesn't keep asking for an interval the source cannot answer.
+            "intervals": ["1D"] if exchange == "NCO" else list(SERVED_INTERVALS),
+            # Per-symbol history depth, NOT the per-request chunk size (historyDays* settings). Bounded by NSE's
+            # listing date so a recently listed stock doesn't make the app ask years that cannot exist.
+            "history": self._history_depth(row),
+        }
+        if self.company_details and row["type"] == "stock" and exchange in ("NSE", "BSE"):
+            symbol = urllib.parse.quote(row["ticker"], safe="")
+            info["icon"] = f"{COMPANY_API}/logos/{symbol}"
+            profile = self._company_profile(row["ticker"])
+            if profile:
+                for key in ("name", "sector", "industry"):
+                    if profile.get(key):
+                        info[key] = profile[key]
+                if profile.get("oneLine"):
+                    info["longDescription"] = profile["oneLine"]
+        # OpenTrader has no listingDate field in symbolInfo; the dialog shows longDescription, so put it there.
+        listed = self._listed_text(row["ticker"]) if exchange == "NSE" else None
+        if listed:
+            info["longDescription"] = ("Listed " + listed + " · " + info["longDescription"]
+                                       if info.get("longDescription") else "Listed " + listed)
+        return info
+
+    def quote(self, ticker):
+        with self.lock:
+            q = self.quotes.get(ticker)
+            if not q or not q.get("price"):
+                return None
+            return self._quote_of(ticker, q)
+
+    def _interval_for(self, resolution):
+        interval = INTERVALS.get(resolution)
+        if interval is None:
+            raise PluginError(f"Resolution {resolution} is not served by Zerodha", -32602)
+        return interval
+
+    @staticmethod
+    def _date_text(ts):
+        return urllib.parse.quote(datetime.fromtimestamp(ts, TZ_IST).strftime("%Y-%m-%d %H:%M:%S"), safe="")
+
+    def _cap(self, key, default):
+        """A per-request history cap in days; blank, bad or non-positive values keep the default."""
+        try:
+            value = int(float(self.settings.get(key) or default))
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
+
+    def _history_one(self, token, interval, frm, to):
+        path = (HISTORY_PATH.format(token=token, interval=interval)
+                + f"?from={self._date_text(frm)}&to={self._date_text(to)}&oi=1")
+        data = self._json(path, timeout=30)
+        out = []
+        for candle in (data.get("candles") or []):
+            if not isinstance(candle, list) or len(candle) < 5:
+                continue
+            try:
+                raw_time = str(candle[0])
+                try:
+                    when = datetime.fromisoformat(raw_time)  # Kite: "2026-10-22T00:00:00+0530"
+                except ValueError:
+                    when = datetime.strptime(raw_time, "%Y-%m-%d %H:%M:%S")  # older adapters
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=TZ_IST)
+                t = int(when.timestamp())
+                if interval == "day":
+                    t = ist_midnight(when.timestamp())
+                o, h, low, c = (num(candle[i]) for i in range(1, 5))
+                v = num(candle[5], 0) or 0
+            except (ValueError, TypeError):
+                continue
+            if None in (o, h, low, c):
+                continue
+            if out and out[-1][0] == t:
+                out[-1] = [t, out[-1][1], max(out[-1][2], h), min(out[-1][3], low), c,
+                           (out[-1][5] or 0) + v]
+            else:
+                out.append([t, o, h, low, c, int(v)])
+        out.sort(key=lambda b: b[0])
+        return out
+
+    @staticmethod
+    def _map_event(raw):
+        """Kite corporate action → the app's chart-event shape (dividend / split markers)."""
+        action = str(raw.get("action_type") or "").lower()
+        meta = raw.get("meta") or {}
+        first, second = num(meta.get("ratio_1")), num(meta.get("ratio_2"))
+        if action == "dividend":
+            label = f"{(first / second):.2f}" if first is not None and second else "0.00"
+            kind = "dividend"
+        elif action in ("bonus", "split"):
+            label = f"{int(first or 1)}:{int(second or 1)} {action}"
+            kind = "split"
+        else:
+            label, kind = action or "event", "dividend"
+        when = 0
+        try:
+            when = int(datetime.strptime(str(raw.get("ex_date")), "%Y-%m-%d")
+                       .replace(tzinfo=TZ_IST).timestamp())
+        except (ValueError, TypeError):
+            pass
+        return {"time": when, "kind": kind, "label": label, "action": action,
+                "date": str(raw.get("ex_date") or ""), "meta": meta}
+
+    def corporate_events(self, ticker):
+        """Corporate actions for `ticker`, fetched on a daily-bars request and cached for the day.
+
+        The app's chart-event fields aren't in the plugin protocol yet, but the result carries them so an
+        upstream app change only has to read `events` from `data.bars`. Kite already serves adjusted prices;
+        these are markers only, never applied to OHLC.
+        """
+        row = self.instruments.row(ticker)
+        if row is None or not self.enctoken:
+            return []
+        token = row["token"]
+        today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
+        with self.lock:
+            hit = self._events.get(token)
+            if hit is not None and hit[0] == today:
+                return hit[1]
+        path = plugin_data_dir() / "cache" / "events" / f"{token}-{today}.json"
+        events = None
+        try:
+            with open(path, encoding="utf-8") as f:
+                events = json.load(f)
+        except (OSError, ValueError):
+            pass
+        if events is None:
+            merged, start, end = [], EVENTS_FROM, datetime.now(TZ_IST).date()
+            while start <= end:
+                stop = min(start + timedelta(days=EVENTS_CHUNK_DAYS - 1), end)
+                path_q = (f"/oms/instruments/events/{token}"
+                          f"?from={start.isoformat()}&to={stop.isoformat()}")
+                try:
+                    data = self._json(path_q, timeout=15)
+                except PluginError as e:
+                    self.log(f"corporate events {ticker}: {e}", "warn")
+                    break
+                rows = data if isinstance(data, list) else (data.get("data") or [])
+                for r in rows:  # chunks overlap at boundaries; one action per ex-date
+                    if isinstance(r, dict) and not any(
+                            x.get("action_type") == r.get("action_type") and x.get("ex_date") == r.get("ex_date")
+                            for x in merged):
+                        merged.append(r)
+                start = stop + timedelta(days=1)
+            events = [self._map_event(r) for r in merged if isinstance(r, dict)]
+            events.sort(key=lambda e: e["time"])
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(events, f)
+            except OSError:
+                pass
+        with self.lock:
+            self._events[token] = (today, events)
+        if events:
+            self.log(f"corporate events {ticker}: {len(events)} actions — "
+                     + ", ".join(f"{e['action']} {e['date']} {e['label']}" for e in events[-4:]))
+        return events
+
+    def bars(self, ticker, resolution, frm, to, count_back):
+        row = self.instruments.row(ticker)
+        if row is None:
+            raise PluginError(f"Unknown symbol {ticker}", -32004)
+        interval = self._interval_for(resolution)
+        chunk_days = (self._cap("historyDaysDaily", 1900) if interval == "day"
+                      else self._cap("historyDaysMinute", 30))
+        step = chunk_days * 86400
+        merged = {}
+        start = frm
+        try:
+            while start <= to:
+                end = min(start + step - 1, to)
+                for bar in self._history_one(row["token"], interval, start, end):
+                    merged[bar[0]] = bar
+                start = end + 1
+        except PluginError as e:
+            # The chart only says "no data"; the log says why (same as the OpenAlgo plugin).
+            self.log(f"history {ticker} {resolution}: {e}", "warn")
+            raise
+        out = [merged[t] for t in sorted(merged)]
+        if count_back and len(out) > count_back:
+            out = out[-count_back:]
+        return out
+
+    # ── broker (phase 2): Kite's personal /oms routes, authenticated with the same enctoken ──
+    STATUS = {
+        "PUT ORDER REQ RECEIVED": "placing", "VALIDATION PENDING": "placing",
+        "OPEN PENDING": "placing", "AMO REQ RECEIVED": "placing",
+        "OPEN": "working", "UPDATE": "working", "MODIFY PENDING": "working",
+        "MODIFY VALIDATION PENDING": "working", "CANCEL PENDING": "working",
+        "TRIGGER PENDING": "working",
+        "COMPLETE": "filled", "CANCELLED": "cancelled", "CANCELLED AMO": "cancelled",
+        "AMO CANCELLED": "cancelled", "REJECTED": "rejected",
+    }
+
+    @classmethod
+    def map_status(cls, raw):
+        """Kite has many status spellings; terminal ones must never be shown as working."""
+        key = str(raw or "").strip().upper()
+        if key in cls.STATUS:
+            return cls.STATUS[key]
+        if "CANCEL" in key:
+            return "cancelled"
+        if "REJECT" in key:
+            return "rejected"
+        if "COMPLETE" in key or "FILLED" in key:
+            return "filled"
+        return "working"
+    PRODUCTS = {"MIS": "Intraday", "CNC": "Delivery", "NRML": "Carry forward"}
+    KITE_TYPES = {"market": "MARKET", "limit": "LIMIT", "stop": "SL", "stopLimit": "SL-M"}
+    APP_TYPES = {v: k for k, v in KITE_TYPES.items()}
+
+    def _app_symbol(self, kite_exchange, tradingsymbol):
+        """Kite's book/postback symbol → the app's whole symbol and its master row."""
+        row = self.instruments.kite_row(kite_exchange, tradingsymbol)
+        if row:
+            return f"{row['exchange']}:{row['ticker']}", row
+        return f"{kite_exchange or 'NSE'}:{tradingsymbol or ''}", None
+
+    def _to_units(self, row, contracts):
+        """Kite reports MCX quantities in contracts; the app works in units (one lot = row['lot'])."""
+        return (contracts or 0) * row["lot"] if row and row["exchange"] == "MCX" else (contracts or 0)
+
+    def _to_contracts(self, row, units, field="Quantity"):
+        if row and row["exchange"] == "MCX":
+            lot = row["lot"] or 1
+            count = (units or 0) / lot
+            if abs(count - round(count)) > 1e-9:
+                raise PluginError(f"{field} must be a whole number of lots ({lot:g} units = 1 lot)")
+            return int(round(count))
+        if units != int(units):
+            raise PluginError("The quantity must be a whole number")
+        return int(units)
+
+    @staticmethod
+    def _ms(value):
+        """Kite's timestamp string as UNIX milliseconds (0 when unreadable)."""
+        if not value:
+            return 0
+        try:
+            when = datetime.fromisoformat(str(value))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=TZ_IST)
+            return int(when.timestamp() * 1000)
+        except (ValueError, TypeError):
+            return 0
+
+    def resolve_symbol(self, symbol, ticker):
+        candidate = symbol if ":" in str(symbol) else ticker
+        exchange = str(candidate or "").split(":", 1)[0].upper()
+        if exchange in self.exchanges:
+            return candidate if self.instruments.row(candidate) else None
+        row = self.instruments.kite_row(exchange, ticker)
+        return f"{row['exchange']}:{row['ticker']}" if row else None
+
+    def instrument(self, ticker):
+        row = self.instruments.row(ticker)
+        if row is None:
+            raise PluginError(f"Unknown symbol {ticker}", -32004)
+        exchange = row["exchange"]
+        products = ["MIS", "CNC"] if exchange in ("NSE", "BSE") else ["MIS", "NRML"]
+        default = (self.settings.get("product") or "MIS").upper()
+        if default not in products:
+            default = products[0]
+        step = row["lot"] if row["lot"] > 1 else 1  # one lot is the ticket's minimum step for derivatives
+        return {
+            "qtyMin": step, "qtyStep": step, "pointValue": 1,
+            "ticketFields": [{"id": "product", "label": "Product", "default": default,
+                              "options": [{"value": p, "label": self.PRODUCTS[p]} for p in products]}],
+        }
+
+    def place(self, p):
+        ticker = p["ticker"]
+        row = self.instruments.row(ticker)
+        if row is None:
+            raise PluginError(f"Unknown symbol {ticker}", -32004)
+        qty = num(p.get("qty"))
+        if not qty or qty <= 0:
+            raise PluginError("The quantity must be above 0")
+        contracts = self._to_contracts(row, qty)
+        side = "SELL" if str(p.get("side") or "").lower() == "sell" else "BUY"
+        order_type = self.KITE_TYPES.get(p.get("type"), "MARKET" if p.get("type") == "market" else "LIMIT")
+        product = str((p.get("fields") or {}).get("product") or self.settings.get("product") or "MIS").upper()
+        if product not in self.PRODUCTS:
+            product = "MIS"
+        validity = "IOC" if str(p.get("duration") or "").lower() == "ioc" else "DAY"
+        # The Kite web app posts these fields alongside the ones in the path; keep the payload in that shape.
+        body = {
+            "variety": "regular",
+            "tradingsymbol": row["ticker"], "exchange": row["kite_exchange"],
+            "transaction_type": side, "order_type": order_type, "quantity": contracts,
+            "product": product, "price": num(p.get("limitPrice")) or 0,
+            "trigger_price": num(p.get("stopPrice")) or 0, "disclosed_quantity": 0,
+            "validity": validity, "tag": "web",
+            "squareoff": 0, "stoploss": 0, "trailing_stoploss": 0,
+        }
+        if self.user_id:
+            body["user_id"] = self.user_id
+        data = self._json("/oms/orders/regular", method="POST", body=body, timeout=15)
+        order_id = str(data.get("order_id") or "")
+        if not order_id:
+            raise PluginError("Zerodha accepted the order but gave no order id")
+        with self.lock:
+            self.orders[order_id] = {
+                "id": order_id, "ticker": ticker, "side": side.lower(), "type": p.get("type"),
+                "qty": qty, "filledQty": 0, "limitPrice": num(p.get("limitPrice")),
+                "stopPrice": num(p.get("stopPrice")), "status": "placing", "duration": validity.lower(),
+                "variety": "regular", "fields": {"product": product}, "updatedMs": int(time.time() * 1000),
+            }
+        self.last_poll = 0
+        self.log(f"order placed {order_id}: {ticker} {side} {order_type} qty={qty:g} "
+                 f"price={body['price']} trigger={body['trigger_price']} product={product} validity={validity}")
+        return order_id, [{"kind": "placed", "ticker": ticker, "side": side.lower(),
+                           "type": p.get("type"), "qty": qty}]
+
+    def modify(self, p):
+        order_id = p["orderId"]
+        with self.lock:
+            order = self.orders.get(order_id)
+            if not order or order["status"] not in ("placing", "working"):
+                raise PluginError("The order is no longer working")
+            order = dict(order)
+        row = self.instruments.row(order["ticker"])
+        qty = num(p.get("qty")) or order["qty"]
+        body = {
+            "order_type": self.KITE_TYPES.get(p.get("type") or order.get("type"), "LIMIT"),
+            "quantity": self._to_contracts(row, qty),
+            "price": num(p.get("limitPrice")) or order.get("limitPrice") or 0,
+            "disclosed_quantity": 0,
+            "validity": "IOC" if str(p.get("duration") or order.get("duration") or "").lower() == "ioc" else "DAY",
+        }
+        trigger = num(p.get("stopPrice")) or order.get("stopPrice")
+        if trigger:
+            body["trigger_price"] = trigger
+        self._json(f"/oms/orders/{order.get('variety', 'regular')}/{order_id}",
+                   method="PUT", body=body, timeout=15)
+        with self.lock:
+            if order_id in self.orders:
+                self.orders[order_id].update(qty=qty, limitPrice=body["price"],
+                                             updatedMs=int(time.time() * 1000))
+        self.last_poll = 0
+        self.log(f"order modified {order_id}: qty={qty:g} price={body['price']} validity={body['validity']}")
+        return [{"kind": "modified", "ticker": order["ticker"], "side": order["side"],
+                 "type": order["type"], "qty": qty}]
+
+    def cancel(self, order_id):
+        with self.lock:
+            order = self.orders.get(order_id)
+            if not order or order["status"] not in ("placing", "working"):
+                raise PluginError("The order is no longer working")
+            order = dict(order)
+        self._json(f"/oms/orders/{order.get('variety', 'regular')}/{order_id}",
+                   method="DELETE", timeout=15)
+        with self.lock:
+            if order_id in self.orders:
+                self.orders[order_id].update(status="cancelled", updatedMs=int(time.time() * 1000))
+        self.last_poll = 0
+        self.log(f"order cancelled {order_id}: {order['ticker']}")
+        return [{"kind": "cancelled", "ticker": order["ticker"], "side": order["side"],
+                 "type": order["type"], "qty": order["qty"]}]
+
+    def close_position(self, position_id, qty):
+        with self.lock:
+            pos = next((x for x in self.positions if x["id"] == position_id), None)
+        if pos is None:
+            raise PluginError("No such position")
+        close = pos["qty"] if qty is None else qty
+        side = "sell" if pos["side"] == "buy" else "buy"
+        _, events = self.place({"ticker": pos["ticker"], "side": side, "type": "market", "qty": close})
+        self.last_poll = 0
+        return events
+
+    def set_position_brackets(self, position_id, take_profit, stop_loss):
+        raise PluginError("Zerodha does not support brackets on an existing position", -32601)
+
+    def _wire_order(self, r):
+        ticker, row = self._app_symbol(r.get("exchange"), r.get("tradingsymbol"))
+        if not r.get("tradingsymbol"):
+            return None
+        kind = str(r.get("order_type") or "").upper()
+        side = str(r.get("transaction_type") or "BUY").lower()
+        return {
+            "id": str(r.get("order_id") or ""), "ticker": ticker,
+            "side": "sell" if side.startswith("s") else "buy",
+            "type": self.APP_TYPES.get(kind, "market"),
+            "qty": self._to_units(row, num(r.get("quantity"), 0)),
+            "filledQty": self._to_units(row, num(r.get("filled_quantity", r.get("filled")), 0)),
+            "limitPrice": num(r.get("price")), "stopPrice": num(r.get("trigger_price")),
+            "avgFillPrice": num(r.get("average_price")),
+            "status": self.map_status(r.get("status")),
+            "variety": str(r.get("variety") or "regular"),
+            "message": r.get("status_message") or r.get("reason"),
+            "duration": "ioc" if str(r.get("validity") or "").upper() == "IOC" else "day",
+            "fields": {"product": str(r.get("product") or "MIS")},
+            "updatedMs": self._ms(r.get("exchange_timestamp") or r.get("order_timestamp")),
+        }
+
+    def _wire_position(self, r):
+        ticker, row = self._app_symbol(r.get("exchange"), r.get("tradingsymbol"))
+        if not r.get("tradingsymbol"):
+            return None
+        qty = self._to_units(row, num(r.get("quantity"), 0))
+        if not qty:
+            return None
+        return {
+            "id": ticker, "ticker": ticker, "side": "sell" if qty < 0 else "buy",
+            "qty": abs(qty), "avgPrice": num(r.get("average_price"), 0) or 0,
+            "last": num(r.get("last_price")), "unrealizedPnl": num(r.get("pnl")),
+            "realizedPnl": None, "takeProfit": None, "stopLoss": None,
+        }
+
+    def _wire_execution(self, r):
+        ticker, row = self._app_symbol(r.get("exchange"), r.get("tradingsymbol"))
+        if not r.get("tradingsymbol"):
+            return None
+        side = str(r.get("transaction_type") or "BUY").lower()
+        return {
+            "id": str(r.get("trade_id") or ""), "orderId": str(r.get("order_id") or ""),
+            "ticker": ticker, "side": "sell" if side.startswith("s") else "buy",
+            "qty": self._to_units(row, num(r.get("quantity"), 0)),
+            "price": num(r.get("average_price"), 0) or 0,
+            "timeMs": self._ms(r.get("fill_timestamp") or r.get("order_timestamp")),
+            "commission": None, "realizedPnl": num(r.get("pnl")),
+        }
+
+    def _refresh_books(self):
+        """Funds, positions, orders and trades from /oms; status transitions become order events."""
+        margins = self._json("/oms/user/margins")
+        books = self._json("/oms/portfolio/positions")
+        orders = self._json("/oms/orders")
+        trades = self._json("/oms/trades")
+        events = []
+        with self.lock:
+            previous = {oid: o.get("status") for oid, o in self.orders.items()}
+            self.margins = margins
+            self.positions = [p for p in (self._wire_position(r) for r in (books.get("net") or [])) if p]
+            self.orders = {o["id"]: o for o in (self._wire_order(r) for r in orders) if o}
+            self.executions = [e for e in (self._wire_execution(r) for r in trades) if e]
+            self.connected_broker = True
+            for order_id, order in self.orders.items():
+                was = previous.get(order_id)
+                if was in (None, "placing", "working") and order["status"] == "filled":
+                    kind = "executed"
+                elif was in (None, "placing", "working") and order["status"] == "cancelled":
+                    kind = "cancelled"
+                elif was in (None, "placing", "working") and order["status"] == "rejected":
+                    kind = "rejected"
+                else:
+                    continue
+                events.append({"kind": kind, "ticker": order["ticker"], "side": order["side"],
+                               "type": order["type"], "qty": order["qty"],
+                               "price": order.get("avgFillPrice"), "message": order.get("message")})
+        self.last_poll = time.time()
+        self.log(f"books read: {len(self.positions)} positions, {len(self.orders)} orders, "
+                 f"{len(self.executions)} trades{'; events: ' + ','.join(e['kind'] for e in events) if events else ''}")
+        p = self.plugin
+        if p and p.alive:
+            for event in events:
+                p.notify("broker.event", event)
+        return events
+
+    def _poll_loop(self):
+        while True:
+            try:
+                self.on_tick()
+            except Exception as e:  # noqa: BLE001 - a poll failure must not kill the thread
+                self.log(self.clean(str(e)), "warn")
+            time.sleep(2)
+
+    def on_tick(self):
+        """Every second while positions/orders are open, otherwise every ten seconds."""
+        if not self.broker_enabled or not self.enctoken:
+            return []
+        now = time.time()
+        with self.lock:
+            work = bool(self.positions) or any(o["status"] in ("placing", "working")
+                                               for o in self.orders.values())
+            due = now - self.last_poll >= (2 if work else 10)
+            fresh = self.last_poll == 0.0
+        if not (fresh or due):
+            return []
+        try:
+            events = self._refresh_books()
+        except PluginError as e:
+            self.log(str(e), "warn")
+            self.last_poll = now
+            return []
+        # Always repush: the app otherwise keeps the initial "not connected / zero balance" state on an idle
+        # account with no orders or positions, which is exactly when the user opens the account manager.
+        if self.plugin and self.plugin.alive:
+            self.plugin.push_state()
+        return events
+
+    def on_order_update(self, data):
+        """A Kite order postback on the ticker: update the order and notify without waiting for the poll."""
+        order_id = str(data.get("order_id") or "")
+        if not order_id:
+            return
+        ticker, row = self._app_symbol(data.get("exchange"), data.get("tradingsymbol"))
+        status = self.map_status(data.get("status"))
+        with self.lock:
+            previous_order = self.orders.get(order_id)
+            was = previous_order.get("status") if previous_order else None
+            order = dict(previous_order or {
+                "id": order_id, "ticker": ticker, "side": "buy", "type": "market",
+                "qty": self._to_units(row, num(data.get("quantity"), 0)), "filledQty": 0,
+                "limitPrice": num(data.get("price")), "stopPrice": num(data.get("trigger_price")),
+                "fields": {"product": str(data.get("product") or "MIS")},
+            })
+            order.update(status=status,
+                         filledQty=self._to_units(row, num(data.get("filled_quantity"), 0)),
+                         avgFillPrice=num(data.get("average_price")),
+                         message=data.get("status_message"), updatedMs=int(time.time() * 1000))
+            self.orders[order_id] = order
+        self.last_poll = 0
+        self.log(f"order postback {order_id}: {status} filled={order['filledQty']:g} avg={order.get('avgFillPrice')}")
+        p = self.plugin
+        if p and p.alive:
+            kind = {"filled": "executed", "cancelled": "cancelled", "rejected": "rejected"}.get(status)
+            if kind and was != status:
+                p.notify("broker.event", {"kind": kind, "ticker": order["ticker"], "side": order["side"],
+                                          "type": order["type"], "qty": order["qty"],
+                                          "price": order.get("avgFillPrice"), "message": order.get("message")})
+            p.push_state()
+
+    def state(self):
+        """The whole account, as broker.state sends it."""
+        with self.lock:
+            margins = self.margins or {}
+            positions = [dict(x) for x in self.positions]
+            orders = sorted(self.orders.values(), key=lambda o: o.get("updatedMs") or 0)[-200:]
+            executions = list(self.executions[-200:])
+            connected = self.connected_broker
+        equity = margins.get("equity") or {}
+        commodity = margins.get("commodity") or {}
+        cash = sum(num((s.get("available") or {}).get("cash"), 0) for s in (equity, commodity))
+        collateral = sum(num((s.get("available") or {}).get("collateral"), 0) for s in (equity, commodity))
+        debits = sum(num((s.get("utilised") or {}).get("debits"), 0) for s in (equity, commodity))
+        net = sum(num(s.get("net"), 0) for s in (equity, commodity))
+        # Kite's available.cash intermittently reports 0 on a funded account while net stays right.
+        balance = (net + debits - collateral) if net else cash
+        unrealized = sum(num(p.get("unrealizedPnl"), 0) or 0 for p in positions)
+        account = {
+            "id": self.user_id or "ZERODHA", "name": "Zerodha", "currency": "INR", "isDemo": False,
+            "balance": round(balance, 2), "equity": round(balance + unrealized, 2),
+            "unrealizedPnl": round(unrealized, 2), "realizedPnl": 0,
+            "marginUsed": round(debits, 2), "marginFree": round(balance, 2),
+            "values": [{"label": "Net", "value": f"{net:.2f}"}, {"label": "Collateral", "value": f"{collateral:.2f}"}],
+        }
+        default = (self.settings.get("product") or "MIS").upper()
+        if default not in self.PRODUCTS:
+            default = "MIS"
+        return {
+            "connected": connected,
+            "accounts": [{"id": account["id"], "name": account["name"]}],
+            "account": account,
+            "positionMode": "netting",
+            "capabilities": {
+                "orderTypes": ["market", "limit", "stop", "stopLimit"],
+                "brackets": False, "positionBrackets": False, "partialClose": True, "modifyOrders": True,
+                "ticketFields": [{"id": "product", "label": "Product", "default": default,
+                                  "options": [{"value": p, "label": label} for p, label in self.PRODUCTS.items()]}],
+                "durations": [{"id": "day", "label": "Day", "default": True},
+                              {"id": "ioc", "label": "Immediate or Cancel", "orderTypes": ["market", "limit"]}],
+            },
+            "positions": positions, "orders": orders, "executions": executions,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+# 2. The connection to OpenTrader (the template's, unchanged except for the finer-grained source locking).
+# ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def connection():
+    addr = os.environ.get("OPENTRADER_PLUGIN_ADDR")
+    if addr:
+        host, port = addr.rsplit(":", 1)
+        return host, int(port), os.environ["OPENTRADER_PLUGIN_ID"], os.environ["OPENTRADER_PLUGIN_TOKEN"]
+    path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(local_app_data(), DEV_CONNECTION_FILE)
+    with open(path, encoding="utf-8") as f:
+        c = json.load(f)
+    return c["host"], int(c["port"]), c["plugin"], c["token"]
+
+
+class Plugin:
+    def __init__(self, source):
+        self.source = source
+        source.plugin = self
+        self.sock = None
+        self.send_lock = threading.Lock()
+        self.alive = False
+
+    def send(self, message):
+        line = (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
+        with self.send_lock:
+            self.sock.sendall(line)
+
+    def notify(self, method, params):
+        self.send({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def send_many(self, messages):
+        """One socket write for a whole frame's notifications — far fewer syscalls on a large watchlist."""
+        if not messages:
+            return
+        payload = "".join(json.dumps(m, separators=(",", ":")) + "\n" for m in messages).encode("utf-8")
+        with self.send_lock:
+            self.sock.sendall(payload)
+
+    def log(self, message, level="info", category="api"):
+        self.source.log(message, level, category)
+
+    def push_quote(self, ticker):
+        q = self.source.quote(ticker)
+        if q:
+            self.notify("data.quote", q)
+
+    def push_state(self):
+        state = self.source.state()
+        self.source.log(f"broker.state: connected={state['connected']} "
+                        f"balance={state['account']['balance']} equity={state['account']['equity']} "
+                        f"positions={len(state['positions'])} orders={len(state['orders'])}", "debug")
+        self.notify("broker.state", state)
+
+    def events(self, events):
+        for event in events:
+            self.notify("broker.event", event)
+        if events:
+            self.push_state()
+
+    def handle(self, method, p):
+        s = self.source
+        if method == "ping":
+            return {}
+        if method == "data.search":
+            return {"symbols": s.search(p.get("query", ""))[:50]}
+        if method == "data.symbolInfo":
+            return s.symbol_info(p["ticker"])
+        if method == "data.bars":
+            resolution = p["resolution"]
+            frm, to, count_back = int(p["from"]), int(p["to"]), int(p.get("countBack", 2000))
+            bars = s.bars(p["ticker"], resolution, frm, to, count_back)
+            result = {"bars": bars}
+            if resolution == "1D":
+                result["events"] = s.corporate_events(p["ticker"])  # markers for an upstream app change
+            window = (f"{datetime.fromtimestamp(frm, TZ_IST):%d/%m/%Y}"
+                      f"–{datetime.fromtimestamp(to, TZ_IST):%d/%m/%Y}")
+            self.log(f"data.bars {p['ticker']} {resolution}: {len(bars)} bars "
+                     f"({window}, countBack={count_back}"
+                     + (f", {len(result['events'])} events" if "events" in result else "") + ")")
+            return result
+        if method == "broker.getState":
+            return s.state()
+        if method == "broker.resolveSymbol":
+            return {"ticker": s.resolve_symbol(p.get("symbol"), p.get("ticker"))}
+        if method == "broker.instrument":
+            return s.instrument(p["ticker"])
+        if method == "broker.selectAccount":
+            return {}
+        if method == "broker.place":
+            order_id, events = s.place(p)
+            self.events(events)
+            return {"orderId": order_id}
+        if method == "broker.modify":
+            self.events(s.modify(p))
+            return {}
+        if method == "broker.cancel":
+            self.events(s.cancel(p["orderId"]))
+            return {}
+        if method == "broker.closePosition":
+            self.events(s.close_position(p["positionId"], p.get("qty")))
+            return {}
+        if method == "broker.setPositionBrackets":
+            s.set_position_brackets(p["positionId"], p.get("takeProfit"), p.get("stopLoss"))
+            return {}
+        raise PluginError(f"Unknown method {method}", -32601)
+
+    def on_request(self, message):
+        try:
+            result = self.handle(message["method"], message.get("params") or {})
+            self.send({"jsonrpc": "2.0", "id": message["id"], "result": result})
+        except AuthError as e:
+            self.send({"jsonrpc": "2.0", "id": message["id"],
+                       "error": {"code": -32000, "message": self.source.clean(str(e))}})
+            self.source.auth_failed()
+        except PluginError as e:
+            if message.get("method", "").startswith("broker."):
+                self.log(f"{message['method']} failed: {e}", "warn")
+            self.send({"jsonrpc": "2.0", "id": message["id"],
+                       "error": {"code": e.code, "message": self.source.clean(str(e))}})
+        except (KeyError, TypeError, ValueError) as e:
+            self.send({"jsonrpc": "2.0", "id": message["id"],
+                       "error": {"code": -32602, "message": f"Bad parameters: {self.source.clean(str(e))}"}})
+        except Exception as e:  # noqa: BLE001 - any failure is answered, never left hanging
+            self.send({"jsonrpc": "2.0", "id": message["id"],
+                       "error": {"code": -32000, "message": self.source.clean(str(e))}})
+
+    def on_notification(self, method, p):
+        if method == "plugin.configure":
+            self.source.configure(p.get("settings", {}), p.get("provides"))
+            if self.source.broker_enabled:
+                self.push_state()
+        elif method == "data.subscribe":
+            self.source.set_subscriptions(p.get("tickers", []))
+        elif method in ("broker.watchQuote", "broker.watchDepth"):
+            self.source.set_watch(method, p.get("tickers", []))
+        elif method == "plugin.promptAnswer":
+            self.source.on_prompt_answer(p.get("id"), p.get("value"))
+        # data.watchTicks: no tick charts in this plugin.
+
+    def run_once(self):
+        host, port, plugin, token = connection()
+        self.sock = socket.create_connection((host, port), timeout=10)
+        reader = self.sock.makefile("r", encoding="utf-8", newline="\n")
+        self.send({"jsonrpc": "2.0", "id": 1, "method": "hello",
+                   "params": {"plugin": plugin, "token": token, "api": API, "version": PLUGIN_VERSION}})
+        welcome = json.loads(reader.readline() or "{}")
+        if "error" in welcome:
+            raise PluginError(welcome["error"].get("message", "refused"))
+        self.sock.settimeout(None)
+        self.alive = True
+        self.log(f"Connected to {welcome.get('result', {}).get('app', 'OpenTrader')} "
+                 f"(Plugin API {welcome.get('result', {}).get('api')})")
+        for line in reader:
+            if not line.strip():
+                continue
+            message = json.loads(line)
+            if "method" in message and "id" in message:
+                threading.Thread(target=self.on_request, args=(message,), daemon=True).start()
+            elif "method" in message:
+                self.on_notification(message["method"], message.get("params") or {})
+        self.alive = False
+        if self.source.ws is not None:
+            self.source.ws.stop.set()
+
+    def run(self):
+        """Started by the app: end when the connection ends (the app starts us again). Run by hand: retry."""
+        started_by_app = "OPENTRADER_PLUGIN_ADDR" in os.environ
+        while True:
+            try:
+                self.run_once()
+                print("The app closed the connection", flush=True)
+            except PluginError as e:
+                print(f"Refused: {e}", flush=True)
+            except (OSError, ValueError) as e:
+                print(f"Not connected ({e})", flush=True)
+            self.alive = False
+            if started_by_app:
+                sys.exit(1)
+            time.sleep(3)
+
+
+if __name__ == "__main__":
+    Plugin(ZerodhaSource()).run()
