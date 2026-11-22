@@ -79,7 +79,7 @@ class SearchAndInfo(unittest.TestCase):
         self.assertIn("1", info["intervals"])
         self.assertIn("1D", info["intervals"])
         self.assertEqual(info["history"]["day"], 10950)
-        self.assertEqual(info["history"]["minute"], 1825)
+        self.assertEqual(info["history"]["minute"], plugin.HISTORY_DAYS_MAX["minute"])
         self.assertEqual(self.source.symbol_info("NCO:GOLD")["history"], {"day": 10950})
         self.assertEqual(self.source.symbol_info("NFO:NIFTY25NOVFUT")["pointValue"], 75)
         self.assertEqual(self.source.symbol_info("NSE_INDEX:NIFTY")["type"], "index")

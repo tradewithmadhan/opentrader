@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.2.20"
+PLUGIN_VERSION = "0.2.21"
 API = 3  # password settings, per-plugin data folder, prompts on token expiry
 DEV_CONNECTION_FILE = "OpenTraderPlugins/zerodhaenctoken-dev.json"
 
@@ -70,7 +70,23 @@ COMPANY_API = "https://api.dharun.dev/v1"
 # symbol that has not existed that long. The SME file has slightly different headers and 2-digit years.
 NSE_EQUITY_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
 NSE_SME_LIST_URL = "https://nsearchives.nseindia.com/emerge/corporates/content/SME_EQUITY_L.csv"
-HISTORY_DAYS_MAX = {"minute": 1825, "day": 10950}  # Kite serves day bars back to 2000, minute to at least 2024
+# How far back the app may scroll, per bar family. This is the `history` value returned from data.symbolInfo;
+# it is NOT the per-request Kite chunk size (that is historyDaysMinute/historyDaysDaily, set in the manifest).
+#
+# OpenTrader caches this per symbol and clamps EVERY data.bars request, including older scroll pages, in
+# reachable() (src-tauri/src/plugins/data.rs): from = max(from, now - depth); a page entirely older than that
+# returns no bars at all. So these numbers are the plugin's answer to "how much history does this source have?".
+#
+# _history_depth() takes min(here, days since the symbol's NSE listing date), so a recently listed stock gets a
+# small depth and cannot make the app ask for years before it existed. Symbols without a listing row use these
+# maxima directly.
+#
+# Kite's personal API serves day bars back to at least 2000 (verified), so 10950 days (~30 years) covers it.
+# Minute bars were verified back to at least Jan 2024; Kite does not document an exact floor, and older minute
+# data may be missing. 3650 days (~10 years) is deliberately generous: the app may ask for a year Kite lacks,
+# which simply returns an empty page and shows the history-end marker, but deep minute scrolls work where data
+# exists. Week/month charts use the day family; 3m..240m charts use the minute family.
+HISTORY_DAYS_MAX = {"minute": 3650, "day": 10950}
 # Kite's corporate-actions endpoint refuses ranges over 1095 days, so walk it in 3-year chunks from this year.
 EVENTS_FROM = date(1990, 1, 1)
 EVENTS_CHUNK_DAYS = 1095
@@ -1211,7 +1227,16 @@ class ZerodhaSource:
         return datetime.fromtimestamp(when, TZ_IST).strftime("%d/%m/%Y") if when else None
 
     def _history_depth(self, row):
-        """How far back the app may ask for this symbol, bounded by its listing date and Kite's coverage."""
+        """Per-symbol `history` for data.symbolInfo: the app's hard clamp on history requests and scroll-back.
+
+        NOT the same as the manifest's historyDays* settings: those decide how many days we fetch from Kite in
+        one bars() call; this decides how far back the app is allowed to ask at all. The two work together:
+        this caps the range, bars() serves it one chunk at a time as the app scrolls.
+
+        NSE equities get min(HISTORY_DAYS_MAX, days since their DATE OF LISTING) from the listing lists loaded by
+        _load_listings(), so an IPO listed last month declares 30 days instead of 30 years. Other exchanges and
+        symbols with no listing row get the maxima. NCO has no minute history at Kite, so only `day` is declared.
+        """
         listed = None
         if row["exchange"] == "NSE":
             self._load_listings()

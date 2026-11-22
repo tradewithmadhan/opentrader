@@ -116,7 +116,7 @@ window into chunks of `historyDaysDaily` (default 1900) or `historyDaysMinute` (
 bar time, drops duplicates and keeps the newest `countBack`. Blank, zero, negative or non-numeric values fall back
 to the defaults, so a bad setting cannot produce a failing request.
 
-The separate `history` depth declared in `symbolInfo` (30 years of days, 5 years of minutes; NCO has no minute
+The separate `history` depth declared in `symbolInfo` (30 years of days, 10 years of minutes; NCO has no minute
 history) tells the app **how far back it may ask**. Without a generous value the chart stops scrolling at that
 depth even though chunking could fetch more — Kite serves day bars back to at least 2000 and minute bars back to at
 least 2024 (verified live).

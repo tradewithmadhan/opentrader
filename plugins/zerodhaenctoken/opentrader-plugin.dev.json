@@ -1,7 +1,7 @@
 {
   "id": "zerodhaenctoken",
   "name": "Zerodha (enctoken, development)",
-  "version": "0.0.20-dev",
+  "version": "0.0.21-dev",
   "publisher": "tradewithmadhan",
   "description": "The Zerodha enctoken plugin while it is developed: you run plugin.py yourself, the app writes where to connect.",
   "api": 3,
