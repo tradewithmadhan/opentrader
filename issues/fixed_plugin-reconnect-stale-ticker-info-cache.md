@@ -1,4 +1,6 @@
-# Comment for issue #371 — deepentropy/opentrader
+# FIXED upstream — comment drafted for issue #371 (now resolved)
+
+> Status: **FIXED upstream** in `dc4cd058` (22/11/2026, "Plugins: symbol info asked again when the data plugins change" — follow-up to #371). The app now calls `forgetTickerInfo()` on `pluginsChanged`, clearing the cached "not found" answers; charts and watchlist names ask again. Adopted in this fork by cherry-pick. Kept for reference.
 
 > Drafted 21/11/2026 as a follow-up comment on
 > https://github.com/deepentropy/opentrader/issues/371 (still Open). Paste everything below the line into the comment box.
