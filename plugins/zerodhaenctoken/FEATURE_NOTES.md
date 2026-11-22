@@ -25,7 +25,7 @@ newest ones: the app then asks for the older ones before the oldest bar you retu
 
 When the user scrolls back, the chart calls `getBarsBefore` (`src/window/chart/view/history.ts:230`) →
 `plugins::before` (`data.rs:629`) with an older `to`, and the plugin serves the next older chunk. The per-symbol
-`history` depth still comes from NSE's listing dates (capped at 30 years of days / 10 years of minutes), so the app
+`history` depth still comes from NSE's listing dates (capped at 30 years for both families), so the app
 keeps allowing scroll-back all the way to each symbol's listing.
 
 Result: one Kite request on symbol change, one per scroll page, no rate-limit burst, full listing-based history still reachable.

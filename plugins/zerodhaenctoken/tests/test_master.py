@@ -183,7 +183,7 @@ class ListingDepth(unittest.TestCase):
             source = harness.make_source(fake)
             old = source.symbol_info("NSE:RELIANCE")["history"]
             self.assertLess(old["day"], plugin.HISTORY_DAYS_MAX["day"])
-            self.assertEqual(old["minute"], plugin.HISTORY_DAYS_MAX["minute"])
+            self.assertEqual(old["minute"], old["day"], "both families are listing-bounded by the same cap")
 
             new_info = source.symbol_info("NSE:NEWCO")
             new = new_info["history"]

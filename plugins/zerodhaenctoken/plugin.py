@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.2.21"
+PLUGIN_VERSION = "0.2.22"
 API = 3  # password settings, per-plugin data folder, prompts on token expiry
 DEV_CONNECTION_FILE = "OpenTraderPlugins/zerodhaenctoken-dev.json"
 
@@ -82,11 +82,13 @@ NSE_SME_LIST_URL = "https://nsearchives.nseindia.com/emerge/corporates/content/S
 # maxima directly.
 #
 # Kite's personal API serves day bars back to at least 2000 (verified), so 10950 days (~30 years) covers it.
-# Minute bars were verified back to at least Jan 2024; Kite does not document an exact floor, and older minute
-# data may be missing. 3650 days (~10 years) is deliberately generous: the app may ask for a year Kite lacks,
-# which simply returns an empty page and shows the history-end marker, but deep minute scrolls work where data
-# exists. Week/month charts use the day family; 3m..240m charts use the minute family.
-HISTORY_DAYS_MAX = {"minute": 3650, "day": 10950}
+# Both families use the same 30-year ceiling, so `history` is simply "days since listing, capped at 30 years"
+# for every timeframe. Minute bars were verified back to at least Jan 2024; Kite documents no exact floor and
+# may have no minute data in the early years. Declaring the same depth as days means the app will allow the
+# scroll-back attempt all the way to the listing date; where Kite has no minute candles the page comes back
+# empty and the chart shows its history-end marker. That is preferred here over an artificial 10-year stop.
+# Week/month charts use the day family; 3m..240m charts use the minute family.
+HISTORY_DAYS_MAX = {"minute": 10950, "day": 10950}
 # Kite's corporate-actions endpoint refuses ranges over 1095 days, so walk it in 3-year chunks from this year.
 EVENTS_FROM = date(1990, 1, 1)
 EVENTS_CHUNK_DAYS = 1095
