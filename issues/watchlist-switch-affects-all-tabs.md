@@ -1,37 +1,69 @@
 # Bug report — for filing on deepentropy/opentrader
 
-> Drafted 22/11/2026. Paste everything below the line into the issue body.
+> Drafted 22/11/2026. Filled in the fields of upstream's `.github/ISSUE_TEMPLATE/bug_report.yml`. Paste the section below into the GitHub issue form. The diagnostic block was taken with 2 tabs open; the watchlist shown at capture was "Mad" (switched from "India" to reproduce). Restore your own watchlist after.
 
-Title of the issue: **Switching the watchlist changes it in every tab**
-
-Paste everything below the line into the issue body.
+Paste everything below the line into the issue form (each heading = the template field).
 
 ---
 
-### What happened
+## What happened
 
-With more than one chart tab open, switching the watchlist in one tab changes the watchlist shown in **all** the other tabs too. Each tab cannot keep its own watchlist selection.
+With more than one chart tab open, switching the watchlist in one tab changes the watchlist shown in **all** the other tabs too. Each tab cannot keep its own watchlist selection. For example, with two tabs open I switched the shown watchlist from "India" to "Mad" while the first tab was focused, and the second tab followed the change.
 
-### What I expected
+## What you expected
 
-Each tab should remember its own watchlist choice. Switching the watchlist in one tab should not change it in the other tabs.
+Each tab should remember its own shown watchlist. Switching the watchlist in one tab should not change which one the other tabs show.
 
-### Steps to reproduce
+## Steps to reproduce
 
-1. Open the app with at least two chart tabs.
-2. In the first tab, show watchlist "A".
-3. In the second tab, show watchlist "B".
-4. Switch back to the first tab and choose watchlist "C".
-5. Look at the second tab: it now shows "C" instead of "B".
+1. Open the app with two chart tabs (e.g. one with NIFTY BANK on 1D candles, another with any other chart).
+2. In the first tab, show watchlist "India" in the watchlist panel.
+3. Switch to the second tab, show watchlist "Mad".
+4. Switch back to the first tab and choose watchlist "Mad" there too (or any third watchlist).
+5. Switch to the second tab: it now shows the watchlist just chosen in the first tab, rather than keeping its own.
 
-### How often
+## How often
 
 Every time.
 
-### Area of the app
+## Where the chart's data comes from
 
-Watchlist / tabs.
+Not chart related
 
-### Additional context
+## Area of the app
 
-Verified in the source: `src/data/watchlist-store.ts` keeps a single global `activeId` (the shown watchlist) in the store, and every consumer (`RightRail`, the chart context menu, `OpenListDialog`, the quote subscription in `data/quotes.ts`) reads that one value with no per-tab key. So a switch from any tab updates the single shared value and every tab follows. Making it per-tab would require keying the active watchlist by tab id (as charts/layouts already are).
+Watchlist
+
+## Diagnostic info
+
+```
+### Diagnostic info
+
+- App: OpenTrader 0.4.30 (built 21/11/2026), desktop
+- System: Windows 10 Pro (kernel 19045), x86_64, Intel(R) Core(TM) i5-4590 CPU @ 3.30GHz (4 threads), 8.5 GB RAM, web view 157.0.4341.60
+- Window: 1536×824 at 125% scaling (screen 1536×864), app zoom 100%, language en
+- Tabs: 2 open; this tab: layout s, 1 chart
+- Chart 1 (focused): NSE_INDEX:BANKNIFTY, 1D, candle, RTH session, plugin Zerodha (enctoken) 0.2.23, 1290 bars loaded
+  - Studies: Volume
+- Bar Replay: off
+- Plugins: Zerodha (enctoken) 0.2.23 (datafeed, broker; connected)
+- Recent errors (oldest first):
+  - 22/11/2026 16:41:27 rejection ×3: string: state not managed for field `…` on command `…`. You must call `…` before using this command
+- Taken: 22/11/2026 16:43:31
+```
+
+## App version
+
+0.4.30
+
+## Screenshots or video
+
+The app's `screenshot` tool captures only the chart tab, so it does not show the watchlist panel where this bug is visible. A screenshot of the watchlist panel with two tabs open can be attached here if needed; the reproduction is deterministic from the steps above.
+
+## Performance problems only
+
+## Script source (if a script is involved)
+
+## Anything else
+
+Started after moving to multiple tabs; no error message accompanies it.
