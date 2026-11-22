@@ -536,6 +536,12 @@ export type BrokerEvent = {
 /** The Tauri event's payload wrapper. */
 export type BrokerOrderEvent = { event: BrokerEvent };
 /** One price level of a broker's book: the quantity resting at its price. */
+/** A data plugin's ready-made watchlist (#381). */
+export type PluginWatchlistSection = { name: string; symbols: string[] };
+export type PluginWatchlist = { id: string; name: string; symbols: string[]; sections: PluginWatchlistSection[] };
+/** The watchlists of one data plugin. */
+export type PluginWatchlists = { plugin: string; pluginName: string; lists: PluginWatchlist[] };
+
 /** One tick of a data plugin's symbol (#376): UNIX milliseconds, price, volume. */
 export type Tick = { timeMs: number; price: number; volume: number };
 /** The live ticks of a charted plugin symbol (`data.tick`). */
@@ -704,6 +710,7 @@ export const commands: {
   pluginForgetSecret(id: string, key: string): Promise<CommandResult<PluginsStatus>>;
   pluginPromptAnswer(plugin: string, id: string, value: string | null): Promise<void>;
   pluginSetCapability(id: string, capability: Capability, on: boolean): Promise<CommandResult<PluginsStatus>>;
+  pluginWatchlists(): Promise<PluginWatchlists[]>;
   pluginNewToken(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginRemove(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginFolderCandidates(id: string, step: number): Promise<CommandResult<string[]>>;
@@ -795,6 +802,7 @@ export const commands: {
   pluginForgetSecret(id: string, key: string): Promise<CommandResult<PluginsStatus>>;
   pluginPromptAnswer(plugin: string, id: string, value: string | null): Promise<void>;
   pluginSetCapability(id: string, capability: Capability, on: boolean): Promise<CommandResult<PluginsStatus>>;
+  pluginWatchlists(): Promise<PluginWatchlists[]>;
   pluginNewToken(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginRemove(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginFolderCandidates(id: string, step: number): Promise<CommandResult<string[]>>;
@@ -837,4 +845,5 @@ export const events = new Proxy(
   brokerQuote: EventListen<BrokerQuote>;
   brokerDepth: EventListen<BrokerDepth>;
   pluginTicks: EventListen<PluginTicks>;
+  pluginWatchlistsChanged: EventListen<any>;
 } & Record<string, EventListen<any>>;
