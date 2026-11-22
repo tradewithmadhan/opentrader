@@ -48,16 +48,27 @@ class Stream(unittest.TestCase):
         self.assertEqual(quotes[0]["price"], 2500.0)
         self.assertEqual(quotes[0]["ticker"], "NSE:RELIANCE")
 
+    def test_perf_counters_track_ticks_quotes_and_batches(self):
+        self.subscribed("NSE:RELIANCE")
+        before = dict(self.source._perf)
+        self.fake.ws.push_ticks([fake_kite.FakeWs.packet_ltp(738561, 2500.0)])
+        self.assertTrue(harness.wait_until(lambda: self.app.sock.payloads("data.quote"), 3.0))
+        self.assertGreater(self.source._perf["ticks"], before["ticks"])
+        self.assertGreater(self.source._perf["quotes"], before["quotes"])
+        self.assertGreaterEqual(self.source._perf["batches"], before["batches"] + 1)
+
     def test_quote_interval_throttles_chart_updates(self):
         self.source.quote_interval = 1000
         self.subscribed("NSE:RELIANCE")
         self.app.sock.lines.clear()
+        skipped_before = self.source._perf["skipped"]
         self.fake.ws.push_ticks([fake_kite.FakeWs.packet_ltp(738561, 2500.0)])
         self.assertTrue(harness.wait_until(lambda: self.app.sock.payloads("data.quote"), 3.0))
         self.fake.ws.push_ticks([fake_kite.FakeWs.packet_ltp(738561, 2501.0)])
         time.sleep(0.3)
         self.assertEqual(len(self.app.sock.payloads("data.quote")), 1,
                          "the second tick inside the interval updates the cache, not the chart")
+        self.assertGreater(self.source._perf["skipped"], skipped_before)
 
     def test_configure_parses_the_new_settings(self):
         self.source.configure(harness.settings(self.fake, companyDetails="false", quoteIntervalMs="150"),

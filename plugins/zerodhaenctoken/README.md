@@ -192,6 +192,12 @@ The plugin prunes its caches on startup: it keeps today's and yesterday's master
 today's event files, and deletes older or older-version files (a line is logged when it does). This stops the
 ~30 MB master from accumulating one copy per day.
 
+Every 30 seconds `zerodha-api.log` gets a `[perf]` line with the counters needed to judge a large watchlist:
+ticks received, `data.quote` / `broker.quote` / `broker.depth` messages, batched socket writes, throttle skips,
+cached symbols, subscribed tokens (and how many are in `full` mode) and stream reconnects. For a live performance
+test, leave the big watchlist active on a liquid chart during market hours and watch those numbers and the OS
+CPU/memory of `opentrader.exe` and the plugin process.
+
 When installed as a release build, the files live in the per-plugin data folder OpenTrader provides
 (`OPENTRADER_PLUGIN_DATA`). Each log rolls at ~1 MB. The enctoken is redacted from every line. Enable
 **Log verbose details** in Settings to also record every `broker.state` push; turn a category off with

@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.2.22"
+PLUGIN_VERSION = "0.2.23"
 API = 3  # password settings, per-plugin data folder, prompts on token expiry
 DEV_CONNECTION_FILE = "OpenTraderPlugins/zerodhaenctoken-dev.json"
 
@@ -619,6 +619,7 @@ class ZerodhaWS:
                 self.source.auth_failed()
                 return
             except Exception as e:  # noqa: BLE001 - the stream is best effort; it retries
+                self.source._perf["reconnects"] += 1
                 self.log(f"stream reconnecting ({self.source.clean(str(e))})", "warn")
             self.connected = False
             if self.source.ws_generation != generation or self.stop.is_set():
@@ -814,6 +815,10 @@ class ZerodhaSource:
         self._listings_day = None
         self.company_details = True
         self.quote_interval = 0  # ms between data.quote updates per symbol; 0 = every tick
+        # Live performance counters, logged every 30 s by _perf_loop (started in configure()).
+        self._perf = {"ticks": 0, "quotes": 0, "bquotes": 0, "depth": 0,
+                      "batches": 0, "skipped": 0, "reconnects": 0}
+        self._perf_thread = None
         self._events = {}  # token → (day, corporate actions)
         self._prune_caches()
 
@@ -874,6 +879,24 @@ class ZerodhaSource:
             pass
         if removed:
             self.log(f"cache prune: removed {removed} stale file(s)")
+
+    def _perf_loop(self):
+        """One [perf] line every 30 s: enough to judge a large watchlist without logging individual ticks."""
+        while True:
+            time.sleep(30)
+            with self.lock:
+                counts = dict(self._perf)
+                for key in self._perf:
+                    self._perf[key] = 0
+                cached = len(self.quotes)
+                ws = self.ws
+                tokens = len(ws.tokens) if ws is not None else 0
+                full = sum(1 for mode in ws.tokens.values() if mode == "full") if ws is not None else 0
+            self.log(f"[perf] ticks={counts['ticks']} data.quote={counts['quotes']} "
+                     f"broker.quote={counts['bquotes']} depth={counts['depth']} "
+                     f"batches={counts['batches']} throttle_skipped={counts['skipped']} "
+                     f"quotes_cached={cached} tokens={tokens}(full {full}) "
+                     f"reconnects={counts['reconnects']}")
 
     # ── settings and logging ──
     def clean(self, text):
@@ -946,6 +969,9 @@ class ZerodhaSource:
         if self.broker_enabled and self.broker_poll is None:
             self.broker_poll = threading.Thread(target=self._poll_loop, daemon=True, name="ZerodhaPoll")
             self.broker_poll.start()
+        if self._perf_thread is None:
+            self._perf_thread = threading.Thread(target=self._perf_loop, daemon=True, name="ZerodhaPerf")
+            self._perf_thread.start()
 
     def auth_failed(self):
         """A 403 on the stream: ask for a fresh enctoken instead of leaving the feed dead until a restart."""
@@ -1329,6 +1355,7 @@ class ZerodhaSource:
         per-symbol interval (quoteIntervalMs) caps chart updates without touching the ticket's quote or DOM.
         """
         p = self.plugin
+        self._perf["ticks"] += len(ticks)
         now = int(time.time())
         now_ms = time.time() * 1000
         messages = []
@@ -1380,13 +1407,18 @@ class ZerodhaSource:
                 if ticker in self.subscribed and (
                         not self.quote_interval or now_ms - (q.get("_last_sent") or 0) >= self.quote_interval):
                     q["_last_sent"] = now_ms
+                    self._perf["quotes"] += 1
                     messages.append({"jsonrpc": "2.0", "method": "data.quote",
                                      "params": self._quote_of(ticker, q)})
+                elif ticker in self.subscribed:
+                    self._perf["skipped"] += 1
                 if ticker in self.watched or ticker in self.watched_depth:
+                    self._perf["bquotes"] += 1
                     bid, ask = self._bid_ask(q, tick_size)
                     messages.append({"jsonrpc": "2.0", "method": "broker.quote",
                                      "params": {"ticker": ticker, "bid": bid, "ask": ask, "last": price}})
                 if ticker in self.watched_depth:
+                    self._perf["depth"] += 1
                     depth = q.get("depth") or {}
                     messages.append({"jsonrpc": "2.0", "method": "broker.depth",
                                      "params": {
@@ -1397,6 +1429,7 @@ class ZerodhaSource:
                                                   for l in (depth.get("sell") or [])[:5]],
                                      }})
         if p and p.alive and messages:
+            self._perf["batches"] += 1
             p.send_many(messages)
 
     # ── market data ──
