@@ -45,6 +45,28 @@ if (((isDaily ? cx.rawDaily[0]?.time : loaded()[0]?.time) as number | undefined)
 
 Likely cause (guess): with read-ahead pipelining, a discarded or out-of-order page leaves a subsequent page with no strictly-older bins, which sets the flag even though the source has more history.
 
-### Requested change
+### The rule that should govern exhaustion
 
-Do not treat a short-but-non-empty older page as end of history for plugin symbols. Treat a page as exhausted only when the backend actually returns zero bars, or when the oldest bar fails to advance across two consecutive pages. Keep the stale-page guard from latching `historyExhausted` on a discarded page.
+A plugin already declares, per symbol, how much history it can serve: `history` in `data.symbolInfo`
+(`{"minute": …, "day": …}`, calendar days per family). The app reads it in `reachable()`
+(`src-tauri/src/plugins/data.rs:511`) to clamp how far back it asks, but the frontend never uses it to decide
+that history is finished. That is the missing piece.
+
+`historyExhausted` should be set **only when the loaded series has reached the depth the plugin declared for that
+symbol** — i.e. the oldest loaded bar is at or beyond `now − history[family]` (with a small tolerance for
+sessions/holidays) — and the source has returned no older bars. A short, non-empty page is a normal partial answer
+(a plugin may return fewer, newest bars) and must simply be prepended; the next `beforeSec` becomes the new oldest
+bar and the app asks again. A zero-bar answer while the oldest bar is still **younger** than the declared depth
+must be treated as a transient/short answer (retry with backoff), not as exhaustion. A page discarded by the
+stale-page guard at line 346 must never touch `historyExhausted`.
+
+Concretely, for the `NSE:TCS` case above: `history.day = 8124` days (25/Aug/2004). Two pages brought the oldest bar
+to ~2016, which is still well inside the declared depth. The app should keep asking for older pages until the
+oldest bar reaches 25/Aug/2004; only then is an empty answer genuine exhaustion.
+
+### Implementation note
+
+The Rust side already holds the per-symbol `Info` (with `history`) in `src-tauri/src/plugins/data.rs`; the TS
+`TickerInfo` returned to the frontend does not currently expose it. Either surface the declared depth to the
+frontend, or let `plugins::before` distinguish "no older bars because the declared depth was reached" from
+"no older bars returned inside the declared depth", so the chart does not have to guess.
