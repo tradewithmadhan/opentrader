@@ -1,4 +1,6 @@
-# Bug report — for filing on deepentropy/opentrader
+# Bug report — FILED on deepentropy/opentrader as issue #387
+
+> Filed 22/11/2026: https://github.com/deepentropy/opentrader/issues/387
 
 > Drafted 22/11/2026. Filled in the fields of upstream's `.github/ISSUE_TEMPLATE/bug_report.yml`. Paste the section below into the GitHub issue form. The diagnostic block was taken with 2 tabs open; the watchlist shown at capture was "Mad" (switched from "India" to reproduce). Restore your own watchlist after.
 
