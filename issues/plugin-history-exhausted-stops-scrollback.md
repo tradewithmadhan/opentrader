@@ -1,6 +1,6 @@
 # Upstream proposal — for filing on deepentropy/opentrader
 
-Status: **open**. Observed 22/11/2026 against the Zerodha enctoken data plugin (Plugin API 3).
+Status: **open**. Observed 22/11/2026 against a third-party broker data plugin (Plugin API 3).
 
 Title of the issue: **Chart history: a partial older page marks plugin history exhausted and permanently stops scroll-back**
 
