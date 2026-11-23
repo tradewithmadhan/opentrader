@@ -1,5 +1,8 @@
 # Feature request — for filing on deepentropy/opentrader
 
+> **FIXED upstream** in `bde3d9b8` (issue #382), adopted in this fork. Kept for reference.
+
+
 > Drafted 22/11/2026. Confirmed against current upstream/main (0.4.30). Paste everything below the line into the issue body.
 
 Title of the issue: **Route reference-data commands to data plugins so plugins match the built-in provider**

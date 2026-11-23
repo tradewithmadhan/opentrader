@@ -1,5 +1,8 @@
 # Bug report — for filing on deepentropy/opentrader
 
+> **FIXED upstream** in `121c1d3b` (issue #385), adopted in this fork. Kept for reference.
+
+
 > Drafted 22/11/2026. Confirmed against current upstream/main (0.4.30). Paste everything below the line into the issue body.
 
 Title of the issue: **Plugin search rows go to the wrong category tab (Options land in Stocks)**

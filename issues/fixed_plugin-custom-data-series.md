@@ -1,5 +1,8 @@
 # Feature request — for filing on deepentropy/opentrader
 
+> **FIXED upstream** in `cf8580a1 / 20691763` (issue #383), adopted in this fork. Kept for reference.
+
+
 > Drafted 21/11/2026. Paste everything below the line into the issue body.
 
 Title of the issue: **Let data plugins provide custom data series (open interest, custom symbol info, extra OHLCV-like series)**

@@ -1,5 +1,8 @@
 # Upstream proposal — for filing on deepentropy/opentrader
 
+> **FIXED upstream** in `3dec00db` (issue #386), adopted in this fork. Kept for reference.
+
+
 Status: **filed upstream** as [deepentropy/opentrader#386](https://github.com/deepentropy/opentrader/issues/386) on 22/11/2026. Observed against a third-party broker data plugin (Plugin API 3).
 
 Title of the issue: **Chart history: a partial older page marks plugin history exhausted and permanently stops scroll-back**
