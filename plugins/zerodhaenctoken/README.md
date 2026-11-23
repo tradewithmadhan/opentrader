@@ -81,7 +81,7 @@ The WebSocket handshake carries the same `User-Agent`/`Accept-Language` plus the
 | `product` | `MIS` | Default product on the order ticket (MIS / CNC / NRML). |
 | `historyDaysMinute` | `30` | Days per intraday history request (Kite tolerates more; larger windows are split and merged). |
 | `historyDaysDaily` | `1900` | Days per day-history request (Kite's hard limit is 2000; 1900 leaves headroom). |
-| `companyDetails` | `true` | External logo/company details for cash equities. |
+| `companyDetails` | `true` | External logo/company details for cash equities. Each ticker is fetched at most once and cached in `cache/company-profiles.json` across restarts; failures back off and never delay a symbol's data. |
 | `quoteIntervalMs` | `0` | Minimum ms between a symbol's chart updates; 0 = every tick. |
 | `maxQuotesPerSecond` | `200` | Total chart/watchlist quote budget across all symbols; 0 = unlimited. A large watchlist cannot flood the app; the ticket and DOM are not counted. |
 | `apiUrl` / `wsUrl` / `masterUrl` | Kite defaults | Endpoints; change only if you proxy them. |

@@ -160,6 +160,28 @@ class CompanyInfo(unittest.TestCase):
         finally:
             fake.close()
 
+    def test_company_profile_is_fetched_once_and_cached_on_disk(self):
+        import tempfile
+        fake = fake_kite.FakeKite()
+        plugin.COMPANY_API = fake.url + "/v1"
+        folder = tempfile.mkdtemp(prefix="zerodha-profiles-")
+        try:
+            source = harness.make_source(fake)
+            plugin.local_app_data = lambda: folder  # make_source uses a throwaway cache; pin it for this test
+            source._profiles = source._read_profile_cache()
+            source._company_profile("RELIANCE")
+            source._company_profile("RELIANCE")
+            self.assertEqual(fake.count("/v1/companies/RELIANCE"), 1)
+            self.assertTrue(source._profile_cache_path().exists())
+            other = harness.make_source(fake)
+            plugin.local_app_data = lambda: folder
+            other._profiles = other._read_profile_cache()
+            self.assertEqual(other._profiles["RELIANCE"]["sector"], "Energy")
+            self.assertEqual(fake.count("/v1/companies/RELIANCE"), 1, "a restart must not fetch it again")
+        finally:
+            fake.close()
+            plugin.COMPANY_API = "https://api.dharun.dev/v1"
+
     def test_company_details_can_be_turned_off(self):
         fake = fake_kite.FakeKite()
         plugin.COMPANY_API = fake.url + "/v1"

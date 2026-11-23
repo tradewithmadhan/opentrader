@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.5.4"
+PLUGIN_VERSION = "0.5.5"
 # Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
 API = 7
@@ -845,7 +845,8 @@ class ZerodhaSource:
         self.last_poll = 0.0
         self.broker_poll = None
         self.order_seq = 0
-        self._profiles = {}  # ticker → {name, sector, industry, oneLine}
+        # Company details never change in real time: cache them on disk, once per ticker, across restarts and days.
+        self._profiles = self._read_profile_cache()  # ticker → {name, sector, industry, oneLine}
         self._profile_failed_until = 0.0
         self._listings = {}  # bare symbol → listing epoch seconds
         self._listings_day = None
@@ -1204,26 +1205,57 @@ class ZerodhaSource:
         finally:
             conn.close()
 
+    @staticmethod
+    def _profile_cache_path():
+        return plugin_data_dir() / "cache" / "company-profiles.json"
+
+    @staticmethod
+    def _read_profile_cache():
+        """A bad or missing cache file must never stop the plugin starting."""
+        try:
+            with open(ZerodhaSource._profile_cache_path(), encoding="utf-8") as f:
+                data = json.load(f)
+            return {str(k): v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def _write_profile_cache(self):
+        """Write to a temp file first: an interrupted save leaves the last good cache intact."""
+        path = self._profile_cache_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._profiles, f)
+            os.replace(tmp, path)
+        except (OSError, TypeError, ValueError) as e:
+            self.log(f"company profile cache not saved: {e}", "warn")
+
     def _company_profile(self, ticker):
-        """sector/industry/name for a cash equity, cached in memory with a short backoff on failure."""
+        """sector/industry/name for a cash equity. Fetched at most once per ticker, then kept on disk for good."""
         with self.lock:
             hit = self._profiles.get(ticker)
             if hit is not None:
                 return hit
             if time.monotonic() < self._profile_failed_until:
                 return None
-        answer = self._external_json(f"{COMPANY_API}/companies/{urllib.parse.quote(ticker, safe='')}")
-        row = (answer or {}).get("data")
-        profile = None
-        if isinstance(row, dict):
-            profile = {k: str(row[k]) for k in ("name", "company", "sector", "industry", "oneLine") if row.get(k)}
-            if profile.get("company") and not profile.get("name"):
-                profile["name"] = profile["company"]
+        try:
+            answer = self._external_json(f"{COMPANY_API}/companies/{urllib.parse.quote(ticker, safe='')}")
+            row = (answer or {}).get("data") if isinstance(answer, dict) else None
+            profile = None
+            if isinstance(row, dict):
+                profile = {k: str(row[k]) for k in ("name", "company", "sector", "industry", "oneLine") if row.get(k)}
+                if profile.get("company") and not profile.get("name"):
+                    profile["name"] = profile["company"]
+        except Exception:  # noqa: BLE001 - enrichment is optional; never let it break a symbol
+            profile = None
         with self.lock:
             if profile is None:
                 self._profile_failed_until = time.monotonic() + 60.0
             else:
                 self._profiles[ticker] = profile
+        if profile is not None:
+            self._write_profile_cache()
         return profile
 
     # ── per-symbol history depth from NSE's listing lists ──
@@ -1608,35 +1640,46 @@ class ZerodhaSource:
             # Kite's personal API serves no minute bars for NCO: offer only days (weeks/months are built by the
             # app) so the chart doesn't keep asking for an interval the source cannot answer.
             "intervals": ["1D"] if exchange == "NCO" else list(SERVED_INTERVALS),
-            # Per-symbol history depth, NOT the per-request chunk size (historyDays* settings). Bounded by NSE's
-            # listing date so a recently listed stock doesn't make the app ask years that cannot exist.
-            "history": self._history_depth(row),
-            "series": self.series_for(row),
-            "fields": self.fields_for(
-                row, self._listed_text(row["ticker"]) if exchange == "NSE" else None,
-                self._listing_fields(row["ticker"]) if exchange == "NSE" else None),
         }
-        if self.company_details and row["type"] == "stock" and exchange in ("NSE", "BSE"):
-            symbol = urllib.parse.quote(row["ticker"], safe="")
-            info["icon"] = f"{COMPANY_API}/logos/{symbol}"
-            # The enrichment service is best effort: never make a symbolInfo request wait on it. A cached profile is
-            # used at once; otherwise fetch it in the background and the app's next ask picks it up.
-            with self.lock:
-                profile = self._profiles.get(row["ticker"])
-                may_fetch = time.monotonic() >= self._profile_failed_until
-            if profile:
-                for key in ("name", "sector", "industry"):
-                    if profile.get(key):
-                        info[key] = profile[key]
-                if profile.get("oneLine"):
-                    info["longDescription"] = profile["oneLine"]
-            elif may_fetch:
-                threading.Thread(target=self._company_profile, args=(row["ticker"],), daemon=True).start()
+        # Everything below is extra information. A bad cache, a slow service or a bug in one of these must never
+        # fail the symbol itself — the chart needs its basic info even when an optional field is broken.
+        listed = None
+        try:
+            info["history"] = self._history_depth(row)
+        except Exception:  # noqa: BLE001
+            info["history"] = dict(HISTORY_DAYS_MAX) if exchange != "NCO" else {"day": HISTORY_DAYS_MAX["day"]}
+        try:
+            info["series"] = self.series_for(row)
+            listed = self._listed_text(row["ticker"]) if exchange == "NSE" else None
+            info["fields"] = self.fields_for(
+                row, listed, self._listing_fields(row["ticker"]) if exchange == "NSE" else None)
+        except Exception:  # noqa: BLE001
+            info["series"], info["fields"], listed = [], [], None
+        try:
+            if self.company_details and row["type"] == "stock" and exchange in ("NSE", "BSE"):
+                symbol = urllib.parse.quote(row["ticker"], safe="")
+                info["icon"] = f"{COMPANY_API}/logos/{symbol}"
+                # Best effort: a cached profile is used at once, otherwise it is fetched in the background.
+                with self.lock:
+                    profile = self._profiles.get(row["ticker"])
+                    may_fetch = time.monotonic() >= self._profile_failed_until
+                if profile:
+                    for key in ("name", "sector", "industry"):
+                        if profile.get(key):
+                            info[key] = profile[key]
+                    if profile.get("oneLine"):
+                        info["longDescription"] = profile["oneLine"]
+                elif may_fetch:
+                    threading.Thread(target=self._company_profile, args=(row["ticker"],), daemon=True).start()
+        except Exception:  # noqa: BLE001
+            pass
         # OpenTrader has no listingDate field in symbolInfo; the dialog shows longDescription, so put it there.
-        listed = self._listed_text(row["ticker"]) if exchange == "NSE" else None
-        if listed:
-            info["longDescription"] = ("Listed " + listed + " · " + info["longDescription"]
-                                       if info.get("longDescription") else "Listed " + listed)
+        try:
+            if listed:
+                info["longDescription"] = ("Listed " + listed + " · " + info["longDescription"]
+                                           if info.get("longDescription") else "Listed " + listed)
+        except Exception:  # noqa: BLE001
+            pass
         return info
 
     def quote(self, ticker):
@@ -1891,7 +1934,9 @@ class ZerodhaSource:
         for candidate in candidates:
             try:
                 bars = self._history_one(token, candidate, frm, to, timeout=3)
-            except PluginError:
+            except AuthError:
+                raise  # a real token expiry must still reach the refresh prompt
+            except Exception:  # noqa: BLE001 - a refused/timed-out probe just means "no seconds history"
                 continue
             if candidate != self._second_history_token.get(mult):
                 self._second_history_token[mult] = candidate
