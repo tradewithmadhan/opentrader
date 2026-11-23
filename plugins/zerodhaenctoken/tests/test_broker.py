@@ -87,6 +87,17 @@ class Books(unittest.TestCase):
         self.assertEqual(row["isin"], "INE002A01018")
         self.assertIn({"id": "isin", "label": "ISIN", "hidden": True}, table["columns"])
 
+    def test_a_t1_holding_with_zero_quantity_is_not_dropped(self):
+        self.fake.holding_rows = [{
+            "tradingsymbol": "RELIANCE", "exchange": "NSE", "product": "CNC",
+            "quantity": 0, "t1_quantity": 5, "average_price": 2400.0,
+            "last_price": 2450.0, "isin": "INE002A01018",
+        }]
+        self.source.on_tick()
+        row = self.source.state()["pages"][0]["tables"][0]["rows"][0]
+        self.assertEqual(row["qty"], 5)
+        self.assertEqual(row["t1Qty"], 5)
+
     def test_holdings_read_in_either_kite_response_shape(self):
         row = {"tradingsymbol": "RELIANCE", "exchange": "NSE", "quantity": 5,
                "average_price": 2000.0, "last_price": 2100.0, "product": "CNC"}

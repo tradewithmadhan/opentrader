@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.5.3"
+PLUGIN_VERSION = "0.5.4"
 # Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
 API = 7
@@ -2204,10 +2204,16 @@ class ZerodhaSource:
 
     def _wire_holding(self, r):
         """A Kite delivery holding → one row of the API 7 Holdings page."""
+        if not getattr(self, "_holding_row_logged", False):
+            self.log(f"holding row: keys={sorted(r.keys())} qty={r.get('quantity')} "
+                     f"t1={r.get('t1_quantity')} symbol={r.get('tradingsymbol')} product={r.get('product')}")
+            self._holding_row_logged = True
         if not r.get("tradingsymbol"):
             return None
         ticker, _row = self._app_symbol(r.get("exchange"), r.get("tradingsymbol"))
-        qty = num(r.get("quantity"), 0) or 0
+        # Kite reports a T1 (bought today, not yet settled) holding with quantity 0 and the stock in t1_quantity.
+        qty = (num(r.get("quantity")) or num(r.get("t1_quantity"))
+               or num(r.get("opening_quantity")) or num(r.get("holding_quantity")) or 0)
         if not qty:
             return None
         avg = num(r.get("average_price")) or num(r.get("price")) or 0
