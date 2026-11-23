@@ -536,6 +536,28 @@ export type BrokerEvent = {
 /** The Tauri event's payload wrapper. */
 export type BrokerOrderEvent = { event: BrokerEvent };
 /** One price level of a broker's book: the quantity resting at its price. */
+/** A data plugin's corporate action / earnings event on a chart (#382). */
+export type SymbolEvent = {
+  kind: string;
+  date: number;
+  amount?: number | null;
+  payDate?: number | null;
+  from?: number | null;
+  to?: number | null;
+  fiscalPeriod?: string | null;
+  fiscalYear?: number | null;
+  periodEnd?: number | null;
+  session?: string | null;
+  eps?: number | null;
+  revenue?: number | null;
+  currency?: string | null;
+};
+export type PluginEventsChanged = { exchanges: string[]; symbols: string[] | null };
+/** A data plugin's instrument values (price bands, circuit limits) shown in Symbol info (#383). */
+export type PluginField = { name: string; value: any };
+export type PluginSymbolFields = { pluginName: string; fields: PluginField[] };
+export type PluginFieldsChanged = { symbol: string };
+
 /** A data plugin's ready-made watchlist (#381). */
 export type PluginWatchlistSection = { name: string; symbols: string[] };
 export type PluginWatchlist = { id: string; name: string; symbols: string[]; sections: PluginWatchlistSection[] };
@@ -711,6 +733,8 @@ export const commands: {
   pluginPromptAnswer(plugin: string, id: string, value: string | null): Promise<void>;
   pluginSetCapability(id: string, capability: Capability, on: boolean): Promise<CommandResult<PluginsStatus>>;
   pluginWatchlists(): Promise<PluginWatchlists[]>;
+  pluginEvents(symbol: string): Promise<CommandResult<SymbolEvent[]>>;
+  pluginSymbolFields(symbol: string): Promise<CommandResult<PluginSymbolFields | null>>;
   pluginNewToken(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginRemove(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginFolderCandidates(id: string, step: number): Promise<CommandResult<string[]>>;
@@ -803,6 +827,8 @@ export const commands: {
   pluginPromptAnswer(plugin: string, id: string, value: string | null): Promise<void>;
   pluginSetCapability(id: string, capability: Capability, on: boolean): Promise<CommandResult<PluginsStatus>>;
   pluginWatchlists(): Promise<PluginWatchlists[]>;
+  pluginEvents(symbol: string): Promise<CommandResult<SymbolEvent[]>>;
+  pluginSymbolFields(symbol: string): Promise<CommandResult<PluginSymbolFields | null>>;
   pluginNewToken(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginRemove(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginFolderCandidates(id: string, step: number): Promise<CommandResult<string[]>>;
@@ -846,4 +872,6 @@ export const events = new Proxy(
   brokerDepth: EventListen<BrokerDepth>;
   pluginTicks: EventListen<PluginTicks>;
   pluginWatchlistsChanged: EventListen<any>;
+  pluginEventsChanged: EventListen<PluginEventsChanged>;
+  pluginFieldsChanged: EventListen<PluginFieldsChanged>;
 } & Record<string, EventListen<any>>;

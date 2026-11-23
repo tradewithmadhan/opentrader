@@ -229,7 +229,7 @@ describe("runOakScriptStrategy", () => {
 
 describe("declaration run", () => {
   it("reads the chart's ticker: a series of the symbol's own is declared (#383)", async () => {
-    const { executeScript, indicator, plot, request, syminfo } = await import("oakscriptjs/script");
+    const { executeScript, indicator, plot, request, syminfo, close } = await import("oakscriptjs/script");
     const { DECLARATION_CHART } = await import("../oakscript");
     const run = executeScript(() => {
       indicator("OI");
