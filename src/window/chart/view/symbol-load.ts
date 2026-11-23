@@ -19,8 +19,7 @@
 import { createEffect, createSignal, onCleanup, untrack } from "solid-js";
 import { type Time } from "lightweight-charts";
 import { liveBarSpacing } from "../control-bar";
-import { initialViewBars, type BarsResult, type SessionId } from "../../../data/datafeed";
-import { source } from "../../../data/sources";
+import { dailyLoadIsWhole, initialViewBars, type BarsResult, type SessionId } from "../../../data/datafeed";
 import { isTransformType, setDataForType } from "../chart-types";
 import { type ChartCx } from "./context";
 import { toOHLC, barsSpan, MIN_VISIBLE_BARS, SYMBOL_CHANGE_MAX_BACK } from "./helpers";
@@ -308,12 +307,8 @@ export function createSymbolLoad(cx: ChartCx): SymbolLoadApi {
       }
       framed = view === null ? "all" : String(view);
     }
-    // The daily family preloads its full history up front and marks paging
-    // exhausted — unless the source caps daily history (a finite day limit),
-    // in which case older bars page in lazily through dailyBefore like
-    // intraday. Uncapped sources (Tauri/Massive, sample) keep today's
-    // zero-network behavior.
-    if (cx.rawDaily.length > 0 && source().historyLimits()?.day == null) cx.historyExhausted = true;
+    // The daily family's load is the whole history, except a data plugin's (its newest bars, older ones paged: #386).
+    if (cx.rawDaily.length > 0 && dailyLoadIsWhole(props.symbol)) cx.historyExhausted = true;
     cx.updateHistoryEnd();
     {
       const _r = cx.chart.timeScale().getVisibleLogicalRange();
