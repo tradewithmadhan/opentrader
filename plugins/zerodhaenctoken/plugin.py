@@ -33,7 +33,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.5.8"
+PLUGIN_VERSION = "0.5.9"
 # Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
 API = 7
@@ -1397,29 +1397,31 @@ class ZerodhaSource:
                 if event is not None:
                     event.set()
 
-    def _listing_of(self, symbol):
-        """The cached NSE listing row: {date, isin, face, series}. Older caches held only the epoch."""
+    def _listing_of(self, symbol, listings=None):
+        """The cached NSE listing row: {date, isin, face, series}. `listings` is a snapshot taken once per request."""
         if not symbol:
             return None
-        self._load_listings()
-        with self.lock:
-            entry = self._listings.get(symbol.upper())
+        if listings is None:
+            self._load_listings()
+            with self.lock:
+                listings = self._listings
+        entry = listings.get(symbol.upper())
         if entry is None:
             return None
         return entry if isinstance(entry, dict) else {"date": entry}
 
-    def _listed_text(self, symbol):
+    def _listed_text(self, symbol, listings=None):
         """dd/mm/yyyy listing date of an NSE symbol, or None (used in longDescription and the Listed field)."""
-        entry = self._listing_of(symbol)
+        entry = self._listing_of(symbol, listings)
         when = entry.get("date") if entry else None
         return datetime.fromtimestamp(when, TZ_IST).strftime("%d/%m/%Y") if when else None
 
-    def _listing_fields(self, symbol):
+    def _listing_fields(self, symbol, listings=None):
         """The other NSE listing CSV columns we keep: ISIN, face value and series."""
-        entry = self._listing_of(symbol) or {}
+        entry = self._listing_of(symbol, listings) or {}
         return {key: entry[key] for key in ("isin", "face", "series") if entry.get(key)}
 
-    def _history_depth(self, row):
+    def _history_depth(self, row, listings=None):
         """Per-symbol `history` for data.symbolInfo: the app's hard clamp on history requests and scroll-back.
 
         NOT the same as the manifest's historyDays* settings: those decide how many days we fetch from Kite in
@@ -1432,7 +1434,7 @@ class ZerodhaSource:
         """
         listed = None
         if row["exchange"] == "NSE":
-            entry = self._listing_of(row["ticker"]) or {}
+            entry = self._listing_of(row["ticker"], listings) or {}
             when = entry.get("date")
             if when:
                 listed = max(1, int((time.time() - when) / 86400))
@@ -1704,18 +1706,27 @@ class ZerodhaSource:
             # app) so the chart doesn't keep asking for an interval the source cannot answer.
             "intervals": ["1D"] if exchange == "NCO" else list(SERVED_INTERVALS),
         }
+        # Ensure a snapshot exists. The first call of the day may fetch the two small CSVs; every other caller
+        # returns at once (single-flight) and reads the local cache, so a watchlist is served in parallel.
+        self._load_listings()
+        # One short lock hold for all cached snapshots; everything after this is lock-free, so a watchlist of 30
+        # symbols is answered in parallel from local data rather than queuing on the same lock three times each.
+        with self.lock:
+            listings = self._listings
+            profiles = self._profiles
+            may_fetch = time.monotonic() >= self._profile_failed_until
         # Everything below is extra information. A bad cache, a slow service or a bug in one of these must never
         # fail the symbol itself — the chart needs its basic info even when an optional field is broken.
         listed = None
         try:
-            info["history"] = self._history_depth(row)
+            info["history"] = self._history_depth(row, listings)
         except Exception:  # noqa: BLE001
             info["history"] = dict(HISTORY_DAYS_MAX) if exchange != "NCO" else {"day": HISTORY_DAYS_MAX["day"]}
         try:
             info["series"] = self.series_for(row)
-            listed = self._listed_text(row["ticker"]) if exchange == "NSE" else None
+            listed = self._listed_text(row["ticker"], listings) if exchange == "NSE" else None
             info["fields"] = self.fields_for(
-                row, listed, self._listing_fields(row["ticker"]) if exchange == "NSE" else None)
+                row, listed, self._listing_fields(row["ticker"], listings) if exchange == "NSE" else None)
         except Exception:  # noqa: BLE001
             info["series"], info["fields"], listed = [], [], None
         try:
@@ -1723,9 +1734,7 @@ class ZerodhaSource:
                 symbol = urllib.parse.quote(row["ticker"], safe="")
                 info["icon"] = f"{COMPANY_API}/logos/{symbol}"
                 # Best effort: a cached profile is used at once, otherwise it is fetched in the background.
-                with self.lock:
-                    profile = self._profiles.get(row["ticker"])
-                    may_fetch = time.monotonic() >= self._profile_failed_until
+                profile = profiles.get(row["ticker"])
                 if profile:
                     for key in ("name", "sector", "industry"):
                         if profile.get(key):
