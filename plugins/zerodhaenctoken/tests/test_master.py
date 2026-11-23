@@ -59,6 +59,13 @@ class SearchAndInfo(unittest.TestCase):
         self.assertEqual([r["ticker"] for r in rows], ["NSE:RELIANCE"])
         self.assertEqual(rows[0]["type"], "stock")
 
+    def test_multi_word_option_query_matches_the_description(self):
+        rows = self.source.search("NIFTY 25000")
+        self.assertIn("NFO:NIFTY25NOV25000CE", [r["ticker"] for r in rows])
+        self.assertEqual(
+            next(r["description"] for r in rows if r["ticker"] == "NFO:NIFTY25NOV25000CE"),
+            "NIFTY 25000 CE 2026-11-25")
+
     def test_exchange_prefix_narrows(self):
         self.assertEqual([r["ticker"] for r in self.source.search("NSE:REL")], ["NSE:RELIANCE"])
         # The app filters rows by the exchange the user typed; the plugin may return matches on other

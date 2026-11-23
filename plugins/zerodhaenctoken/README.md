@@ -151,6 +151,13 @@ The app's chart-event pipeline currently reads dividends/splits/fundamentals fro
 extra field, so nothing is drawn yet. The data is on the wire for the upstream app change needed to show the markers
 on the chart.
 
+## Symbol search
+
+Search matches the ticker, the company/underlying name **and** the built description. A multi-word query is
+normalised and its words must all appear in the searchable text, so `NIFTY 25000` finds the option whose
+tradingsymbol is `NIFTY25NOV25000CE` and whose description is `NIFTY 25000 CE 25-NOV-26`. Results are ranked
+ticker-prefix → ticker-substring → name/description, spread across the configured segments, 50 at a time.
+
 ## Plugin API 6
 
 The plugin speaks **API 6** and uses the upstream features adopted in this fork:

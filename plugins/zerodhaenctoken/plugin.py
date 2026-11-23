@@ -438,36 +438,43 @@ class Instruments:
             return self.by_kite.get(key)
 
     def catalog_get(self):
-        """Precomputed search list: (ticker upper, name upper, whole symbol, type, description)."""
+        """Precomputed search rows: (ticker, name, whole symbol, type, description, searchable text).
+
+        The searchable text joins ticker, name and the built description (e.g. "NIFTY 25000 CE 25-NOV-26"), so a
+        multi-word option query needs no space in the exchange tradingsymbol.
+        """
         with self.lock:
             if self.catalog is not None:
                 return self.catalog
-            catalog = [
-                (r["ticker"].upper(), r["name"].upper(), f"{r['exchange']}:{r['ticker']}",
-                 r["type"], r["description"])
-                for r in self.rows
-            ]
+            catalog = []
+            for r in self.rows:
+                ticker_up, name_up = r["ticker"].upper(), r["name"].upper()
+                description_up = r["description"].upper()
+                catalog.append((ticker_up, name_up, f"{r['exchange']}:{r['ticker']}", r["type"],
+                                r["description"], f"{ticker_up} {name_up} {description_up}"))
             self.catalog = catalog
             return catalog
 
     def search(self, query, exchanges):
-        """Up to 50 rows, ranked symbol-prefix → symbol → name, spread over the segments in setting order."""
+        """Up to 50 rows, ranked symbol-prefix → symbol → name/description, spread over the segments."""
         self.ensure()
-        q = query.strip().upper()
+        q = " ".join(query.strip().upper().split())  # normalise whitespace: "nifty  25000"
         prefix, sep, rest = q.partition(":")
         if sep and prefix in exchanges:
             q = rest.strip()
+        words = q.split()
         tiers = ({}, {}, {})
-        for ticker_up, name_up, whole, kind, description in self.catalog_get():
+        for ticker_up, name_up, whole, kind, description, searchable in self.catalog_get():
             exchange = whole.split(":", 1)[0]
             if exchange not in exchanges:
                 continue
             hit = (ticker_up, whole, kind, description)
             if q and ticker_up.startswith(q):
                 tiers[0].setdefault(exchange, []).append(hit)
-            elif q and q in ticker_up:
+            elif q and (q in ticker_up or all(w in ticker_up for w in words)):
                 tiers[1].setdefault(exchange, []).append(hit)
-            elif q and q in name_up:
+            elif q and all(w in searchable for w in words):
+                # Name/description hits: "NIFTY 25000" matches "NIFTY 25000 CE 25-NOV-26".
                 tiers[2].setdefault(exchange, []).append(hit)
             elif not q:
                 tiers[0].setdefault(exchange, []).append(hit)
