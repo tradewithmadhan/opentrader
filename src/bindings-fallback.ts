@@ -161,7 +161,7 @@ export type LocalModelInfo = {
   installed: boolean;
   running: boolean;
   downloadBytes: number;
-  diskBytes: number;
+  diskBytes: number | null;
   ramBytes: number;
   ramNeededBytes: number;
   freeDiskBytes: number;
@@ -169,7 +169,7 @@ export type LocalModelInfo = {
   // The versioned fine-tunes: the one on disk and the newest this build offers.
   version?: number | null;
   latestVersion: number;
-  updateBytes: number;
+  updateBytes: number | null;
 };
 export type LocalProgress = {
   file: string;
@@ -428,6 +428,8 @@ export type BrokerCapabilities = {
   stopLimitOrdersBothSides?: boolean;
   /** A limit order may not cross the market (a buy limit above the ask). */
   strictLimitPrice?: boolean;
+  /** Plugin can preview orders (what-if) before placing, #139. */
+  orderPreview?: boolean;
 };
 export type Position = {
   id: string;
@@ -483,6 +485,8 @@ export type BrokerState = {
   capabilities: BrokerCapabilities;
   positions: Position[];
   orders: Order[];
+  /** The broker's own account-manager pages (holdings, funds…), #384. */
+  pages: AccountPage[];
   executions: Execution[];
 };
 /** What the order ticket sends (`broker.place`, and `broker.modify` with `orderId`). */
@@ -536,6 +540,28 @@ export type BrokerEvent = {
 /** The Tauri event's payload wrapper. */
 export type BrokerOrderEvent = { event: BrokerEvent };
 /** One price level of a broker's book: the quantity resting at its price. */
+/** Broker plugin account-manager pages (holdings, funds…), #384. */
+export type ColumnFormat = "symbol" | "side" | "qty" | "price" | "money" | "pnl" | "percent" | "pnlPercent" | "number" | "text" | "time";
+export type PageCell = number | string | null;
+export type AccountPageColumn = { id: string; label: string; format?: ColumnFormat; hidden?: boolean };
+export type AccountPageSort = { column: string; asc?: boolean };
+export type AccountPageTable = {
+  id: string;
+  title?: string | null;
+  columns: AccountPageColumn[];
+  sort?: AccountPageSort | null;
+  rows: Record<string, PageCell | null>[];
+};
+export type AccountPage = { id: string; title: string; counter?: boolean; tables: AccountPageTable[] };
+/** Order preview (what-if) shown on the ticket's confirmation page, #139. */
+export type PreviewSection = { title?: string | null; rows: AccountValue[] };
+export type OrderPreview = {
+  sections: PreviewSection[];
+  warnings: string[];
+  errors: string[];
+  confirmId?: string | null;
+};
+
 /** A data plugin's corporate action / earnings event on a chart (#382). */
 export type SymbolEvent = {
   kind: string;
@@ -756,6 +782,7 @@ export const commands: {
   brokerSetSymbolMap(id: string, map: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
   brokerRefreshState(): Promise<void>;
   brokerInstrument(ticker: string): Promise<CommandResult<Instrument>>;
+  brokerPreviewOrder(ticket: OrderTicket): Promise<CommandResult<OrderPreview>>;
   [key: string]: any;
 } = new Proxy(
   {},
@@ -850,6 +877,7 @@ export const commands: {
   brokerSetSymbolMap(id: string, map: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
   brokerRefreshState(): Promise<void>;
   brokerInstrument(ticker: string): Promise<CommandResult<Instrument>>;
+  brokerPreviewOrder(ticket: OrderTicket): Promise<CommandResult<OrderPreview>>;
   [key: string]: any;
 };
 
