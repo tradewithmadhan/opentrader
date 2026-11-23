@@ -33,7 +33,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.5.6"
+PLUGIN_VERSION = "0.5.7"
 # Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
 API = 7
@@ -109,6 +109,9 @@ WATCH_GRACE_SEC = 1.5
 # Kite's corporate-actions endpoint refuses ranges over 1095 days, so walk it in 3-year chunks from this year.
 EVENTS_FROM = date(1990, 1, 1)
 EVENTS_CHUNK_DAYS = 1095
+
+# Bump only when parse_master_csv's output shape changes; not on every plugin release (the master is 31 MB).
+MASTER_CACHE_VERSION = 1
 
 # A Kite ticker connection carries at most 3000 instruments. The app can subscribe more (a large watchlist plus
 # charts and alerts), so keep the set within the broker's limit instead of losing the whole stream.
@@ -365,9 +368,25 @@ class Instruments:
         self.day = None
         self.loading = None
 
-    def _path(self, day):
-        # Versioned: a plugin update must not keep yesterday's normalisation of the same day's master.
-        return plugin_data_dir() / "cache" / f"master-{PLUGIN_VERSION}-{day}.json"
+    @staticmethod
+    def _path(day):
+        # Version only when the parsed shape changes — a plugin update must not re-download 31 MB every time.
+        return plugin_data_dir() / "cache" / f"master-v{MASTER_CACHE_VERSION}-{day}.json"
+
+    @staticmethod
+    def _existing_path(day):
+        """Read today's master from the new name, or migrate an older version-named file instead of refetching."""
+        new = Instruments._path(day)
+        if new.exists():
+            return new
+        try:
+            old = sorted((plugin_data_dir() / "cache").glob(f"master-*-{day}.json"),
+                         key=lambda p: p.stat().st_mtime)
+            if old:
+                return old[-1]
+        except OSError:
+            pass
+        return new
 
     def ensure(self):
         """Load today's master (memory → disk → Kite). Several callers share one fetch."""
@@ -386,7 +405,7 @@ class Instruments:
                 return self.rows
         rows = None
         try:
-            path = self._path(today)
+            path = self._existing_path(today)
             try:
                 with open(path, encoding="utf-8") as f:
                     rows = json.load(f)
@@ -852,8 +871,9 @@ class ZerodhaSource:
         self._profile_queue = queue.Queue()  # one background worker, so a watchlist never starts 30 HTTP calls
         self._profile_queued = set()
         threading.Thread(target=self._profile_worker, daemon=True, name="CompanyProfiles").start()
-        self._listings = {}  # bare symbol → listing epoch seconds
+        self._listings = {}  # bare symbol → listing row
         self._listings_day = None
+        self._listings_loading = None  # single-flight event for the two public CSVs
         self.company_details = True
         self.quote_interval = 0  # ms between data.quote updates per symbol; 0 = every tick
         self.max_quotes_per_second = 200  # total data.quote budget; 0 = every tick (old behaviour)
@@ -885,7 +905,8 @@ class ZerodhaSource:
                     day = date.fromisoformat(day_text)
                 except ValueError:
                     continue
-                if version == PLUGIN_VERSION and day in (today, yesterday):
+                # Keep every naming scheme for today/yesterday: an update must not delete the master it can reuse.
+                if day in (today, yesterday):
                     continue
                 try:
                     path.unlink()
@@ -1018,6 +1039,7 @@ class ZerodhaSource:
                  f"broker={'on' if self.broker_enabled else 'off'}")
         def load_master():
             self.instruments.ensure()
+            self._load_listings()  # warm both caches before the app's symbolInfo burst arrives
             if self.plugin is not None and self.plugin.alive:
                 self.plugin.push_watchlists()
 
@@ -1317,45 +1339,62 @@ class ZerodhaSource:
         return None
 
     def _load_listings(self):
+        """Single-flight: a watchlist must not make 30 symbolInfo threads fetch the same two CSVs at once."""
         today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
         with self.lock:
             if self._listings_day == today:
                 return
-        path = plugin_data_dir() / "cache" / f"nse-listings-{today}.json"
-        data = None
+            if self._listings_loading is None:
+                self._listings_loading = threading.Event()
+                mine = True
+            else:
+                mine = False
+        if not mine:
+            self._listings_loading.wait(10)
+            return
         try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            pass
-        if data is None:
-            data = {}
-            for url in (NSE_EQUITY_LIST_URL, NSE_SME_LIST_URL):
-                text = self._public_csv(url)
-                if not text:
-                    continue
-                for raw in csv.DictReader(io.StringIO(text)):
-                    row = {str(k).strip(): str(v or "").strip() for k, v in raw.items() if k}
-                    symbol = row.get("SYMBOL") or ""
-                    date_text = row.get("DATE OF LISTING") or row.get("DATE_OF_LISTING") or ""
-                    if not symbol or not date_text:
-                        continue
-                    when = self._parse_listing_date(date_text)
-                    if when:
-                        data[symbol.upper()] = {
-                            "date": when,
-                            "isin": row.get("ISIN NUMBER") or row.get("ISIN_NUMBER") or row.get("ISIN") or "",
-                            "face": row.get("FACE VALUE") or row.get("FACE_VALUE") or "",
-                            "series": row.get("SERIES") or "",
-                        }
+            path = plugin_data_dir() / "cache" / f"nse-listings-{today}.json"
+            data = None
             try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(data, f)
-            except OSError:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
                 pass
-        with self.lock:
-            self._listings, self._listings_day = data, today
+            if data is None:
+                data = {}
+                for url in (NSE_EQUITY_LIST_URL, NSE_SME_LIST_URL):
+                    text = self._public_csv(url, timeout=5)
+                    if not text:
+                        continue
+                    for raw in csv.DictReader(io.StringIO(text)):
+                        row = {str(k).strip(): str(v or "").strip() for k, v in raw.items() if k}
+                        symbol = row.get("SYMBOL") or ""
+                        date_text = row.get("DATE OF LISTING") or row.get("DATE_OF_LISTING") or ""
+                        if not symbol or not date_text:
+                            continue
+                        when = self._parse_listing_date(date_text)
+                        if when:
+                            data[symbol.upper()] = {
+                                "date": when,
+                                "isin": row.get("ISIN NUMBER") or row.get("ISIN_NUMBER") or row.get("ISIN") or "",
+                                "face": row.get("FACE VALUE") or row.get("FACE_VALUE") or "",
+                                "series": row.get("SERIES") or "",
+                            }
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(data, f)
+                except OSError:
+                    pass
+            with self.lock:
+                self._listings, self._listings_day = data, today
+        except Exception as e:  # noqa: BLE001 - the listing data is optional
+            self.log(f"NSE listing lists not read: {e}", "warn")
+        finally:
+            with self.lock:
+                event, self._listings_loading = self._listings_loading, None
+                if event is not None:
+                    event.set()
 
     def _listing_of(self, symbol):
         """The cached NSE listing row: {date, isin, face, series}. Older caches held only the epoch."""

@@ -302,7 +302,6 @@ class CachePruning(unittest.TestCase):
         }
         drop = {
             f"master-{plugin.PLUGIN_VERSION}-{today - timedelta(days=5)}.json",
-            f"master-0.0.1-{today}.json",
         }
         for name in keep | drop:
             (cache / name).write_text("{}")
