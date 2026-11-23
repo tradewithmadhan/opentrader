@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.4.1"
 # Plugin API 6: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields).
 API = 6
@@ -850,7 +850,8 @@ class ZerodhaSource:
         self._watch_timers = {}  # method → Timer for a pending empty-watch clear
         # Live performance counters, logged every 30 s by _perf_loop (started in configure()).
         self._perf = {"ticks": 0, "quotes": 0, "bquotes": 0, "depth": 0,
-                      "batches": 0, "skipped": 0, "budget_skipped": 0, "reconnects": 0}
+                      "batches": 0, "skipped": 0, "budget_skipped": 0,
+                      "cached_bars": 0, "reconnects": 0}
         self._perf_thread = None
         self._events = {}  # token → (day, corporate actions)
         self._prune_caches()
@@ -928,7 +929,7 @@ class ZerodhaSource:
             self.log(f"[perf] ticks={counts['ticks']} data.quote={counts['quotes']} "
                      f"broker.quote={counts['bquotes']} depth={counts['depth']} "
                      f"batches={counts['batches']} throttle_skipped={counts['skipped']} "
-                     f"budget_skipped={counts['budget_skipped']} "
+                     f"budget_skipped={counts['budget_skipped']} cached_bars={counts['cached_bars']} "
                      f"quotes_cached={cached} tokens={tokens}(full {full}) "
                      f"reconnects={counts['reconnects']}")
 
@@ -1838,12 +1839,39 @@ class ZerodhaSource:
                 return (row, name) if row is not None else None
         return None
 
+    def _live_bar(self, ticker, resolution, frm, to, count_back):
+        """The current forming bar, already built from the tick stream — answer a refresh without calling Kite.
+
+        Kite's quote/full packet carries the day's (or minute's) open/high/low, the last price and cumulative volume.
+        `on_ticks` turns those into the same OHLCV bar the history endpoint would return, so a "newest one bar"
+        refresh — including the OI series' — can be served from the cache.
+        """
+        if not 1 <= (count_back or 0) <= 2:
+            return None
+        q = self.quotes.get(ticker)
+        if not q:
+            return None
+        now = time.time()
+        if resolution == "1D":
+            bar, stamp = q.get("day"), ist_midnight(now)
+        elif resolution == "1":
+            bar, stamp = q.get("minute"), now // 60 * 60
+        else:
+            return None
+        if not bar or bar[0] != stamp or frm > stamp or to < stamp:
+            return None
+        return [list(bar)]
+
     def bars(self, ticker, resolution, frm, to, count_back):
         series = self._series_row(ticker)
         row = series[0] if series else self.instruments.row(ticker)
         if row is None:
             raise PluginError(f"Unknown symbol {ticker}", -32004)
         interval = self._interval_for(resolution)
+        cached = self._live_bar(ticker, resolution, frm, to, count_back)
+        if cached is not None:
+            self._perf["cached_bars"] += 1
+            return cached
         chunk_days = (self._cap("historyDaysDaily", 1900) if interval == "day"
                       else self._cap("historyDaysMinute", 30))
         step = chunk_days * 86400

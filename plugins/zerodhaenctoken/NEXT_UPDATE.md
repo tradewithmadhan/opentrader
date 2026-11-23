@@ -1,6 +1,8 @@
 # Next update: cache the Kite history window (single call for price + OI)
 
-Status: **not done — follow-up after the API 6 release (0.3.0)**.
+Status: **partly done**. The app's one-bar refresh (`countBack=1`, newest bar) is now served from the live tick
+cache in `bars()` → `_live_bar()` — Kite's tick already carries the day's OHLC, LTP and cumulative volume, so no
+history call is made for it (including `<symbol>_OI`). The **full-window** price + OI duplication below is still open.
 
 ## What we saw in live
 

@@ -125,6 +125,37 @@ class Stream(unittest.TestCase):
         self.assertEqual(len([a for a in self.fake.ws.actions() if a.get("a") == "mode"]), modes,
                          "the chart switch must not send mode frames")
 
+    def test_current_daily_bar_is_served_from_the_tick_cache(self):
+        self.subscribed("NSE:RELIANCE")
+        self.fake.ws.push_ticks([fake_kite.FakeWs.packet_quote(
+            738561, 2500.0, open_=2490.0, high=2510.0, low=2480.0, close=2495.0, volume=5000)])
+        self.assertTrue(harness.wait_until(lambda: self.source.quotes.get("NSE:RELIANCE", {}).get("day"), 3.0))
+        path = "/oms/instruments/historical/738561/day"
+        before = self.fake.count(path)
+        now = int(time.time())
+        bars = self.source.bars("NSE:RELIANCE", "1D", plugin.ist_midnight(now), now, 1)
+        self.assertEqual(len(bars), 1)
+        self.assertEqual(bars[0][1:5], [2490.0, 2510.0, 2480.0, 2500.0])
+        self.assertEqual(bars[0][5], 5000)
+        self.assertEqual(self.fake.count(path), before, "the newest-bar refresh makes no Kite history call")
+        self.assertGreater(self.source._perf["cached_bars"], 0)
+        older = now - 10 * 86400
+        self.assertTrue(self.source.bars("NSE:RELIANCE", "1D", older, now, 10))
+        self.assertGreater(self.fake.count(path), before, "a real history window still goes to Kite")
+
+    def test_oi_series_current_bar_uses_the_live_oi_cache(self):
+        ticker = "NFO:NIFTY25NOVFUT_OI"
+        self.source.set_subscriptions([ticker])
+        token = self.source.instruments.row("NFO:NIFTY25NOVFUT")["token"]
+        self.fake.ws.push_ticks([fake_kite.FakeWs.packet_full(token, 250.0, oi=12345)])
+        self.assertTrue(harness.wait_until(lambda: self.source.quotes.get(ticker, {}).get("day"), 3.0))
+        path = f"/oms/instruments/historical/{token}/day"
+        before = self.fake.count(path)
+        now = int(time.time())
+        bars = self.source.bars(ticker, "1D", plugin.ist_midnight(now), now, 1)
+        self.assertEqual(bars[0][4], 12345)
+        self.assertEqual(self.fake.count(path), before, "the OI refresh needs no second history call")
+
     def test_an_empty_watch_does_clear_after_the_grace_period(self):
         self.app.on_notification("broker.watchDepth", {"tickers": ["NSE:RELIANCE"]})
         self.assertTrue(harness.wait_until(

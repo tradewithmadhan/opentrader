@@ -98,6 +98,11 @@ you want faster price refresh on every row. An empty `broker.watchQuote`/`watchD
 applied: switching charts sends an empty watch followed immediately by the new symbol, and dropping full mode in
 between would churn Kite's `mode` frames and blank the ticket's bid/ask.
 
+The app's periodic **newest-bar refresh** (`data.bars` with `countBack=1` for `1D`/`1`) is answered from the live tick
+cache: Kite's tick already carries the forming bar's open/high/low, last price and cumulative volume, so those
+refreshes — including the `_OI` series' — make **no** Kite history call. Older windows still come from the history
+endpoint. The perf log counts them as `cached_bars`.
+
 ## Trading
 
 Install/enable the plugin, then **Trade > Connect broker… > Zerodha (enctoken)** and **Trade > Turn trading on**.
