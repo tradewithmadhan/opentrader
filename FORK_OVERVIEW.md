@@ -253,6 +253,7 @@ Why: keep the fork on current upstream while keeping our extras. Adopted by cher
 - #375–#378 MT5/IBKR catalog, tick charts, tick-based Bar Replay, #331 symbol search,
 - #379 Plugin API 3 (password settings, conditional settings, plugin data folder, prompts) and #380 per-capability plugin on/off switches; IBKR 0.3.0.
 - Plugin API 4 (#381): data plugins send ready-made watchlists (our OpenAlgo plugin still speaks API 3; older-version plugins keep working).
+- #384: broker plugins add their own account-manager tabs (e.g. Holdings); #382/#383/#385/#386/#387 fixed earlier; Plugin API 5/6 for events, extra series, watchlists.
 - plus earlier pre-base commits that were genuinely missing: #310 far-date window, #156 Replay broker buttons,
   #325 OakScript Logs start date, #340 plugin bar grid test, #350 chart links.
 Where our version was newer (point value #345, tick-size watchlist #319, plugin intervals #318, alerts, etc.),
