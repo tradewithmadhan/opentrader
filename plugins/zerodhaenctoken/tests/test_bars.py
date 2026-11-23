@@ -186,5 +186,40 @@ class Events(unittest.TestCase):
             fake.close()
 
 
+class Seconds(unittest.TestCase):
+    def test_second_bars_use_kite_history_when_it_serves_them(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            source.instruments.ensure()
+            at = datetime.now(IST).replace(hour=9, minute=15, second=0, microsecond=0)
+            frm, to = int(at.timestamp()), int(at.timestamp()) + 300
+            bars = source.bars("NSE:RELIANCE", "5S", frm, to, 10)
+            self.assertEqual(len(bars), 10)
+            self.assertEqual(bars[1][0] - bars[0][0], 5)
+            self.assertEqual(fake.count("/oms/instruments/historical/738561/5second"), 1)
+        finally:
+            fake.close()
+
+    def test_second_bars_fall_back_to_live_ticks(self):
+        fake = fake_kite.FakeKite()
+        fake.history_status = 400  # this deployment refuses seconds
+        try:
+            source = harness.make_source(fake)
+            source.instruments.ensure()
+            source.subscribed = {"NSE:RELIANCE"}
+            source.on_ticks([{"instrument_token": 738561, "last_price": 2500.0,
+                              "volume": 100, "ohlc": {"open": 2499.0, "high": 2501.0, "low": 2498.0}}])
+            stamp = source._ticks["NSE:RELIANCE"][0][0]
+            frm = int(stamp) // 5 * 5
+            bars = source.bars("NSE:RELIANCE", "5S", frm, frm + 10, 10)
+            self.assertEqual(bars[0][0], frm)
+            self.assertEqual(bars[0][4], 2500.0)
+            self.assertEqual(fake.count("/oms/instruments/historical/738561/5second"), 1,
+                             "the refused interval is probed once, then remembered")
+        finally:
+            fake.close()
+
+
 if __name__ == "__main__":
     unittest.main()

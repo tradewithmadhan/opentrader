@@ -103,6 +103,15 @@ cache: Kite's tick already carries the forming bar's open/high/low, last price a
 refreshes — including the `_OI` series' — make **no** Kite history call. Older windows still come from the history
 endpoint. The perf log counts them as `cached_bars`.
 
+## Intervals
+
+The plugin serves **1, 3, 5, 10, 15, 30 minutes and 1 day** from Kite's history. The app builds 2/4-minute bars from
+1-minute ones, hours from 15-minute ones, and weeks/months from daily ones. Seconds (1/5/10/15/30/45 S) are also
+offered: on each first request the plugin probes Kite for a seconds history interval and, when Kite serves one, uses
+it. Kite Connect documents no seconds interval; when the personal OMS refuses it, second bars are built from the live
+tick stream going forward — **there is no backfill**, so a fresh seconds chart fills from the moment it is opened.
+The log line `seconds history: 5s via Kite interval '…'` shows which source won.
+
 ## Trading
 
 Install/enable the plugin, then **Trade > Connect broker… > Zerodha (enctoken)** and **Trade > Turn trading on**.

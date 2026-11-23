@@ -70,6 +70,8 @@ def master_csv(rows=None):
 def step_seconds(interval):
     if interval.endswith("minute"):
         return int(interval[:-6]) * 60
+    if interval.endswith("second"):
+        return int(interval[:-6])
     return 60
 
 

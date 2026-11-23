@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.5.1"
+PLUGIN_VERSION = "0.5.2"
 # Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
 API = 7
@@ -198,7 +198,11 @@ INTERVALS = {
     "1": "minute", "3": "3minute", "5": "5minute", "10": "10minute",
     "15": "15minute", "30": "30minute", "1D": "day",
 }
-SERVED_INTERVALS = list(INTERVALS)
+# Kite's personal history has no seconds. These bars are built from the live tick stream (see _second_bars), so they
+# have no backfill: a chart opened on one starts empty and fills as ticks arrive.
+SECOND_INTERVALS = {"1S": 1, "5S": 5, "10S": 10, "15S": 15, "30S": 30, "45S": 45}
+SERVED_INTERVALS = list(INTERVALS) + list(SECOND_INTERVALS)
+TICK_BUFFER_SEC = 7200  # keep two hours of ticks, enough for the app's 1-3 day second windows to fill forward
 
 PROFILE_PATH = "/oms/user/profile"
 HISTORY_PATH = "/oms/instruments/historical/{token}/{interval}"
@@ -819,6 +823,8 @@ class ZerodhaSource:
         self.user_id = ""
         self.instruments = Instruments(self)
         self.quotes = {}  # whole symbol → live price cache and forming bars
+        self._ticks = {}  # whole symbol → [(epoch sec, price, volume delta)] for the app's second charts
+        self._second_history_token = {}  # seconds bucket → Kite interval token that works, or "" when none
         self.subscribed = set()  # whole symbols from data.subscribe
         self.oi_subscribed = set()  # extra series tickers subscribed for their OI
         self.ws = None
@@ -1504,6 +1510,13 @@ class ZerodhaSource:
                     m[5] = (m[5] or 0) + delta
                 q["minute"] = m
                 q["price"] = price
+                # Second charts have no Kite history; keep recent ticks so _second_bars can build them.
+                if ticker in self.subscribed:
+                    ticks = self._ticks.setdefault(ticker, [])
+                    ticks.append((now_ms / 1000.0, price, delta))
+                    cutoff = now - TICK_BUFFER_SEC
+                    if len(ticks) > 20_000 or (ticks and ticks[0][0] < cutoff):
+                        self._ticks[ticker] = [x for x in ticks if x[0] >= cutoff][-20_000:]
                 if t.get("depth"):
                     q["depth"] = t["depth"]
 
@@ -1628,6 +1641,8 @@ class ZerodhaSource:
             return self._quote_of(ticker, q)
 
     def _interval_for(self, resolution):
+        if resolution in SECOND_INTERVALS:
+            return "second"
         interval = INTERVALS.get(resolution)
         if interval is None:
             raise PluginError(f"Resolution {resolution} is not served by Zerodha", -32602)
@@ -1862,6 +1877,42 @@ class ZerodhaSource:
                 return (row, name) if row is not None else None
         return None
 
+    def _second_history(self, token, mult, frm, to, count_back):
+        """Ask Kite REST for seconds. Its docs list no seconds interval, but the personal OMS may accept one, so probe
+        each bucket once and remember the working token. None means the source cannot serve seconds."""
+        name = self._second_history_token.get(mult, "")
+        candidates = [name] if name else [f"{mult}second", "second"]
+        for candidate in candidates:
+            try:
+                bars = self._history_one(token, candidate, frm, to)
+            except PluginError:
+                continue
+            if candidate != self._second_history_token.get(mult):
+                self._second_history_token[mult] = candidate
+                self.log(f" seconds history: {mult}s via Kite interval '{candidate}'")
+            return bars[-count_back:] if count_back and len(bars) > count_back else bars
+        self._second_history_token[mult] = ""
+        return None
+
+    def _second_bars(self, ticker, resolution, frm, to, count_back):
+        """Build N-second OHLCV bars from the live ticks when Kite has no seconds history for this bucket."""
+        step = SECOND_INTERVALS[resolution]
+        bars = {}
+        for ts, price, vol in self._ticks.get(ticker) or []:
+            if ts < frm or ts > to:
+                continue
+            t = int(ts) // step * step
+            bar = bars.get(t)
+            if bar is None:
+                bars[t] = [t, price, price, price, price, vol]
+            else:
+                bar[2] = max(bar[2], price)
+                bar[3] = min(bar[3], price)
+                bar[4] = price
+                bar[5] += vol
+        out = [bars[t] for t in sorted(bars)]
+        return out[-count_back:] if count_back and len(out) > count_back else out
+
     def _live_bar(self, ticker, resolution, frm, to, count_back):
         """The current forming bar, already built from the tick stream — answer a refresh without calling Kite.
 
@@ -1891,6 +1942,10 @@ class ZerodhaSource:
         if row is None:
             raise PluginError(f"Unknown symbol {ticker}", -32004)
         interval = self._interval_for(resolution)
+        if resolution in SECOND_INTERVALS:
+            step = SECOND_INTERVALS[resolution]
+            served = self._second_history(row["token"], step, frm, to, count_back)
+            return served if served is not None else self._second_bars(ticker, resolution, frm, to, count_back)
         cached = self._live_bar(ticker, resolution, frm, to, count_back)
         if cached is not None:
             self._perf["cached_bars"] += 1
@@ -2214,6 +2269,11 @@ class ZerodhaSource:
         trades = self._json("/oms/trades")
         try:
             holdings_data = self._json("/oms/portfolio/holdings")
+            if not getattr(self, "_holdings_shape_logged", False):
+                shape = (list(holdings_data)[:8] if isinstance(holdings_data, dict)
+                         else f"{len(holdings_data)} rows")
+                self.log(f"holdings response: {type(holdings_data).__name__} [{shape}]")
+                self._holdings_shape_logged = True
             # Kite's personal OMS returns `data` as a bare list here (Kite Connect wraps it in {"holdings": [...]}).
             if isinstance(holdings_data, dict):
                 rows = holdings_data.get("holdings") or holdings_data.get("data") or []
