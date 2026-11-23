@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.5.2"
+PLUGIN_VERSION = "0.5.3"
 # Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
 API = 7
@@ -1619,13 +1619,19 @@ class ZerodhaSource:
         if self.company_details and row["type"] == "stock" and exchange in ("NSE", "BSE"):
             symbol = urllib.parse.quote(row["ticker"], safe="")
             info["icon"] = f"{COMPANY_API}/logos/{symbol}"
-            profile = self._company_profile(row["ticker"])
+            # The enrichment service is best effort: never make a symbolInfo request wait on it. A cached profile is
+            # used at once; otherwise fetch it in the background and the app's next ask picks it up.
+            with self.lock:
+                profile = self._profiles.get(row["ticker"])
+                may_fetch = time.monotonic() >= self._profile_failed_until
             if profile:
                 for key in ("name", "sector", "industry"):
                     if profile.get(key):
                         info[key] = profile[key]
                 if profile.get("oneLine"):
                     info["longDescription"] = profile["oneLine"]
+            elif may_fetch:
+                threading.Thread(target=self._company_profile, args=(row["ticker"],), daemon=True).start()
         # OpenTrader has no listingDate field in symbolInfo; the dialog shows longDescription, so put it there.
         listed = self._listed_text(row["ticker"]) if exchange == "NSE" else None
         if listed:
@@ -1660,11 +1666,11 @@ class ZerodhaSource:
             return default
         return value if value > 0 else default
 
-    def _history_one(self, token, interval, frm, to, oi=False):
+    def _history_one(self, token, interval, frm, to, oi=False, timeout=30):
         """Price bars, or an OI series ([time, value, value, value, value]) when `oi` is set."""
         path = (HISTORY_PATH.format(token=token, interval=interval)
                 + f"?from={self._date_text(frm)}&to={self._date_text(to)}&oi=1")
-        data = self._json(path, timeout=30)
+        data = self._json(path, timeout=timeout)
         out = []
         for candle in (data.get("candles") or []):
             if not isinstance(candle, list) or len(candle) < 5:
@@ -1884,7 +1890,7 @@ class ZerodhaSource:
         candidates = [name] if name else [f"{mult}second", "second"]
         for candidate in candidates:
             try:
-                bars = self._history_one(token, candidate, frm, to)
+                bars = self._history_one(token, candidate, frm, to, timeout=3)
             except PluginError:
                 continue
             if candidate != self._second_history_token.get(mult):
