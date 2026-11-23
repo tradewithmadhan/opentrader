@@ -21,6 +21,7 @@ import http.client
 import io
 import json
 import os
+import queue
 import socket
 import ssl
 import struct
@@ -32,7 +33,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.5.5"
+PLUGIN_VERSION = "0.5.6"
 # Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
 API = 7
@@ -848,6 +849,9 @@ class ZerodhaSource:
         # Company details never change in real time: cache them on disk, once per ticker, across restarts and days.
         self._profiles = self._read_profile_cache()  # ticker → {name, sector, industry, oneLine}
         self._profile_failed_until = 0.0
+        self._profile_queue = queue.Queue()  # one background worker, so a watchlist never starts 30 HTTP calls
+        self._profile_queued = set()
+        threading.Thread(target=self._profile_worker, daemon=True, name="CompanyProfiles").start()
         self._listings = {}  # bare symbol → listing epoch seconds
         self._listings_day = None
         self.company_details = True
@@ -1219,17 +1223,35 @@ class ZerodhaSource:
         except (OSError, ValueError, TypeError):
             return {}
 
+    def _profile_worker(self):
+        """Fetch profiles one at a time. A large watchlist queues its symbols instead of spawning a thread each."""
+        while True:
+            ticker = self._profile_queue.get()
+            try:
+                self._company_profile(ticker)
+            except Exception:  # noqa: BLE001 - enrichment is optional
+                pass
+            finally:
+                self._profile_queue.task_done()
+
+    _PROFILE_WRITE_LOCK = threading.Lock()
+
     def _write_profile_cache(self):
-        """Write to a temp file first: an interrupted save leaves the last good cache intact."""
+        """Write to a private temp file first: two threads can never fight over the same name."""
         path = self._profile_cache_path()
+        tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".json.tmp")
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._profiles, f)
-            os.replace(tmp, path)
+            with self._PROFILE_WRITE_LOCK:
+                os.replace(tmp, path)
         except (OSError, TypeError, ValueError) as e:
             self.log(f"company profile cache not saved: {e}", "warn")
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _company_profile(self, ticker):
         """sector/industry/name for a cash equity. Fetched at most once per ticker, then kept on disk for good."""
@@ -1623,6 +1645,7 @@ class ZerodhaSource:
         return self.instruments.search(query, self.exchanges)
 
     def symbol_info(self, ticker):
+        started = time.monotonic()
         row = self.instruments.row(ticker)
         if row is None:
             raise PluginError(f"Unknown symbol {ticker}", -32004)
@@ -1670,7 +1693,10 @@ class ZerodhaSource:
                     if profile.get("oneLine"):
                         info["longDescription"] = profile["oneLine"]
                 elif may_fetch:
-                    threading.Thread(target=self._company_profile, args=(row["ticker"],), daemon=True).start()
+                    with self.lock:
+                        if row["ticker"] not in self._profile_queued:
+                            self._profile_queued.add(row["ticker"])
+                            self._profile_queue.put(row["ticker"])
         except Exception:  # noqa: BLE001
             pass
         # OpenTrader has no listingDate field in symbolInfo; the dialog shows longDescription, so put it there.
@@ -1680,6 +1706,9 @@ class ZerodhaSource:
                                            if info.get("longDescription") else "Listed " + listed)
         except Exception:  # noqa: BLE001
             pass
+        elapsed = time.monotonic() - started
+        if elapsed > 1.0:
+            self.log(f"symbolInfo {ticker} took {elapsed:.1f}s", "warn")
         return info
 
     def quote(self, ticker):
