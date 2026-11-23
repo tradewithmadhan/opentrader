@@ -87,6 +87,18 @@ class Books(unittest.TestCase):
         self.assertEqual(row["isin"], "INE002A01018")
         self.assertIn({"id": "isin", "label": "ISIN", "hidden": True}, table["columns"])
 
+    def test_holdings_read_in_either_kite_response_shape(self):
+        row = {"tradingsymbol": "RELIANCE", "exchange": "NSE", "quantity": 5,
+               "average_price": 2000.0, "last_price": 2100.0, "product": "CNC"}
+        self.fake.holding_rows = [row]
+        self.fake.holdings_as_list = True  # the personal OMS shape seen in live
+        self.source.on_tick()
+        self.assertEqual(self.source.state()["pages"][0]["tables"][0]["rows"][0]["qty"], 5)
+        self.fake.holdings_as_list = False  # Kite Connect's {"holdings": [...]} shape
+        self.source.last_poll = 0
+        self.source.on_tick()
+        self.assertEqual(len(self.source.state()["pages"][0]["tables"][0]["rows"]), 1)
+
     def test_an_empty_account_still_offers_the_holdings_page(self):
         self.source.on_tick()
         page = self.source.state()["pages"][0]

@@ -406,13 +406,13 @@ class _Handler(BaseHTTPRequestHandler):
 
         if method == "GET" and path == "/nse/EQUITY_L.csv":
             recent = (datetime.now(IST) - timedelta(days=30)).strftime("%d-%b-%Y")
-            text = ("SYMBOL,NAME OF COMPANY, SERIES, DATE OF LISTING\n"
-                    f"RELIANCE,Reliance Industries,EQ,06-OCT-2008\n"
-                    f"NEWCO,New Co,EQ,{recent}\n")
+            text = ("SYMBOL,NAME OF COMPANY, SERIES, DATE OF LISTING, PAST CLOSED PRICE, FACE VALUE, ISIN NUMBER\n"
+                    f"RELIANCE,Reliance Industries,EQ,06-OCT-2008,2500.00,10,INE002A01018\n"
+                    f"NEWCO,New Co,EQ,{recent},100.00,1,INE0NEWCO123\n")
             return self._send(200, text.encode("utf-8"), {"Content-Type": "text/csv"})
         if method == "GET" and path == "/nse/SME_EQUITY_L.csv":
-            text = ("SYMBOL,NAME_OF_COMPANY,SERIES,DATE_OF_LISTING\n"
-                    "SMECO,SME Co,ST,26-Nov-24\n")
+            text = ("SYMBOL,NAME_OF_COMPANY,SERIES,DATE_OF_LISTING,PAST_CLOSED_PRICE,FACE_VALUE,ISIN_NUMBER\n"
+                    "SMECO,SME Co,ST,26-Nov-24,50.00,10,INE0SMECO123\n")
             return self._send(200, text.encode("utf-8"), {"Content-Type": "text/csv"})
         if method == "GET" and path.startswith("/v1/companies/"):
             return self._send(200, {"status": "success", "data": {
@@ -430,7 +430,9 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, {"status": "success",
                                     "data": {"net": fake.position_rows, "day": []}})
         if method == "GET" and path == "/oms/portfolio/holdings":
-            return self._send(200, {"status": "success", "data": {"holdings": fake.holding_rows}})
+            # The personal OMS returns a bare list; Kite Connect wraps it. Both must read.
+            rows = fake.holding_rows if getattr(fake, "holdings_as_list", True) else {"holdings": fake.holding_rows}
+            return self._send(200, {"status": "success", "data": rows})
         if method == "GET" and path == "/oms/orders":
             return self._send(200, {"status": "success", "data": fake.order_rows})
         if method == "GET" and path == "/oms/trades":

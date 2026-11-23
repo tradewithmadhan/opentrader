@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.5.1"
 # Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
 API = 7
@@ -1282,7 +1282,12 @@ class ZerodhaSource:
                         continue
                     when = self._parse_listing_date(date_text)
                     if when:
-                        data[symbol.upper()] = when
+                        data[symbol.upper()] = {
+                            "date": when,
+                            "isin": row.get("ISIN NUMBER") or row.get("ISIN_NUMBER") or row.get("ISIN") or "",
+                            "face": row.get("FACE VALUE") or row.get("FACE_VALUE") or "",
+                            "series": row.get("SERIES") or "",
+                        }
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with open(path, "w", encoding="utf-8") as f:
@@ -1292,14 +1297,27 @@ class ZerodhaSource:
         with self.lock:
             self._listings, self._listings_day = data, today
 
-    def _listed_text(self, symbol):
-        """dd/mm/yyyy listing date of an NSE symbol, or None (used in longDescription: the app has no field)."""
+    def _listing_of(self, symbol):
+        """The cached NSE listing row: {date, isin, face, series}. Older caches held only the epoch."""
         if not symbol:
             return None
         self._load_listings()
         with self.lock:
-            when = self._listings.get(symbol.upper())
+            entry = self._listings.get(symbol.upper())
+        if entry is None:
+            return None
+        return entry if isinstance(entry, dict) else {"date": entry}
+
+    def _listed_text(self, symbol):
+        """dd/mm/yyyy listing date of an NSE symbol, or None (used in longDescription and the Listed field)."""
+        entry = self._listing_of(symbol)
+        when = entry.get("date") if entry else None
         return datetime.fromtimestamp(when, TZ_IST).strftime("%d/%m/%Y") if when else None
+
+    def _listing_fields(self, symbol):
+        """The other NSE listing CSV columns we keep: ISIN, face value and series."""
+        entry = self._listing_of(symbol) or {}
+        return {key: entry[key] for key in ("isin", "face", "series") if entry.get(key)}
 
     def _history_depth(self, row):
         """Per-symbol `history` for data.symbolInfo: the app's hard clamp on history requests and scroll-back.
@@ -1314,9 +1332,8 @@ class ZerodhaSource:
         """
         listed = None
         if row["exchange"] == "NSE":
-            self._load_listings()
-            with self.lock:
-                when = self._listings.get(row["ticker"].upper())
+            entry = self._listing_of(row["ticker"]) or {}
+            when = entry.get("date")
             if when:
                 listed = max(1, int((time.time() - when) / 86400))
         day = min(HISTORY_DAYS_MAX["day"], listed) if listed else HISTORY_DAYS_MAX["day"]
@@ -1582,7 +1599,9 @@ class ZerodhaSource:
             # listing date so a recently listed stock doesn't make the app ask years that cannot exist.
             "history": self._history_depth(row),
             "series": self.series_for(row),
-            "fields": self.fields_for(row, self._listed_text(row["ticker"]) if exchange == "NSE" else None),
+            "fields": self.fields_for(
+                row, self._listed_text(row["ticker"]) if exchange == "NSE" else None,
+                self._listing_fields(row["ticker"]) if exchange == "NSE" else None),
         }
         if self.company_details and row["type"] == "stock" and exchange in ("NSE", "BSE"):
             symbol = urllib.parse.quote(row["ticker"], safe="")
@@ -1807,8 +1826,8 @@ class ZerodhaSource:
         return out[:5000]
 
     @staticmethod
-    def fields_for(row, listed=None):
-        """Instrument values (Plugin API 6) from the master and the listing lists."""
+    def fields_for(row, listed=None, listing=None):
+        """Instrument values (Plugin API 6) from the master and the NSE listing CSVs."""
         fields = []
         if row.get("expiry"):
             fields.append({"name": "Expiry", "value": row["expiry"]})
@@ -1818,6 +1837,9 @@ class ZerodhaSource:
             fields.append({"name": "Tick size", "value": row["tick"]})
         if listed:
             fields.append({"name": "Listed", "value": listed})
+        for key, label in (("isin", "ISIN"), ("face", "Face value"), ("series", "Series")):
+            if listing and listing.get(key):
+                fields.append({"name": label, "value": listing[key]})
         fields.extend(EXTRA_FIELDS)
         return fields[:50]
 
@@ -2192,10 +2214,15 @@ class ZerodhaSource:
         trades = self._json("/oms/trades")
         try:
             holdings_data = self._json("/oms/portfolio/holdings")
-            holdings = [h for h in (self._wire_holding(r) for r in (holdings_data.get("holdings") or [])) if h]
+            # Kite's personal OMS returns `data` as a bare list here (Kite Connect wraps it in {"holdings": [...]}).
+            if isinstance(holdings_data, dict):
+                rows = holdings_data.get("holdings") or holdings_data.get("data") or []
+            else:
+                rows = holdings_data or []
+            holdings = [h for h in (self._wire_holding(r) for r in rows) if h]
         except AuthError:
             raise  # an expired enctoken must still reach the refresh prompt
-        except PluginError as e:
+        except (PluginError, AttributeError, TypeError, ValueError) as e:
             self.log(f"holdings not read: {e}", "warn")
             holdings = None  # keep the last good page; the other books are still fine
         events = []
@@ -2426,8 +2453,14 @@ class Plugin:
                      f"({window}, countBack={count_back})")
             return {"bars": bars}
         if method == "data.events":
-            events = s.events_for(p["ticker"])
-            self.log(f"data.events {p['ticker']}: {len(events)} events")
+            # The app asks for events on any chart symbol. Only stocks can have corporate actions on Kite — answer
+            # derivatives and indices at once, without a master lookup, a REST call or a log line.
+            ticker = p["ticker"]
+            row = s.instruments.row(ticker)
+            if row is None or row["type"] != "stock":
+                return {"events": []}
+            events = s.events_for(ticker)
+            self.log(f"data.events {ticker}: {len(events)} events")
             return {"events": events}
         if method == "broker.getState":
             return s.state()

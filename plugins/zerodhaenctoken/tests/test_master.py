@@ -92,6 +92,22 @@ class SearchAndInfo(unittest.TestCase):
         self.assertEqual(self.source.symbol_info("NFO:NIFTY25NOVFUT")["pointValue"], 75)
         self.assertEqual(self.source.symbol_info("NSE_INDEX:NIFTY")["type"], "index")
 
+    def test_listing_columns_are_offered_as_instrument_fields(self):
+        equity_url, sme_url = plugin.NSE_EQUITY_LIST_URL, plugin.NSE_SME_LIST_URL
+        plugin.NSE_EQUITY_LIST_URL = self.fake.url + "/nse/EQUITY_L.csv"
+        plugin.NSE_SME_LIST_URL = self.fake.url + "/nse/SME_EQUITY_L.csv"
+        try:
+            info = self.source.symbol_info("NSE:RELIANCE")
+            fields = {f["name"]: f["value"] for f in info["fields"]}
+            self.assertEqual(fields["ISIN"], "INE002A01018")
+            self.assertEqual(fields["Face value"], "10")
+            self.assertEqual(fields["Series"], "EQ")
+            self.assertRegex(fields["Listed"], r"^\d{2}/\d{2}/\d{4}$")
+            fut = self.source.symbol_info("NFO:NIFTY25NOVFUT")
+            self.assertNotIn("ISIN", [f["name"] for f in fut["fields"]])
+        finally:
+            plugin.NSE_EQUITY_LIST_URL, plugin.NSE_SME_LIST_URL = equity_url, sme_url
+
     def test_unknown_symbol_is_final(self):
         with self.assertRaises(plugin.PluginError) as raised:
             self.source.symbol_info("NSE:NOPE")

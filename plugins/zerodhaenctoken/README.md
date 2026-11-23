@@ -194,8 +194,9 @@ The plugin speaks **API 7** and uses the upstream features adopted in this fork:
   interest (requested with `oi=1`) as a 5-value series, and the ticker's live OI is pushed as a `data.quote` while
   the series is subscribed. Add more series in `EXTRA_SERIES` and serve `<symbol>_<name>`.
 - **Broker pages** (API 7): Kite's delivery holdings are sent as the *Holdings* tab in `broker.state.pages` (see Trading).
-- **Instrument values** (API 6): `symbolInfo.fields` lists expiry, lot size, tick size and listing date where
-  known; live OI quotes carry `Open Interest` / day high / low fields. Add your own values in `EXTRA_FIELDS`.
+- **Instrument values** (API 6): `symbolInfo.fields` lists expiry, lot size, tick size and, for NSE stocks, the
+  listing date plus **ISIN**, **Face value** and **Series** from NSE's `EQUITY_L.csv` / `SME_EQUITY_L.csv`. Live OI
+  quotes carry `Open Interest` / day high / low fields. Add your own values in `EXTRA_FIELDS`.
 
 ## Tests
 
