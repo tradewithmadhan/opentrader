@@ -18,6 +18,9 @@ class Stream(unittest.TestCase):
         self.assertTrue(harness.wait_until(lambda: self.source.ws and self.source.ws.connected, 5.0))
 
     def tearDown(self):
+        for timer in list(self.source._watch_timers.values()):
+            timer.cancel()
+        self.source._watch_timers.clear()
         self.source.ws_generation += 1
         if self.source.ws is not None:
             self.source.ws.stop.set()
@@ -71,10 +74,65 @@ class Stream(unittest.TestCase):
         self.assertGreater(self.source._perf["skipped"], skipped_before)
 
     def test_configure_parses_the_new_settings(self):
-        self.source.configure(harness.settings(self.fake, companyDetails="false", quoteIntervalMs="150"),
-                              ["datafeed"])
+        self.source.configure(harness.settings(self.fake, companyDetails="false", quoteIntervalMs="150",
+                                              maxQuotesPerSecond="75"), ["datafeed"])
         self.assertFalse(self.source.company_details)
         self.assertEqual(self.source.quote_interval, 150)
+        self.assertEqual(self.source.max_quotes_per_second, 75)
+
+    def test_global_quote_budget_caps_a_frame_and_counts_the_drops(self):
+        self.source.max_quotes_per_second = 2
+        self.source._quote_tokens = 2.0
+        self.source._quote_refill_at = time.monotonic()
+        self.source.set_subscriptions(["NSE:RELIANCE", "NSE:TCS", "NSE_INDEX:NIFTY"])
+        self.app.sock.lines.clear()
+        skipped = self.source._perf["budget_skipped"]
+        self.fake.ws.push_ticks([
+            fake_kite.FakeWs.packet_ltp(738561, 2500.0),
+            fake_kite.FakeWs.packet_ltp(3045, 3000.0),
+            fake_kite.FakeWs.packet_index(256265, 25000.0),
+        ])
+        self.assertTrue(harness.wait_until(lambda: len(self.app.sock.payloads("data.quote")) == 2, 3.0))
+        self.assertEqual(len(self.app.sock.payloads("data.quote")), 2, "three ticks, two budget slots")
+        self.assertGreater(self.source._perf["budget_skipped"], skipped)
+
+    def test_quote_budget_prefers_symbols_not_sent_recently(self):
+        self.source.max_quotes_per_second = 1
+        self.source._quote_tokens = 1.0
+        self.source._quote_refill_at = time.monotonic()
+        self.source.set_subscriptions(["NSE:RELIANCE", "NSE:TCS"])
+        self.source.quotes["NSE:RELIANCE"]["_last_sent"] = time.time() * 1000
+        self.app.sock.lines.clear()
+        self.fake.ws.push_ticks([
+            fake_kite.FakeWs.packet_ltp(738561, 2500.0),
+            fake_kite.FakeWs.packet_ltp(3045, 3000.0),
+        ])
+        self.assertTrue(harness.wait_until(lambda: self.app.sock.payloads("data.quote"), 3.0))
+        self.assertEqual([q["ticker"] for q in self.app.sock.payloads("data.quote")], ["NSE:TCS"])
+
+    def test_brief_empty_watch_keeps_full_mode_and_does_not_churn(self):
+        self.app.on_notification("broker.watchQuote", {"tickers": ["NSE:RELIANCE"]})
+        self.assertTrue(harness.wait_until(
+            lambda: any(a.get("a") == "mode" and (a.get("v") or [None])[0] == "full"
+                        for a in self.fake.ws.actions()), 3.0))
+        modes = len([a for a in self.fake.ws.actions() if a.get("a") == "mode"])
+        self.app.on_notification("broker.watchQuote", {"tickers": []})
+        time.sleep(0.2)
+        self.assertEqual(self.source.watched, {"NSE:RELIANCE"}, "an empty watch is held briefly")
+        self.app.on_notification("broker.watchQuote", {"tickers": ["NSE:RELIANCE"]})
+        time.sleep(plugin.WATCH_GRACE_SEC + 0.3)
+        self.assertEqual(self.source.watched, {"NSE:RELIANCE"})
+        self.assertEqual(len([a for a in self.fake.ws.actions() if a.get("a") == "mode"]), modes,
+                         "the chart switch must not send mode frames")
+
+    def test_an_empty_watch_does_clear_after_the_grace_period(self):
+        self.app.on_notification("broker.watchDepth", {"tickers": ["NSE:RELIANCE"]})
+        self.assertTrue(harness.wait_until(
+            lambda: any(a.get("a") == "mode" and (a.get("v") or [None])[0] == "full"
+                        for a in self.fake.ws.actions()), 3.0))
+        self.app.on_notification("broker.watchDepth", {"tickers": []})
+        self.assertTrue(harness.wait_until(lambda: self.source.watched_depth == set(),
+                                           plugin.WATCH_GRACE_SEC + 2.0))
 
     def test_quote_packet_builds_the_forming_bars(self):
         self.subscribed("NSE:RELIANCE")

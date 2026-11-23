@@ -83,9 +83,20 @@ The WebSocket handshake carries the same `User-Agent`/`Accept-Language` plus the
 | `historyDaysDaily` | `1900` | Days per day-history request (Kite's hard limit is 2000; 1900 leaves headroom). |
 | `companyDetails` | `true` | External logo/company details for cash equities. |
 | `quoteIntervalMs` | `0` | Minimum ms between a symbol's chart updates; 0 = every tick. |
+| `maxQuotesPerSecond` | `200` | Total chart/watchlist quote budget across all symbols; 0 = unlimited. A large watchlist cannot flood the app; the ticket and DOM are not counted. |
 | `apiUrl` / `wsUrl` / `masterUrl` | Kite defaults | Endpoints; change only if you proxy them. |
 | `logApi` / `logWs` | `true` | Per-category file logs. |
 | `logDebug` | `false` | Also log every `broker.state` push and subscription detail. |
+
+### Large watchlists
+
+A watchlist of thousands of symbols subscribes them all in one batch and Kite can push hundreds of ticks a second.
+`maxQuotesPerSecond` (default 200) caps the total `data.quote` messages sent to the app; symbols that miss the
+budget get priority in the next frame, so the whole list rotates instead of a few liquid names taking every slot.
+The order ticket and DOM still receive every tick. Switch the list back to a small one (or raise this setting) if
+you want faster price refresh on every row. An empty `broker.watchQuote`/`watchDepth` is held for 1.5 s before it is
+applied: switching charts sends an empty watch followed immediately by the new symbol, and dropping full mode in
+between would churn Kite's `mode` frames and blank the ticket's bid/ask.
 
 ## Trading
 

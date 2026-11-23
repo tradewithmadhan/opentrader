@@ -1,7 +1,7 @@
 {
   "id": "zerodhaenctoken",
   "name": "Zerodha (enctoken)",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "tradewithmadhan",
   "description": "Your Zerodha Kite account's market data on the charts: instruments, history and live ticks from the personal API and the Kite ticker, using a browser enctoken.",
   "api": 6,
@@ -37,6 +37,8 @@
       "help": "Days served by one day-history request. Kite's hard limit is 2000; 1900 leaves headroom. Larger windows are split and merged automatically. Blank or bad values keep 1900." },
     { "key": "quoteIntervalMs", "label": "Minimum ms between a symbol's chart updates", "type": "text", "default": "0",
       "help": "0 sends every tick (default). With a large watchlist, 100–250 ms keeps charts smooth and cuts the message rate; the order ticket and DOM still get every tick." },
+    { "key": "maxQuotesPerSecond", "label": "Maximum chart quote updates per second", "type": "text", "default": "200",
+      "help": "Total budget for chart/watchlist quotes across all symbols (default 200). Stops a watchlist of thousands of symbols flooding the app. 0 disables the budget. The order ticket and DOM are not counted." },
     { "key": "logApi", "label": "Log REST/API to file", "type": "bool", "default": "true",
       "help": "Writes settings, history, books and order commands to zerodha-api.log in the plugin data folder. The enctoken is never written." },
     { "key": "logWs", "label": "Log WebSocket to file", "type": "bool", "default": "true",

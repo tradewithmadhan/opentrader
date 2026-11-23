@@ -1,7 +1,7 @@
 {
   "id": "zerodhaenctoken",
   "name": "Zerodha (enctoken, development)",
-  "version": "0.3.0-dev",
+  "version": "0.4.0-dev",
   "publisher": "tradewithmadhan",
   "description": "The Zerodha enctoken plugin while it is developed: you run plugin.py yourself, the app writes where to connect.",
   "api": 6,
@@ -28,6 +28,7 @@
     { "key": "historyDaysMinute", "label": "History request cap — minutes (days)", "type": "text", "default": "30" },
     { "key": "historyDaysDaily", "label": "History request cap — day charts (days)", "type": "text", "default": "1900" },
     { "key": "quoteIntervalMs", "label": "Minimum ms between a symbol's chart updates", "type": "text", "default": "0" },
+    { "key": "maxQuotesPerSecond", "label": "Maximum chart quote updates per second", "type": "text", "default": "200" },
     { "key": "logApi", "label": "Log REST/API to file", "type": "bool", "default": "true" },
     { "key": "logWs", "label": "Log WebSocket to file", "type": "bool", "default": "true" },
     { "key": "logDebug", "label": "Log verbose details", "type": "bool", "default": "false" }

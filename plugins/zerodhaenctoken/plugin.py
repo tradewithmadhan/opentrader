@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.4.0"
 # Plugin API 6: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields).
 API = 6
@@ -101,6 +101,10 @@ SAMPLE_BLUE_CHIPS = ("RELIANCE", "TCS", "INFOSYS", "HDFCBANK", "ICICIBANK", "SBI
 SAMPLE_INDICES = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "INDIAVIX", "SENSEX", "BANKEX")
 EXTRA_FIELDS = []   # more {"name":…, "value":…} instrument values, added to every symbol's fields
 EXTRA_SERIES = []   # more extra series names, added to every symbol's series (serve <ticker>_<name>)
+
+# A brief empty broker.watchQuote/watchDepth is ignored: the app re-sends the watch on each chart switch, and
+# dropping full mode for that instant floods Kite with mode frames and blanks the ticket's bid/ask.
+WATCH_GRACE_SEC = 1.5
 # Kite's corporate-actions endpoint refuses ranges over 1095 days, so walk it in 3-year chunks from this year.
 EVENTS_FROM = date(1990, 1, 1)
 EVENTS_CHUNK_DAYS = 1095
@@ -840,9 +844,13 @@ class ZerodhaSource:
         self._listings_day = None
         self.company_details = True
         self.quote_interval = 0  # ms between data.quote updates per symbol; 0 = every tick
+        self.max_quotes_per_second = 200  # total data.quote budget; 0 = every tick (old behaviour)
+        self._quote_tokens = float(self.max_quotes_per_second)
+        self._quote_refill_at = time.monotonic()
+        self._watch_timers = {}  # method → Timer for a pending empty-watch clear
         # Live performance counters, logged every 30 s by _perf_loop (started in configure()).
         self._perf = {"ticks": 0, "quotes": 0, "bquotes": 0, "depth": 0,
-                      "batches": 0, "skipped": 0, "reconnects": 0}
+                      "batches": 0, "skipped": 0, "budget_skipped": 0, "reconnects": 0}
         self._perf_thread = None
         self._events = {}  # token → (day, corporate actions)
         self._prune_caches()
@@ -920,6 +928,7 @@ class ZerodhaSource:
             self.log(f"[perf] ticks={counts['ticks']} data.quote={counts['quotes']} "
                      f"broker.quote={counts['bquotes']} depth={counts['depth']} "
                      f"batches={counts['batches']} throttle_skipped={counts['skipped']} "
+                     f"budget_skipped={counts['budget_skipped']} "
                      f"quotes_cached={cached} tokens={tokens}(full {full}) "
                      f"reconnects={counts['reconnects']}")
 
@@ -982,6 +991,12 @@ class ZerodhaSource:
                 self.quote_interval = max(0, int(float(settings.get("quoteIntervalMs", 0) or 0)))
             except (TypeError, ValueError):
                 self.quote_interval = 0
+            try:
+                self.max_quotes_per_second = max(0, int(float(settings.get("maxQuotesPerSecond", 200) or 0)))
+            except (TypeError, ValueError):
+                self.max_quotes_per_second = 200
+            self._quote_tokens = float(self.max_quotes_per_second)
+            self._quote_refill_at = time.monotonic()
             self.awaiting_token = False
             gen = self.ws_generation + 1
         self.log(f"configure: enctoken={'set' if self.enctoken else 'empty'}, "
@@ -1355,12 +1370,40 @@ class ZerodhaSource:
         if self.ws is not None:
             self.ws.update(modes)
 
-    def set_watch(self, method, tickers):
+    def _cancel_watch_clear(self, method):
+        timer = self._watch_timers.pop(method, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _apply_watch_clear(self, method):
         with self.lock:
+            if self._watch_timers.pop(method, None) is None:
+                return  # a new watch arrived and cancelled this timer
             if method == "broker.watchQuote":
-                self.watched = set(tickers)
+                self.watched = set()
             else:
-                self.watched_depth = set(tickers)
+                self.watched_depth = set()
+        self.forward_subscription()
+
+    def set_watch(self, method, tickers):
+        """A whole watch set from the ticket or the DOM. An empty one is delayed briefly: switching charts sends an
+        empty watch followed at once by the new symbol, and dropping full mode in between churns Kite's mode frames
+        and blanks the ticket's quote."""
+        tickers = set(tickers)
+        with self.lock:
+            current = self.watched if method == "broker.watchQuote" else self.watched_depth
+            if not tickers and current:
+                self._cancel_watch_clear(method)
+                timer = threading.Timer(WATCH_GRACE_SEC, self._apply_watch_clear, args=(method,))
+                timer.daemon = True
+                self._watch_timers[method] = timer
+                timer.start()
+                return
+            self._cancel_watch_clear(method)
+            if method == "broker.watchQuote":
+                self.watched = tickers
+            else:
+                self.watched_depth = tickers
         self.forward_subscription()
 
     @staticmethod
@@ -1395,6 +1438,7 @@ class ZerodhaSource:
         now = int(time.time())
         now_ms = time.time() * 1000
         messages = []
+        quote_candidates = []  # (ticker, stamp, message) — the app's total quote budget is shared by all symbols
         with self.lock:
             for t in ticks:
                 token = t.get("instrument_token")
@@ -1446,10 +1490,9 @@ class ZerodhaSource:
 
                 if ticker in self.subscribed and (
                         not self.quote_interval or now_ms - (q.get("_last_sent") or 0) >= self.quote_interval):
-                    q["_last_sent"] = now_ms
-                    self._perf["quotes"] += 1
-                    messages.append({"jsonrpc": "2.0", "method": "data.quote",
-                                     "params": self._quote_of(ticker, q)})
+                    # Queued, not sent: the per-second budget below decides which of this frame's candidates go out.
+                    quote_candidates.append((ticker, now_ms, {"jsonrpc": "2.0", "method": "data.quote",
+                                                              "params": self._quote_of(ticker, q)}))
                 elif ticker in self.subscribed:
                     self._perf["skipped"] += 1
                 if ticker in self.watched or ticker in self.watched_depth:
@@ -1485,6 +1528,28 @@ class ZerodhaSource:
                                          "asks": [{"price": l["price"], "qty": l["quantity"]}
                                                   for l in (depth.get("sell") or [])[:5]],
                                      }})
+        if quote_candidates:
+            if self.max_quotes_per_second > 0:
+                mono = time.monotonic()
+                self._quote_tokens = min(float(self.max_quotes_per_second),
+                                         self._quote_tokens + max(0.0, mono - self._quote_refill_at)
+                                         * self.max_quotes_per_second)
+                self._quote_refill_at = mono
+                # Oldest-sent first: a symbol the budget dropped gets priority in the next frame. A full watchlist
+                # then rotates instead of the same liquid symbols taking every slot.
+                quote_candidates.sort(key=lambda c: self.quotes.get(c[0], {}).get("_last_sent", 0))
+                allow = min(len(quote_candidates), int(self._quote_tokens))
+                for ticker, stamp, msg in quote_candidates[:allow]:
+                    self._quote_tokens -= 1
+                    self.quotes[ticker]["_last_sent"] = stamp
+                    self._perf["quotes"] += 1
+                    messages.append(msg)
+                self._perf["budget_skipped"] += len(quote_candidates) - allow
+            else:
+                for ticker, stamp, msg in quote_candidates:
+                    self.quotes[ticker]["_last_sent"] = stamp
+                    self._perf["quotes"] += 1
+                    messages.append(msg)
         if p and p.alive and messages:
             self._perf["batches"] += 1
             p.send_many(messages)
