@@ -1,10 +1,10 @@
 {
   "id": "zerodhaenctoken",
   "name": "Zerodha (enctoken)",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "publisher": "tradewithmadhan",
   "description": "Your Zerodha Kite account's market data on the charts: instruments, history and live ticks from the personal API and the Kite ticker, using a browser enctoken.",
-  "api": 6,
+  "api": 7,
   "provides": ["datafeed", "broker"],
   "exchanges": ["NSE", "BSE", "NFO", "BFO", "CDS", "BCD", "MCX", "NCO", "NSE_INDEX", "BSE_INDEX", "MCX_INDEX", "GLOBAL_INDEX"],
   "runtime": { "type": "process", "entry": "bin/zerodhaenctoken.exe", "args": [] },

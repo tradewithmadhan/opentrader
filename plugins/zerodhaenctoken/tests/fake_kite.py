@@ -273,6 +273,7 @@ class FakeKite:
                           "utilised": {"debits": 0.0}},
         }
         self.position_rows = []
+        self.holding_rows = []
         self.order_rows = []
         self.trade_rows = []
         self.order_seq = 0
@@ -428,6 +429,8 @@ class _Handler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/oms/portfolio/positions":
             return self._send(200, {"status": "success",
                                     "data": {"net": fake.position_rows, "day": []}})
+        if method == "GET" and path == "/oms/portfolio/holdings":
+            return self._send(200, {"status": "success", "data": {"holdings": fake.holding_rows}})
         if method == "GET" and path == "/oms/orders":
             return self._send(200, {"status": "success", "data": fake.order_rows})
         if method == "GET" and path == "/oms/trades":

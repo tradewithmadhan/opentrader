@@ -32,10 +32,10 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.4.1"
-# Plugin API 6: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
-# 5 = data.events, 6 = extra series (OI) and instrument values (fields).
-API = 6
+PLUGIN_VERSION = "0.5.0"
+# Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
+# 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
+API = 7
 DEV_CONNECTION_FILE = "OpenTraderPlugins/zerodhaenctoken-dev.json"
 
 TZ_IST = timezone(timedelta(hours=5, minutes=30), "Asia/Kolkata")
@@ -832,6 +832,7 @@ class ZerodhaSource:
         self.watched_depth = set()  # broker.watchDepth — DOM
         self.margins = None
         self.positions = []
+        self.holdings = []  # API 7 broker page: Kite's delivery holdings
         self.orders = {}  # order id → the app's order dict
         self.executions = []
         self.connected_broker = False
@@ -2118,6 +2119,57 @@ class ZerodhaSource:
             "realizedPnl": None, "takeProfit": None, "stopLoss": None,
         }
 
+    def _wire_holding(self, r):
+        """A Kite delivery holding → one row of the API 7 Holdings page."""
+        if not r.get("tradingsymbol"):
+            return None
+        ticker, _row = self._app_symbol(r.get("exchange"), r.get("tradingsymbol"))
+        qty = num(r.get("quantity"), 0) or 0
+        if not qty:
+            return None
+        avg = num(r.get("average_price")) or num(r.get("price")) or 0
+        live = self.quotes.get(ticker) or {}
+        last = num(live.get("price")) or num(r.get("last_price")) or avg
+        invested, value = qty * avg, qty * last
+        pnl = num(r.get("pnl"))
+        if pnl is None:
+            pnl = value - invested
+        pct = (pnl / invested * 100) if invested else None
+        return {
+            "id": ticker, "symbol": ticker, "qty": qty,
+            "product": str(r.get("product") or "").upper(),
+            "avgPrice": round(avg, 2), "last": round(last, 2),
+            "invested": round(invested, 2), "value": round(value, 2),
+            "pnl": round(pnl, 2), "pnlPct": round(pct, 2) if pct is not None else None,
+            "t1Qty": num(r.get("t1_quantity"), 0) or 0,
+            "isin": r.get("isin"),
+        }
+
+    @staticmethod
+    def holdings_page(rows):
+        """The broker's own Holdings tab (Plugin API 7), in `broker.state.pages`."""
+        return {
+            "id": "holdings", "title": "Holdings", "counter": True,
+            "tables": [{
+                "id": "main",
+                "columns": [
+                    {"id": "symbol", "label": "Symbol", "format": "symbol"},
+                    {"id": "qty", "label": "Quantity", "format": "qty"},
+                    {"id": "product", "label": "Product"},
+                    {"id": "avgPrice", "label": "Avg price", "format": "price"},
+                    {"id": "last", "label": "Last price", "format": "price"},
+                    {"id": "invested", "label": "Invested", "format": "money"},
+                    {"id": "value", "label": "Current value", "format": "money"},
+                    {"id": "pnl", "label": "Unrealized P&L", "format": "pnl"},
+                    {"id": "pnlPct", "label": "Unrealized P&L %", "format": "pnlPercent"},
+                    {"id": "t1Qty", "label": "T1 qty", "format": "qty", "hidden": True},
+                    {"id": "isin", "label": "ISIN", "hidden": True},
+                ],
+                "sort": {"column": "value", "asc": False},
+                "rows": rows,
+            }],
+        }
+
     def _wire_execution(self, r):
         ticker, row = self._app_symbol(r.get("exchange"), r.get("tradingsymbol"))
         if not r.get("tradingsymbol"):
@@ -2138,11 +2190,21 @@ class ZerodhaSource:
         books = self._json("/oms/portfolio/positions")
         orders = self._json("/oms/orders")
         trades = self._json("/oms/trades")
+        try:
+            holdings_data = self._json("/oms/portfolio/holdings")
+            holdings = [h for h in (self._wire_holding(r) for r in (holdings_data.get("holdings") or [])) if h]
+        except AuthError:
+            raise  # an expired enctoken must still reach the refresh prompt
+        except PluginError as e:
+            self.log(f"holdings not read: {e}", "warn")
+            holdings = None  # keep the last good page; the other books are still fine
         events = []
         with self.lock:
             previous = {oid: o.get("status") for oid, o in self.orders.items()}
             self.margins = margins
             self.positions = [p for p in (self._wire_position(r) for r in (books.get("net") or [])) if p]
+            if holdings is not None:
+                self.holdings = holdings
             self.orders = {o["id"]: o for o in (self._wire_order(r) for r in orders) if o}
             self.executions = [e for e in (self._wire_execution(r) for r in trades) if e]
             self.connected_broker = True
@@ -2160,8 +2222,9 @@ class ZerodhaSource:
                                "type": order["type"], "qty": order["qty"],
                                "price": order.get("avgFillPrice"), "message": order.get("message")})
         self.last_poll = time.time()
-        self.log(f"books read: {len(self.positions)} positions, {len(self.orders)} orders, "
-                 f"{len(self.executions)} trades{'; events: ' + ','.join(e['kind'] for e in events) if events else ''}")
+        self.log(f"books read: {len(self.positions)} positions, {len(self.holdings)} holdings, "
+                 f"{len(self.orders)} orders, {len(self.executions)} trades"
+                 f"{'; events: ' + ','.join(e['kind'] for e in events) if events else ''}")
         p = self.plugin
         if p and p.alive:
             for event in events:
@@ -2237,6 +2300,7 @@ class ZerodhaSource:
         with self.lock:
             margins = self.margins or {}
             positions = [dict(x) for x in self.positions]
+            holdings = [dict(x) for x in self.holdings]
             orders = sorted(self.orders.values(), key=lambda o: o.get("updatedMs") or 0)[-200:]
             executions = list(self.executions[-200:])
             connected = self.connected_broker
@@ -2273,6 +2337,7 @@ class ZerodhaSource:
                               {"id": "ioc", "label": "Immediate or Cancel", "orderTypes": ["market", "limit"]}],
             },
             "positions": positions, "orders": orders, "executions": executions,
+            "pages": [self.holdings_page(holdings)],  # Plugin API 7: the broker's own account tabs
         }
 
 

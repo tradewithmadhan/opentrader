@@ -58,6 +58,41 @@ class Books(unittest.TestCase):
         self.assertEqual(state["orders"][0]["status"], "working")
         self.assertEqual(self.fake.count("/oms/user/margins"), 1)
 
+    def test_holdings_are_offered_as_an_api_7_broker_page(self):
+        self.fake.holding_rows = [{
+            "tradingsymbol": "RELIANCE", "exchange": "NSE", "isin": "INE002A01018",
+            "product": "CNC", "quantity": 10, "t1_quantity": 10,
+            "average_price": 2450.5, "last_price": 2512.3, "pnl": 618.0,
+        }]
+        self.source.on_tick()
+        state = self.source.state()
+        self.assertEqual(self.fake.count("/oms/portfolio/holdings"), 1)
+        self.assertEqual(len(state["pages"]), 1)
+        page = state["pages"][0]
+        self.assertEqual((page["id"], page["title"]), ("holdings", "Holdings"))
+        self.assertTrue(page["counter"])
+        table = page["tables"][0]
+        self.assertEqual(table["id"], "main")
+        self.assertEqual(table["sort"], {"column": "value", "asc": False})
+        self.assertEqual(table["columns"][0], {"id": "symbol", "label": "Symbol", "format": "symbol"})
+        row = table["rows"][0]
+        self.assertEqual(row["symbol"], EQ)
+        self.assertEqual(row["qty"], 10)
+        self.assertEqual(row["avgPrice"], 2450.5)
+        self.assertEqual(row["last"], 2512.3)
+        self.assertEqual(row["invested"], 24505.0)
+        self.assertEqual(row["value"], 25123.0)
+        self.assertEqual(row["pnl"], 618.0)
+        self.assertAlmostEqual(row["pnlPct"], 2.52, places=2)
+        self.assertEqual(row["isin"], "INE002A01018")
+        self.assertIn({"id": "isin", "label": "ISIN", "hidden": True}, table["columns"])
+
+    def test_an_empty_account_still_offers_the_holdings_page(self):
+        self.source.on_tick()
+        page = self.source.state()["pages"][0]
+        self.assertEqual(page["id"], "holdings")
+        self.assertEqual(page["tables"][0]["rows"], [])
+
     def test_cancelled_amo_is_not_reported_as_working(self):
         self.fake.order_rows = [order_row(variety="amo", status="CANCELLED AMO")]
         self.source.on_tick()

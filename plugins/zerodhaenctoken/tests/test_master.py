@@ -210,14 +210,14 @@ class ListingDepth(unittest.TestCase):
             fake.close()
 
 
-class PluginApi6(unittest.TestCase):
-    def test_manifest_and_source_speak_api_6(self):
+class PluginApi7(unittest.TestCase):
+    def test_manifest_and_source_speak_api_7(self):
         import json
         root = os.path.dirname(os.path.abspath(plugin.__file__))
         for name in ("opentrader-plugin.json", "opentrader-plugin.dev.json"):
             manifest = json.load(open(os.path.join(root, name), encoding="utf-8"))
-            self.assertEqual(manifest["api"], 6)
-        self.assertEqual(plugin.API, 6)
+            self.assertEqual(manifest["api"], 7)
+        self.assertEqual(plugin.API, 7)
 
     def test_watchlists_are_whole_symbols_and_capped(self):
         fake = fake_kite.FakeKite()

@@ -116,6 +116,10 @@ Orders to this real-money account (`isDemo: false`) are confirmed by OpenTrader 
 - **Quantities** are in units. For NFO/BFO one lot is its lot size (e.g. NIFTY 75), so the ticket steps by that.
   Kite reports MCX quantities in *contracts*; the plugin converts to units using each contract's real market lot
   (CRUDEOIL 100, GOLDM 100, …), so one lot of crude is 100 units in OpenTrader and one contract at Kite.
+- **Holdings** (Plugin API 7): Kite's `/oms/portfolio/holdings` is offered as a **Holdings** tab in the account
+  manager after *Trade history* — quantity, product, average price, live last price, invested value, current value,
+  unrealized P&L and %, with T1 quantity and ISIN hidden in Column setup. Rows sort by current value, and the
+  page refreshes with each account state. A click on a symbol opens its chart.
 - The order book, trades, positions and margins come from `/oms`; fills are pushed by the Kite ticker as order
   postbacks and also picked up by a poll (every second while an order or position is open, otherwise every ten).
 - The POST body mirrors Kite's own web app: `variety`, `tradingsymbol`, `exchange`, `transaction_type`,
@@ -174,9 +178,9 @@ normalised and its words must all appear in the searchable text, so `NIFTY 25000
 tradingsymbol is `NIFTY25NOV25000CE` and whose description is `NIFTY 25000 CE 25-NOV-26`. Results are ranked
 ticker-prefix → ticker-substring → name/description, spread across the configured segments, 50 at a time.
 
-## Plugin API 6
+## Plugin API 7
 
-The plugin speaks **API 6** and uses the upstream features adopted in this fork:
+The plugin speaks **API 7** and uses the upstream features adopted in this fork:
 
 - **Watchlists** (API 4): two sample lists are offered under the plugin's name in *Open list…* — a set of NSE blue
   chips and a set of indices. They are built from the instrument master, capped at 1000 symbols per list, and sent
@@ -189,6 +193,7 @@ The plugin speaks **API 6** and uses the upstream features adopted in this fork:
 - **Extra series** (API 6): F&O symbols declare an `OI` series. `data.bars` on `<symbol>_OI` returns Kite's open
   interest (requested with `oi=1`) as a 5-value series, and the ticker's live OI is pushed as a `data.quote` while
   the series is subscribed. Add more series in `EXTRA_SERIES` and serve `<symbol>_<name>`.
+- **Broker pages** (API 7): Kite's delivery holdings are sent as the *Holdings* tab in `broker.state.pages` (see Trading).
 - **Instrument values** (API 6): `symbolInfo.fields` lists expiry, lot size, tick size and listing date where
   known; live OI quotes carry `Open Interest` / day high / low fields. Add your own values in `EXTRA_FIELDS`.
 
