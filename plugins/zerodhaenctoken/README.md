@@ -151,6 +151,24 @@ The app's chart-event pipeline currently reads dividends/splits/fundamentals fro
 extra field, so nothing is drawn yet. The data is on the wire for the upstream app change needed to show the markers
 on the chart.
 
+## Plugin API 6
+
+The plugin speaks **API 6** and uses the upstream features adopted in this fork:
+
+- **Watchlists** (API 4): two sample lists are offered under the plugin's name in *Open list…* — a set of NSE blue
+  chips and a set of indices. They are built from the instrument master, capped at 1000 symbols per list, and sent
+  again each time the master is loaded. Replace `watchlists()` (and `SAMPLE_BLUE_CHIPS` / `SAMPLE_INDICES`) with
+  your own sets, e.g. the members of an index or the contracts of the month.
+- **Events** (API 5): `data.events` answers with Kite's corporate actions in the app's shape — dividends with an
+  `amount`, bonuses and splits as `from`/`to` (a 1:1 bonus is `1 → 2`). Earnings are not supplied by the personal
+  API; add them in `events_for()` when you have a source. Events are fetched in 3-year chunks, cached per day and
+  logged.
+- **Extra series** (API 6): F&O symbols declare an `OI` series. `data.bars` on `<symbol>_OI` returns Kite's open
+  interest (requested with `oi=1`) as a 5-value series, and the ticker's live OI is pushed as a `data.quote` while
+  the series is subscribed. Add more series in `EXTRA_SERIES` and serve `<symbol>_<name>`.
+- **Instrument values** (API 6): `symbolInfo.fields` lists expiry, lot size, tick size and listing date where
+  known; live OI quotes carry `Open Interest` / day high / low fields. Add your own values in `EXTRA_FIELDS`.
+
 ## Tests
 
 `python plugins/zerodhaenctoken/tests/run_all.py` runs the suites against an honest fake Kite deployment (real

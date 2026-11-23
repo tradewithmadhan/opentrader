@@ -135,29 +135,53 @@ class Logging(unittest.TestCase):
 
 
 class Events(unittest.TestCase):
-    def test_daily_bars_carry_corporate_events_and_minute_bars_do_not(self):
+    def test_data_events_answer_the_plugin_api_shape(self):
         fake = fake_kite.FakeKite()
         try:
             source = harness.make_source(fake)
             app = harness.make_plugin(source)
             source.instruments.ensure()
-            args = {"ticker": "NSE:RELIANCE", "from": midnight("2024-08-01"),
-                    "to": midnight("2024-11-01"), "countBack": 5}
-            daily = app.handle("data.bars", {**args, "resolution": "1D"})
-            events = daily["events"]
+            answer = app.handle("data.events", {"ticker": "NSE:RELIANCE"})
+            events = answer["events"]
             self.assertEqual(len(events), 2)
-            self.assertEqual([e["action"] for e in events], ["dividend", "bonus"])
-            self.assertEqual(events[0]["kind"], "dividend")
-            self.assertEqual(events[0]["label"], "10.00")
-            self.assertEqual(events[1]["kind"], "split")
-            self.assertEqual(events[1]["label"], "1:1 bonus")
+            self.assertEqual(events[0], {"type": "dividend", "date": "2024-08-19", "amount": 10.0})
+            self.assertEqual(events[1], {"type": "split", "date": "2024-10-28", "from": 1, "to": 2})
 
             calls = fake.count("/oms/instruments/events/738561")
             self.assertGreater(calls, 0)
-            app.handle("data.bars", {**args, "resolution": "1D"})
+            app.handle("data.events", {"ticker": "NSE:RELIANCE"})
             self.assertEqual(fake.count("/oms/instruments/events/738561"), calls, "events are cached per day")
-            minute = app.handle("data.bars", {**args, "resolution": "15"})
-            self.assertNotIn("events", minute)
+            bars = app.handle("data.bars", {"ticker": "NSE:RELIANCE", "resolution": "1D",
+                                            "from": midnight("2024-08-01"), "to": midnight("2024-11-01"),
+                                            "countBack": 5})
+            self.assertNotIn("events", bars)
+        finally:
+            fake.close()
+
+    def test_open_interest_series_bars_and_quote(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            app = harness.make_plugin(source)
+            source.instruments.ensure()
+            frm, to = midnight("2026-10-01"), midnight("2026-10-06")
+            bars = app.handle("data.bars", {"ticker": "NFO:NIFTY25NOVFUT_OI", "resolution": "1D",
+                                            "from": frm, "to": to, "countBack": 5})
+            self.assertTrue(bars["bars"])
+            self.assertEqual(len(bars["bars"][0]), 5, "an OI bar has one repeated value")
+            self.assertGreater(bars["bars"][0][1], 0)
+
+            app.on_notification("data.subscribe", {"tickers": ["NFO:NIFTY25NOVFUT_OI"]})
+            self.assertIn("NFO:NIFTY25NOVFUT_OI", source.oi_subscribed)
+            packet = fake_kite.FakeWs.packet_full(779521, 250.0, oi=12345)
+            tick = plugin.ZerodhaWS._parse_packet(packet, 100)
+            self.assertEqual(tick["oi"], 12345)
+            source.on_ticks([tick])
+            oi_quotes = [q for q in app.sock.payloads("data.quote")
+                         if q["ticker"] == "NFO:NIFTY25NOVFUT_OI"]
+            self.assertTrue(oi_quotes)
+            self.assertEqual(oi_quotes[-1]["price"], 12345)
+            self.assertEqual(len(oi_quotes[-1]["minute"]), 6)
         finally:
             fake.close()
 

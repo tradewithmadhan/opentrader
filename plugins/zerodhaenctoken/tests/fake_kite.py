@@ -214,10 +214,10 @@ class FakeWs:
         return struct.pack(">7i", token, p(price), p(high), p(low), p(open_), p(close), 0)
 
     @staticmethod
-    def packet_full(token, price, open_=None, high=None, low=None, close=None, volume=1000):
+    def packet_full(token, price, open_=None, high=None, low=None, close=None, volume=1000, oi=0):
         packet = bytearray(FakeWs.packet_quote(token, price, open_, high, low, close, volume))
-        packet += struct.pack(">i", 0)                    # 44:48 price change
-        packet += b"\x00" * 12                             # 48:60 unused
+        packet += struct.pack(">i", 0)                    # 44:48 last traded timestamp
+        packet += struct.pack(">iii", int(oi), int(oi), int(oi))  # 48:60 OI, day high, day low
         packet += struct.pack(">I", int(time.time()))      # 60:64 exchange timestamp
         for i in range(5):                                 # 64:124 buy depth (qty, price, orders, pad)
             packet += struct.pack(">IIHH", 100 * (i + 1), int(round((price - i * 0.05) * 100)), i + 1, 0)
@@ -321,14 +321,14 @@ class FakeKite:
             if day.weekday() < 5:
                 if interval == "day":
                     out.append([f"{day.isoformat()}T00:00:00+0530", 100.0 + i, 110.0 + i, 90.0 + i,
-                                105.0 + i, 10.0, 0])
+                                105.0 + i, 10.0, 1000.0 + i])
                     i += 1
                 else:
                     at = datetime(day.year, day.month, day.day, 9, 15, tzinfo=IST)
                     close = at.replace(hour=15, minute=30)
                     while at < close:
                         out.append([at.strftime("%Y-%m-%dT%H:%M:%S+0530"), 100.0 + i, 110.0 + i,
-                                    90.0 + i, 105.0 + i, 10.0, 0])
+                                    90.0 + i, 105.0 + i, 10.0, 1000.0 + i])
                         i += 1
                         at += timedelta(seconds=step)
             day += timedelta(days=1)

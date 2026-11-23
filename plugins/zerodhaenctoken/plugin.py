@@ -32,8 +32,10 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.2.23"
-API = 3  # password settings, per-plugin data folder, prompts on token expiry
+PLUGIN_VERSION = "0.3.0"
+# Plugin API 6: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
+# 5 = data.events, 6 = extra series (OI) and instrument values (fields).
+API = 6
 DEV_CONNECTION_FILE = "OpenTraderPlugins/zerodhaenctoken-dev.json"
 
 TZ_IST = timezone(timedelta(hours=5, minutes=30), "Asia/Kolkata")
@@ -89,6 +91,16 @@ NSE_SME_LIST_URL = "https://nsearchives.nseindia.com/emerge/corporates/content/S
 # empty and the chart shows its history-end marker. That is preferred here over an artificial 10-year stop.
 # Week/month charts use the day family; 3m..240m charts use the minute family.
 HISTORY_DAYS_MAX = {"minute": 10950, "day": 10950}
+
+# Plugin API 4/6 extension points. Two sample watchlists are offered from the master; replace or extend these
+# with your own lists, and add any extra fields or series you can source here.
+SAMPLE_BLUE_CHIPS = ("RELIANCE", "TCS", "INFOSYS", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL", "ITC",
+                     "KOTAKBANK", "LICI", "LT", "HCLTECH", "ASIANPAINT", "MARUTI", "TITAN", "ULTRACEMCO",
+                     "SUNPHARMA", "BAJFINANCE", "NESTLEIND", "WIPRO", "ONGC", "TATAMOTORS", "ADANIENT",
+                     "M&M", "TATASTEEL", "JSWSTEEL", "POWERGRID", "NTPC", "COALINDIA", "DRREDDY")
+SAMPLE_INDICES = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "INDIAVIX", "SENSEX", "BANKEX")
+EXTRA_FIELDS = []   # more {"name":…, "value":…} instrument values, added to every symbol's fields
+EXTRA_SERIES = []   # more extra series names, added to every symbol's series (serve <ticker>_<name>)
 # Kite's corporate-actions endpoint refuses ranges over 1095 days, so walk it in 3-year chunks from this year.
 EVENTS_FROM = date(1990, 1, 1)
 EVENTS_CHUNK_DAYS = 1095
@@ -766,6 +778,11 @@ class ZerodhaWS:
                         total_buy_quantity=f[5], total_sell_quantity=f[6])
             tick["ohlc"] = {"open": f[7] / divisor, "high": f[8] / divisor,
                             "low": f[9] / divisor, "close": f[10] / divisor}
+        if len(packet) >= 60:
+            # Full packet: open interest at 48-52, its day high/low at 52-60, exchange time at 60-64.
+            tick["oi"] = float(struct.unpack(">i", packet[48:52])[0])
+            tick["oi_day_high"] = float(struct.unpack(">i", packet[52:56])[0])
+            tick["oi_day_low"] = float(struct.unpack(">i", packet[56:60])[0])
         if len(packet) >= 184:
             depth = {"buy": [], "sell": []}
             for side, start in (("buy", 64), ("sell", 124)):
@@ -792,6 +809,7 @@ class ZerodhaSource:
         self.instruments = Instruments(self)
         self.quotes = {}  # whole symbol → live price cache and forming bars
         self.subscribed = set()  # whole symbols from data.subscribe
+        self.oi_subscribed = set()  # extra series tickers subscribed for their OI
         self.ws = None
         self.ws_generation = 0
         self.awaiting_token = False
@@ -963,7 +981,12 @@ class ZerodhaSource:
                  f"user={self.user_id or 'auto'}, exchanges={','.join(self.exchanges)}, "
                  f"capabilities={','.join(provides) if provides is not None else 'unchanged'}, "
                  f"broker={'on' if self.broker_enabled else 'off'}")
-        threading.Thread(target=self.instruments.ensure, daemon=True).start()
+        def load_master():
+            self.instruments.ensure()
+            if self.plugin is not None and self.plugin.alive:
+                self.plugin.push_watchlists()
+
+        threading.Thread(target=load_master, daemon=True).start()
         if changed or self.ws is None:
             self._start_ws(gen)
         if self.broker_enabled and self.broker_poll is None:
@@ -1298,6 +1321,7 @@ class ZerodhaSource:
         """data.subscribe replaces the whole set; keep tickers we cannot serve yet (master still loading)."""
         with self.lock:
             self.subscribed = set(tickers)
+            self.oi_subscribed = {t for t in tickers if self._series_row(t) is not None}
         self.forward_subscription()
 
     def _ws_modes(self):
@@ -1307,11 +1331,13 @@ class ZerodhaSource:
             full = set(self.watched) | set(self.watched_depth)
         modes = {}
         for ticker in tickers:
-            row = self.instruments.row(ticker)
+            series = self._series_row(ticker)
+            row = series[0] if series else self.instruments.row(ticker)
             if row:
                 with self.lock:
                     self.quotes.setdefault(ticker, {})
-                modes[row["token"]] = "full" if ticker in full else "quote"
+                # Open interest comes in the full packet, so stream the underlying in full mode.
+                modes[row["token"]] = "full" if ticker in full or series else "quote"
         return modes
 
     def forward_subscription(self):
@@ -1341,11 +1367,14 @@ class ZerodhaSource:
 
     @staticmethod
     def _quote_of(ticker, q):
-        return {
+        out = {
             "ticker": ticker, "time": int(time.time()), "price": q["price"],
             "prevClose": q.get("prevClose"),
             "minute": list(q.get("minute") or []), "day": list(q.get("day") or []),
         }
+        if q.get("fields"):
+            out["fields"] = q["fields"]
+        return out
 
     def on_ticks(self, ticks):
         """Update the cache once per frame, then write all notifications in a single socket call.
@@ -1369,7 +1398,11 @@ class ZerodhaSource:
                 if meta is None:
                     continue
                 ticker, tick_size = meta
-                if ticker not in self.subscribed and ticker not in self.watched and ticker not in self.watched_depth:
+                oi_wanted = (t.get("oi") is not None and any(
+                    (sr := self._series_row(s)) is not None and sr[0]["token"] == token
+                    for s in self.oi_subscribed))
+                if ticker not in self.subscribed and ticker not in self.watched \
+                        and ticker not in self.watched_depth and not oi_wanted:
                     continue
                 q = self.quotes.setdefault(ticker, {})
                 ohlc = t.get("ohlc") or {}
@@ -1417,6 +1450,23 @@ class ZerodhaSource:
                     bid, ask = self._bid_ask(q, tick_size)
                     messages.append({"jsonrpc": "2.0", "method": "broker.quote",
                                      "params": {"ticker": ticker, "bid": bid, "ask": ask, "last": price}})
+                oi = t.get("oi")
+                if oi is not None and self.oi_subscribed:
+                    for series_ticker in self.oi_subscribed:
+                        series = self._series_row(series_ticker)
+                        if not series or series[0]["token"] != token:
+                            continue
+                        oq = self.quotes.setdefault(series_ticker, {})
+                        stamp = now // 60 * 60
+                        oq["minute"] = [stamp, oi, oi, oi, oi, 0]
+                        oq["day"] = [ist_midnight(now), oi, oi, oi, oi, 0]
+                        oq["price"] = oi
+                        oq["fields"] = [{"name": "Open Interest", "value": oi},
+                                        {"name": "OI day high", "value": t.get("oi_day_high")},
+                                        {"name": "OI day low", "value": t.get("oi_day_low")}]
+                        self._perf["quotes"] += 1
+                        messages.append({"jsonrpc": "2.0", "method": "data.quote",
+                                         "params": self._quote_of(series_ticker, oq)})
                 if ticker in self.watched_depth:
                     self._perf["depth"] += 1
                     depth = q.get("depth") or {}
@@ -1457,6 +1507,8 @@ class ZerodhaSource:
             # Per-symbol history depth, NOT the per-request chunk size (historyDays* settings). Bounded by NSE's
             # listing date so a recently listed stock doesn't make the app ask years that cannot exist.
             "history": self._history_depth(row),
+            "series": self.series_for(row),
+            "fields": self.fields_for(row, self._listed_text(row["ticker"]) if exchange == "NSE" else None),
         }
         if self.company_details and row["type"] == "stock" and exchange in ("NSE", "BSE"):
             symbol = urllib.parse.quote(row["ticker"], safe="")
@@ -1500,7 +1552,8 @@ class ZerodhaSource:
             return default
         return value if value > 0 else default
 
-    def _history_one(self, token, interval, frm, to):
+    def _history_one(self, token, interval, frm, to, oi=False):
+        """Price bars, or an OI series ([time, value, value, value, value]) when `oi` is set."""
         path = (HISTORY_PATH.format(token=token, interval=interval)
                 + f"?from={self._date_text(frm)}&to={self._date_text(to)}&oi=1")
         data = self._json(path, timeout=30)
@@ -1525,7 +1578,13 @@ class ZerodhaSource:
                 continue
             if None in (o, h, low, c):
                 continue
-            if out and out[-1][0] == t:
+            if oi:
+                value = num(candle[6], 0) or 0
+                if out and out[-1][0] == t:
+                    out[-1] = [t, value, value, value, value]
+                else:
+                    out.append([t, value, value, value, value])
+            elif out and out[-1][0] == t:
                 out[-1] = [t, out[-1][1], max(out[-1][2], h), min(out[-1][3], low), c,
                            (out[-1][5] or 0) + v]
             else:
@@ -1612,8 +1671,104 @@ class ZerodhaSource:
                      + ", ".join(f"{e['action']} {e['date']} {e['label']}" for e in events[-4:]))
         return events
 
-    def bars(self, ticker, resolution, frm, to, count_back):
+    def watchlists(self):
+        """Two sample watchlists (Plugin API 4) from the master, with whole symbols. Replace with your own sets."""
+        rows = self.instruments.rows
+        if not rows:
+            return []
+        by_ticker = {r["ticker"].upper(): r for r in rows if r["exchange"] == "NSE"}
+
+        def whole(names):
+            out = []
+            for name in names:
+                row = by_ticker.get(name.upper())
+                if row is not None:
+                    out.append(f"{row['exchange']}:{row['ticker']}")
+            return out[:1000]
+
+        blue = whole(SAMPLE_BLUE_CHIPS)
+        indices = []
+        for r in rows:
+            if r["type"] == "index" and r["exchange"] in ("NSE_INDEX", "BSE_INDEX"):
+                indices.append(f"{r['exchange']}:{r['ticker']}")
+        for name in SAMPLE_INDICES:
+            row = by_ticker.get(name.upper())
+            if row is not None and f"NSE:{row['ticker']}" not in indices:
+                indices.append(f"NSE:{row['ticker']}")
+        indices = indices[:1000]
+        lists = []
+        if blue:
+            lists.append({"id": "zerodha-blue-chips", "name": "NSE blue chips (sample)",
+                          "symbols": blue, "sections": []})
+        if indices:
+            lists.append({"id": "zerodha-indices", "name": "Indices (sample)",
+                          "symbols": [], "sections": [{"name": "Indices", "symbols": indices}]})
+        return lists
+
+    def events_for(self, ticker):
+        """Corporate actions in the Plugin API 5 shape the app draws on the chart."""
         row = self.instruments.row(ticker)
+        if row is None or row["type"] != "stock":
+            return []  # indices and derivatives have no corporate actions on Kite
+        events = self.corporate_events(ticker)
+        out = []
+        for e in events:
+            action, date = e.get("action"), e.get("date")
+            if not date:
+                continue
+            meta = e.get("meta") or {}
+            first, second = num(meta.get("ratio_1")), num(meta.get("ratio_2"))
+            if action == "dividend":
+                amount = first / second if first is not None and second else None
+                if amount is None:
+                    continue
+                out.append({"type": "dividend", "date": date, "amount": amount})
+            elif action == "bonus":
+                # A 1:1 bonus is a 1 → 2 split: the holder ends with both lots.
+                out.append({"type": "split", "date": date, "from": 1,
+                            "to": int((first or 1) + (second or 1))})
+            elif action == "split":
+                out.append({"type": "split", "date": date, "from": int(first or 1),
+                            "to": int(second or 1)})
+        return out[:5000]
+
+    @staticmethod
+    def fields_for(row, listed=None):
+        """Instrument values (Plugin API 6) from the master and the listing lists."""
+        fields = []
+        if row.get("expiry"):
+            fields.append({"name": "Expiry", "value": row["expiry"]})
+        if row.get("type") in ("futures", "option"):
+            fields.append({"name": "Lot size", "value": row["lot"]})
+        if row.get("tick"):
+            fields.append({"name": "Tick size", "value": row["tick"]})
+        if listed:
+            fields.append({"name": "Listed", "value": listed})
+        fields.extend(EXTRA_FIELDS)
+        return fields[:50]
+
+    @staticmethod
+    def series_for(row):
+        """Extra series (Plugin API 6): Kite serves open interest with oi=1 on F&O history."""
+        series = ["OI"] if row["type"] in ("futures", "option") else []
+        series.extend(EXTRA_SERIES)
+        return series
+
+    def _series_row(self, ticker):
+        """An extra series' ticker (`<symbol>_OI`) → its (base row, series name), or None."""
+        for name in ["OI"] + list(EXTRA_SERIES):
+            suffix = "_" + name
+            if ticker.upper().endswith(suffix.upper()):
+                base = ticker[:-len(suffix)]
+                row = self.instruments.row(base)
+                if row is None and ":" not in base:
+                    row = next((r for r in self.instruments.rows if r["ticker"].upper() == base.upper()), None)
+                return (row, name) if row is not None else None
+        return None
+
+    def bars(self, ticker, resolution, frm, to, count_back):
+        series = self._series_row(ticker)
+        row = series[0] if series else self.instruments.row(ticker)
         if row is None:
             raise PluginError(f"Unknown symbol {ticker}", -32004)
         interval = self._interval_for(resolution)
@@ -1625,7 +1780,7 @@ class ZerodhaSource:
         start = max(frm, to - step + 1)
         merged = {}
         try:
-            for bar in self._history_one(row["token"], interval, start, to):
+            for bar in self._history_one(row["token"], interval, start, to, oi=bool(series)):
                 merged[bar[0]] = bar
         except PluginError as e:
             # The chart only says "no data"; the log says why (same as the OpenAlgo plugin).
@@ -2069,6 +2224,12 @@ class Plugin:
         if q:
             self.notify("data.quote", q)
 
+    def push_watchlists(self):
+        lists = self.source.watchlists()
+        if lists:
+            self.notify("data.watchlists", {"watchlists": lists})
+            self.log(f"data.watchlists: {len(lists)} lists")
+
     def push_state(self):
         state = self.source.state()
         self.source.log(f"broker.state: connected={state['connected']} "
@@ -2094,15 +2255,15 @@ class Plugin:
             resolution = p["resolution"]
             frm, to, count_back = int(p["from"]), int(p["to"]), int(p.get("countBack", 2000))
             bars = s.bars(p["ticker"], resolution, frm, to, count_back)
-            result = {"bars": bars}
-            if resolution == "1D":
-                result["events"] = s.corporate_events(p["ticker"])  # markers for an upstream app change
             window = (f"{datetime.fromtimestamp(frm, TZ_IST):%d/%m/%Y}"
                       f"–{datetime.fromtimestamp(to, TZ_IST):%d/%m/%Y}")
             self.log(f"data.bars {p['ticker']} {resolution}: {len(bars)} bars "
-                     f"({window}, countBack={count_back}"
-                     + (f", {len(result['events'])} events" if "events" in result else "") + ")")
-            return result
+                     f"({window}, countBack={count_back})")
+            return {"bars": bars}
+        if method == "data.events":
+            events = s.events_for(p["ticker"])
+            self.log(f"data.events {p['ticker']}: {len(events)} events")
+            return {"events": events}
         if method == "broker.getState":
             return s.state()
         if method == "broker.resolveSymbol":
@@ -2175,6 +2336,7 @@ class Plugin:
         self.alive = True
         self.log(f"Connected to {welcome.get('result', {}).get('app', 'OpenTrader')} "
                  f"(Plugin API {welcome.get('result', {}).get('api')})")
+        self.push_watchlists()
         for line in reader:
             if not line.strip():
                 continue

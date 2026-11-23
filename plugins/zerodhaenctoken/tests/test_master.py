@@ -1,5 +1,6 @@
 """The instrument master: Kite's CSV normalised into app symbols, searchable, cached across restarts."""
 
+import os
 import unittest
 from datetime import timedelta
 
@@ -199,6 +200,44 @@ class ListingDepth(unittest.TestCase):
             self.assertEqual(fake.count("/nse/SME_EQUITY_L.csv"), 1)
         finally:
             plugin.NSE_EQUITY_LIST_URL, plugin.NSE_SME_LIST_URL = equity_url, sme_url
+            fake.close()
+
+
+class PluginApi6(unittest.TestCase):
+    def test_manifest_and_source_speak_api_6(self):
+        import json
+        root = os.path.dirname(os.path.abspath(plugin.__file__))
+        for name in ("opentrader-plugin.json", "opentrader-plugin.dev.json"):
+            manifest = json.load(open(os.path.join(root, name), encoding="utf-8"))
+            self.assertEqual(manifest["api"], 6)
+        self.assertEqual(plugin.API, 6)
+
+    def test_watchlists_are_whole_symbols_and_capped(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            source.instruments.ensure()
+            lists = source.watchlists()
+            self.assertEqual(len(lists), 2)
+            for item in lists:
+                self.assertLessEqual(len(item["symbols"]) + sum(len(s["symbols"]) for s in item["sections"]), 1000)
+                for sym in item["symbols"] + [x for s in item["sections"] for x in s["symbols"]]:
+                    self.assertIn(":", sym)
+            self.assertTrue(any("NSE:RELIANCE" in item["symbols"] for item in lists))
+        finally:
+            fake.close()
+
+    def test_symbol_info_declares_series_and_fields(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            fut = source.symbol_info("NFO:NIFTY25NOVFUT")
+            self.assertEqual(fut["series"], ["OI"])
+            self.assertIn("Lot size", [f["name"] for f in fut["fields"]])
+            eq = source.symbol_info("NSE:RELIANCE")
+            self.assertEqual(eq["series"], [])
+            self.assertIn("Tick size", [f["name"] for f in eq["fields"]])
+        finally:
             fake.close()
 
 
