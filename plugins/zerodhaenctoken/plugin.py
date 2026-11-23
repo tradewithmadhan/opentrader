@@ -33,7 +33,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.5.7"
+PLUGIN_VERSION = "0.5.8"
 # Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
 API = 7
@@ -1350,7 +1350,8 @@ class ZerodhaSource:
             else:
                 mine = False
         if not mine:
-            self._listings_loading.wait(10)
+            # This is optional enrichment: never block a symbolInfo request for it. The single fetch fills the cache
+            # in a moment, and the app asks again shortly; an empty listing row just means fewer extra fields.
             return
         try:
             path = plugin_data_dir() / "cache" / f"nse-listings-{today}.json"
