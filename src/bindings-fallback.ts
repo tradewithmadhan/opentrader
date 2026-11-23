@@ -430,6 +430,8 @@ export type BrokerCapabilities = {
   strictLimitPrice?: boolean;
   /** Plugin can preview orders (what-if) before placing, #139. */
   orderPreview?: boolean;
+  exitLevels?: boolean;
+  maxExitLevels?: number | null;
 };
 export type Position = {
   id: string;
@@ -443,6 +445,8 @@ export type Position = {
   realizedPnl: number | null;
   takeProfit: number | null;
   stopLoss: number | null;
+  /** Exit levels in place of takeProfit/stopLoss, #330. */
+  exitLevels?: ExitLevel[];
 };
 export type Order = {
   id: string;
@@ -463,6 +467,8 @@ export type Order = {
   updatedMs: number | null;
   /** The ticket fields it was placed with, sent again when it is modified. */
   fields?: Record<string, string>;
+  /** Exit levels in place of takeProfit/stopLoss, #330. */
+  exitLevels?: ExitLevel[];
 };
 export type Execution = {
   id: string;
@@ -503,6 +509,8 @@ export type OrderTicket = {
   fields?: Record<string, string>;
   /** The time in force picked (a `durations` id); left out when the broker declares none. */
   duration?: string;
+  /** Exit levels in place of takeProfit/stopLoss, #330. */
+  exitLevels?: ExitLevel[];
 };
 /** An enabled broker plugin, as the status lists it. */
 export type BrokerPlugin = { id: string; name: string; connected: boolean };
@@ -540,6 +548,9 @@ export type BrokerEvent = {
 /** The Tauri event's payload wrapper. */
 export type BrokerOrderEvent = { event: BrokerEvent };
 /** One price level of a broker's book: the quantity resting at its price. */
+/** An exit level of an order or position: part of its quantity with its own brackets, #330. */
+export type ExitLevel = { id?: string | null; qty: number; takeProfit?: number | null; stopLoss?: number | null };
+
 /** Broker plugin account-manager pages (holdings, funds…), #384. */
 export type ColumnFormat = "symbol" | "side" | "qty" | "price" | "money" | "pnl" | "percent" | "pnlPercent" | "number" | "text" | "time";
 export type PageCell = number | string | null;
@@ -776,7 +787,7 @@ export const commands: {
   brokerModify(orderId: string, ticket: OrderTicket): Promise<CommandResult<void>>;
   brokerCancel(orderId: string): Promise<CommandResult<void>>;
   brokerClosePosition(positionId: string, qty: number | null): Promise<CommandResult<void>>;
-  brokerSetPositionBrackets(positionId: string, takeProfit: number | null, stopLoss: number | null): Promise<CommandResult<void>>;
+  brokerSetPositionBrackets(positionId: string, takeProfit: number | null, stopLoss: number | null, exitLevels?: ExitLevel[] | null): Promise<CommandResult<void>>;
   brokerWatchQuotes(tickers: string[]): Promise<CommandResult<void>>;
   brokerWatchDepth(tickers: string[]): Promise<CommandResult<void>>;
   brokerSetSymbolMap(id: string, map: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
@@ -871,7 +882,7 @@ export const commands: {
   brokerModify(orderId: string, ticket: OrderTicket): Promise<CommandResult<void>>;
   brokerCancel(orderId: string): Promise<CommandResult<void>>;
   brokerClosePosition(positionId: string, qty: number | null): Promise<CommandResult<void>>;
-  brokerSetPositionBrackets(positionId: string, takeProfit: number | null, stopLoss: number | null): Promise<CommandResult<void>>;
+  brokerSetPositionBrackets(positionId: string, takeProfit: number | null, stopLoss: number | null, exitLevels?: ExitLevel[] | null): Promise<CommandResult<void>>;
   brokerWatchQuotes(tickers: string[]): Promise<CommandResult<void>>;
   brokerWatchDepth(tickers: string[]): Promise<CommandResult<void>>;
   brokerSetSymbolMap(id: string, map: Record<string, string>): Promise<CommandResult<PluginsStatus>>;
