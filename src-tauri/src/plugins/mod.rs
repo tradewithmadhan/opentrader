@@ -1009,7 +1009,8 @@ pub async fn plugin_pick_folder(app: AppHandle, title: String) -> Result<Option<
 
 #[cfg(test)]
 mod tests {
-    use super::source_stamp;
+    use super::{plugin_toast, source_stamp};
+    use serde_json::json;
 
     #[test]
     fn source_stamp_reads_only_the_entry_kinds_files() {
@@ -1031,6 +1032,27 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert_ne!(source_stamp(&dir, &entry), base);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn toast(params: serde_json::Value) -> Option<super::PluginToast> {
+        plugin_toast("p".into(), "P".into(), &params)
+    }
+
+    #[test]
+    fn toast_reads_level_message_and_sound() {
+        let t = toast(json!({"level":"error","message":" Halted ","sound":true})).unwrap();
+        assert_eq!((t.level.as_str(), t.message.as_str(), t.sound, t.plugin_name.as_str()), ("error", "Halted", true, "P"));
+        let t = toast(json!({"level":"loud","message":"x"})).unwrap();
+        assert_eq!((t.level.as_str(), t.sound), ("info", false));
+    }
+
+    #[test]
+    fn toast_needs_a_message_and_cuts_a_long_one() {
+        assert!(toast(json!({"level":"info"})).is_none());
+        assert!(toast(json!({"message":"   "})).is_none());
+        let t = toast(json!({"message":"é".repeat(400)})).unwrap();
+        assert_eq!(t.message.chars().count(), 301);
+        assert!(t.message.ends_with('…'));
     }
 }
 
@@ -1072,29 +1094,4 @@ pub fn plugin_logs(app: AppHandle, id: String) -> Vec<String> {
     app.state::<Plugins>().logs.locked().get(&id).map(|r| r.iter().cloned().collect()).unwrap_or_default()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::plugin_toast;
-    use serde_json::json;
 
-    fn toast(params: serde_json::Value) -> Option<super::PluginToast> {
-        plugin_toast("p".into(), "P".into(), &params)
-    }
-
-    #[test]
-    fn toast_reads_level_message_and_sound() {
-        let t = toast(json!({"level":"error","message":" Halted ","sound":true})).unwrap();
-        assert_eq!((t.level.as_str(), t.message.as_str(), t.sound, t.plugin_name.as_str()), ("error", "Halted", true, "P"));
-        let t = toast(json!({"level":"loud","message":"x"})).unwrap();
-        assert_eq!((t.level.as_str(), t.sound), ("info", false));
-    }
-
-    #[test]
-    fn toast_needs_a_message_and_cuts_a_long_one() {
-        assert!(toast(json!({"level":"info"})).is_none());
-        assert!(toast(json!({"message":"   "})).is_none());
-        let t = toast(json!({"message":"é".repeat(400)})).unwrap();
-        assert_eq!(t.message.chars().count(), 301);
-        assert!(t.message.ends_with('…'));
-    }
-}
