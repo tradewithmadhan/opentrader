@@ -596,6 +596,10 @@ export type SymbolEvent = {
 };
 export type PluginEventsChanged = { exchanges: string[]; symbols: string[] | null };
 /** A data plugin's instrument values (price bands, circuit limits) shown in Symbol info (#383). */
+/** OakScript studies/strategies shipped by a data plugin, #402. */
+export type PluginScript = { id: string; name: string; kind?: string | null; source: string };
+export type PluginScripts = { plugin: string; pluginName: string; scripts: PluginScript[] };
+
 export type PluginField = { name: string; value: any };
 export type PluginSymbolFields = { pluginName: string; fields: PluginField[] };
 export type PluginFieldsChanged = { symbol: string };
@@ -777,6 +781,7 @@ export const commands: {
   pluginWatchlists(): Promise<PluginWatchlists[]>;
   pluginEvents(symbol: string): Promise<CommandResult<SymbolEvent[]>>;
   pluginSymbolFields(symbol: string): Promise<CommandResult<PluginSymbolFields | null>>;
+  pluginScripts(): Promise<PluginScripts[]>;
   pluginNewToken(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginRemove(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginFolderCandidates(id: string, step: number): Promise<CommandResult<string[]>>;
@@ -872,6 +877,7 @@ export const commands: {
   pluginWatchlists(): Promise<PluginWatchlists[]>;
   pluginEvents(symbol: string): Promise<CommandResult<SymbolEvent[]>>;
   pluginSymbolFields(symbol: string): Promise<CommandResult<PluginSymbolFields | null>>;
+  pluginScripts(): Promise<PluginScripts[]>;
   pluginNewToken(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginRemove(id: string): Promise<CommandResult<PluginsStatus>>;
   pluginFolderCandidates(id: string, step: number): Promise<CommandResult<string[]>>;
@@ -919,4 +925,5 @@ export const events = new Proxy(
   pluginToast: EventListen<PluginToast>;
   pluginEventsChanged: EventListen<PluginEventsChanged>;
   pluginFieldsChanged: EventListen<PluginFieldsChanged>;
+  pluginScriptsChanged: EventListen<any>;
 } & Record<string, EventListen<any>>;
