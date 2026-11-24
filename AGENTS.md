@@ -48,6 +48,9 @@ too, put its body in `opentrader_core::commands`, add its name to `SERVED` there
 - Do not name market-data providers in code, docs or issues.
 - Dates shown to the user: dd/mm/yyyy.
 - Commit only the files you changed (no `git add -A`): other work may be in the tree.
+- **Ask for explicit user confirmation before any external or shared action**: filing a GitHub issue or comment,
+  committing, pushing, or opening a PR. Prepare the draft/text and wait — "looks good" about the content is not
+  approval to file, commit, push or publish. Never assume confirmation from an earlier "yes" about the approach.
 - Cherry-picking upstream commits: strip the trailing `(#NNN)` PR reference from the message
   (`git cherry-pick -n`, then re-commit) so the push does not cross-reference and ping the upstream PR.
 
