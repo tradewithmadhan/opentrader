@@ -1,7 +1,7 @@
 # Add a `data.symbolInfoChanged` notification so a plugin can invalidate cached symbol info
 
-Status: **draft — confirmed by user, ready to file** (confirm the final text once more before posting).
-Target: https://github.com/deepentropy/opentrader/issues — feature request.
+Status: **FILED** as https://github.com/deepentropy/opentrader/issues/400 (24/11/2026) as a feature request.
+User confirmed the notification-based approach and explicitly rejected a time-based/next-morning TTL.
 
 ## Problem
 
