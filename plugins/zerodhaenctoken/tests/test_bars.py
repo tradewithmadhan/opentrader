@@ -1,6 +1,7 @@
 """History windows: one honest call unless the request has to be chunked, and Kite's IST timestamps intact."""
 
 import unittest
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 import fake_kite
@@ -24,10 +25,14 @@ class Intervals(unittest.TestCase):
         self.assertEqual(self.source._interval_for("15"), "15minute")
         self.assertEqual(self.source._interval_for("30"), "30minute")
         self.assertEqual(self.source._interval_for("1D"), "day")
+        self.assertEqual(self.source._interval_for("5S"), "5second")
+        self.assertEqual(self.source._interval_for("2"), "2minute")
+        self.assertEqual(self.source._interval_for("120"), "2hour")
+        self.assertEqual(self.source._interval_for("180"), "3hour")
 
     def test_an_unserved_resolution_is_refused(self):
         with self.assertRaises(plugin.PluginError) as raised:
-            self.source._interval_for("60")
+            self.source._interval_for("1S")
         self.assertEqual(raised.exception.code, -32602)
 
 
@@ -158,6 +163,24 @@ class Events(unittest.TestCase):
         finally:
             fake.close()
 
+    def test_changed_events_notify_the_app_with_the_whole_symbol(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            app = harness.make_plugin(source)
+            source.instruments.ensure()
+            source.events_for("NSE:RELIANCE")
+            self.assertEqual(app.sock.payloads("data.eventsChanged"), [])
+            token = source.instruments.row("NSE:RELIANCE")["token"]
+            source._events_at[token] -= 2 * plugin.EVENTS_REFRESH_SEC  # due for a re-check
+            fake.event_rows_changed = True
+            answer = source.events_for("NSE:RELIANCE")
+            self.assertEqual(len(answer), 3)
+            self.assertEqual(app.sock.payloads("data.eventsChanged"),
+                             [{"tickers": ["NSE:RELIANCE"]}])
+        finally:
+            fake.close()
+
     def test_open_interest_series_bars_and_quote(self):
         fake = fake_kite.FakeKite()
         try:
@@ -201,6 +224,38 @@ class Seconds(unittest.TestCase):
         finally:
             fake.close()
 
+    def test_two_four_and_sixty_minute_come_from_kite_directly(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            source.instruments.ensure()
+            at = datetime.now(IST).replace(hour=9, minute=15, second=0, microsecond=0)
+            frm, to = int(at.timestamp()), int(at.timestamp()) + 3600
+            for resolution, token in (("2", "2minute"), ("4", "4minute"), ("60", "60minute"),
+                                      ("120", "2hour"), ("180", "3hour"), ("240", "4hour")):
+                bars = source.bars("NSE:RELIANCE", resolution, frm, to, 5)
+                self.assertTrue(bars)
+                self.assertEqual(fake.count(f"/oms/instruments/historical/738561/{token}"), 1)
+        finally:
+            fake.close()
+
+    def test_request_windows_are_clamped_to_kite_limits(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            source.instruments.ensure()
+            source.settings["historyDaysMinute"] = "500"  # bigger than the hard cap
+            to = datetime.now(IST)
+            for resolution, days in (("1", 60), ("60", 400), ("120", 400), ("5S", 2)):
+                frm = int((to - timedelta(days=200)).timestamp())
+                source.bars("NSE:RELIANCE", resolution, frm, int(to.timestamp()), 10)
+                req = fake.sent("/oms/instruments/historical/738561/" + plugin.INTERVALS[resolution])[-1]
+                asked = datetime.strptime(urllib.parse.unquote(req["query"]["from"]),
+                                          "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
+                self.assertLessEqual((to - asked).days, days + 1)
+        finally:
+            fake.close()
+
     def test_second_bars_fall_back_to_live_ticks(self):
         fake = fake_kite.FakeKite()
         fake.history_status = 400  # this deployment refuses seconds
@@ -216,7 +271,7 @@ class Seconds(unittest.TestCase):
             self.assertEqual(bars[0][0], frm)
             self.assertEqual(bars[0][4], 2500.0)
             self.assertEqual(fake.count("/oms/instruments/historical/738561/5second"), 1,
-                             "the refused interval is probed once, then remembered")
+                             "Kite was tried before the tick fallback")
         finally:
             fake.close()
 

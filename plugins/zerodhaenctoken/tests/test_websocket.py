@@ -257,6 +257,8 @@ class Auth(unittest.TestCase):
                 lambda: any(p.get("method") == "plugin.prompt" for p in app.sock.notifications()), 5.0))
             prompt = [p for p in app.sock.notifications("plugin.prompt")][0]["params"]
             self.assertEqual(prompt["input"], "password")
+            notices = [n["params"] for n in app.sock.notifications("broker.notice")]
+            self.assertTrue(any(n["level"] == "error" and "enctoken" in n["message"] for n in notices))
             fake.ws.reject = False
             app.on_notification("plugin.promptAnswer", {"id": prompt["id"], "value": "fresh-token"})
             self.assertEqual(source.enctoken, "fresh-token")

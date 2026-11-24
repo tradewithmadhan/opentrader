@@ -69,9 +69,13 @@ def master_csv(rows=None):
 
 def step_seconds(interval):
     if interval.endswith("minute"):
-        return int(interval[:-6]) * 60
+        n = interval[:-6]
+        return int(n) * 60 if n else 60
     if interval.endswith("second"):
-        return int(interval[:-6])
+        n = interval[:-6]
+        return int(n) if n else 5
+    if interval.endswith("hour"):
+        return int(interval[:-4]) * 3600
     return 60
 
 
@@ -422,10 +426,14 @@ class _Handler(BaseHTTPRequestHandler):
                 "industry": "Refining", "oneLine": "An Indian conglomerate.",
             }})
         if method == "GET" and path.startswith("/oms/instruments/events/"):
-            return self._send(200, {"status": "success", "data": [
+            rows = [
                 {"action_type": "dividend", "ex_date": "2024-08-19", "meta": {"ratio_1": 100, "ratio_2": 10}},
                 {"action_type": "bonus", "ex_date": "2024-10-28", "meta": {"ratio_1": 1, "ratio_2": 1}},
-            ]})
+            ]
+            if getattr(fake, "event_rows_changed", False):
+                rows.append({"action_type": "dividend", "ex_date": "2026-11-20",
+                             "meta": {"ratio_1": 50, "ratio_2": 10}})
+            return self._send(200, {"status": "success", "data": rows})
         if method == "GET" and path == "/oms/user/margins":
             return self._send(200, {"status": "success", "data": fake.margins})
         if method == "GET" and path == "/oms/portfolio/positions":

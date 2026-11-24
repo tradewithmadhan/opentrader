@@ -105,12 +105,15 @@ endpoint. The perf log counts them as `cached_bars`.
 
 ## Intervals
 
-The plugin serves **1, 3, 5, 10, 15, 30 minutes and 1 day** from Kite's history. The app builds 2/4-minute bars from
-1-minute ones, hours from 15-minute ones, and weeks/months from daily ones. Seconds (1/5/10/15/30/45 S) are also
-offered: on each first request the plugin probes Kite for a seconds history interval and, when Kite serves one, uses
-it. Kite Connect documents no seconds interval; when the personal OMS refuses it, second bars are built from the live
-tick stream going forward — **there is no backfill**, so a fresh seconds chart fills from the moment it is opened.
-The log line `seconds history: 5s via Kite interval '…'` shows which source won.
+Verified live against the personal OMS, the plugin serves **1, 2, 3, 4, 5, 10, 15, 30, 60 minutes**, **2, 3, 4 hours**
+(Kite's tokens are `2hour`/`3hour`/`4hour`, not `120minute` etc.), **5/10/15/30/45 seconds** and **1 day** directly
+from Kite history — including full backfill. `1S`/`2S` and `1hour` are refused, so 1-second is not offered. Weeks,
+months and longer (up to 12M) are app-built from the daily series.
+
+Per-request windows are clamped to the limits Kite enforces: **60 days** for minutes, **400 days** for all hourly
+bars, **2 days** for seconds and **1900 days** for daily. The app pages backwards through older windows as you scroll. If a
+deployment ever refuses a seconds interval, the plugin falls back to building those bars from the live tick stream
+(no backfill in that case), and logs why.
 
 ## Trading
 

@@ -33,7 +33,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.5.9"
+PLUGIN_VERSION = "0.5.11"
 # Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
 API = 7
@@ -106,6 +106,9 @@ EXTRA_SERIES = []   # more extra series names, added to every symbol's series (s
 # A brief empty broker.watchQuote/watchDepth is ignored: the app re-sends the watch on each chart switch, and
 # dropping full mode for that instant floods Kite with mode frames and blanks the ticket's bid/ask.
 WATCH_GRACE_SEC = 1.5
+# The app re-asks data.events after an hour. Re-check the source on that cadence so a new or cancelled corporate
+# action can be pushed with data.eventsChanged instead of waiting for the next day's cache rollover.
+EVENTS_REFRESH_SEC = 3600
 # Kite's corporate-actions endpoint refuses ranges over 1095 days, so walk it in 3-year chunks from this year.
 EVENTS_FROM = date(1990, 1, 1)
 EVENTS_CHUNK_DAYS = 1095
@@ -196,17 +199,22 @@ MCX_CONTRACT_SIZES = {
 }
 MCX_SIZE_REVISIONS = {"MCXBULLDEX": ((date(2026, 11, 1), 15),)}
 
-# App resolution → Kite interval token. 60 is deliberately omitted: Kite stamps 60-minute bars from 09:15,
-# while the app's hour grid starts on the clock hour; the app builds 60 from our 15-minute bars instead.
+# App resolution → Kite interval token. Verified live on the personal OMS: 2/4/60-minute, 2/3/4-hour and
+# 5/10/15/30/45-second history are all served directly. Kite names hours "2hour"/"3hour"/"4hour", not
+# "120minute"/"180minute"/"240minute" (those are refused).
 INTERVALS = {
-    "1": "minute", "3": "3minute", "5": "5minute", "10": "10minute",
-    "15": "15minute", "30": "30minute", "1D": "day",
+    "1": "minute", "2": "2minute", "3": "3minute", "4": "4minute", "5": "5minute",
+    "10": "10minute", "15": "15minute", "30": "30minute", "60": "60minute",
+    "120": "2hour", "180": "3hour", "240": "4hour",
+    "5S": "5second", "10S": "10second", "15S": "15second", "30S": "30second", "45S": "45second",
+    "1D": "day",
 }
-# Kite's personal history has no seconds. These bars are built from the live tick stream (see _second_bars), so they
-# have no backfill: a chart opened on one starts empty and fills as ticks arrive.
-SECOND_INTERVALS = {"1S": 1, "5S": 5, "10S": 10, "15S": 15, "30S": 30, "45S": 45}
-SERVED_INTERVALS = list(INTERVALS) + list(SECOND_INTERVALS)
-TICK_BUFFER_SEC = 7200  # keep two hours of ticks, enough for the app's 1-3 day second windows to fill forward
+SECOND_INTERVALS = {"5S": 5, "10S": 10, "15S": 15, "30S": 30, "45S": 45}  # tick-built fallback only
+SERVED_INTERVALS = list(INTERVALS)
+HOUR_INTERVALS = {"60minute", "2hour", "3hour", "4hour"}
+# Hard per-request limits measured live (app settings are clamped to these).
+CHUNK_DAYS = {"second": 2, "minute": 60, "hour": 400, "day": 1900}
+TICK_BUFFER_SEC = 7200  # fallback second bars, used only if Kite history refuses
 
 PROFILE_PATH = "/oms/user/profile"
 HISTORY_PATH = "/oms/instruments/historical/{token}/{interval}"
@@ -844,7 +852,6 @@ class ZerodhaSource:
         self.instruments = Instruments(self)
         self.quotes = {}  # whole symbol → live price cache and forming bars
         self._ticks = {}  # whole symbol → [(epoch sec, price, volume delta)] for the app's second charts
-        self._second_history_token = {}  # seconds bucket → Kite interval token that works, or "" when none
         self.subscribed = set()  # whole symbols from data.subscribe
         self.oi_subscribed = set()  # extra series tickers subscribed for their OI
         self.ws = None
@@ -886,6 +893,8 @@ class ZerodhaSource:
                       "cached_bars": 0, "reconnects": 0}
         self._perf_thread = None
         self._events = {}  # token → (day, corporate actions)
+        self._events_at = {}  # token → when the actions were last fetched, for a periodic re-check
+
         self._prune_caches()
 
     # ── cache housekeeping ──
@@ -1008,6 +1017,12 @@ class ZerodhaSource:
             stamp = datetime.now(TZ_IST).strftime("%Y-%m-%d %H:%M:%S")
             self._write_log(category, f"{stamp} [{level}] [{category}] {text}")
 
+    def notice(self, level, message):
+        """A line in the account manager's Notifications log (broker plugins only)."""
+        p = self.plugin
+        if p and p.alive:
+            p.notify("broker.notice", {"level": level, "message": self.clean(message)})
+
     def configure(self, settings, provides=None):
         with self.lock:
             changed = (settings.get("enctoken") != self.enctoken
@@ -1060,6 +1075,7 @@ class ZerodhaSource:
                 return
             self.awaiting_token = True
         self.log("The enctoken was refused — ask for a fresh one from kite.zerodha.com", "warn")
+        self.notice("error", "Session expired — enter a fresh enctoken to restore data and trading")
         p = self.plugin
         if p and p.alive:
             p.notify("plugin.prompt", {
@@ -1768,8 +1784,6 @@ class ZerodhaSource:
             return self._quote_of(ticker, q)
 
     def _interval_for(self, resolution):
-        if resolution in SECOND_INTERVALS:
-            return "second"
         interval = INTERVALS.get(resolution)
         if interval is None:
             raise PluginError(f"Resolution {resolution} is not served by Zerodha", -32602)
@@ -1864,15 +1878,18 @@ class ZerodhaSource:
         today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
         with self.lock:
             hit = self._events.get(token)
-            if hit is not None and hit[0] == today:
+            fresh = hit is not None and hit[0] == today
+            if fresh and time.time() - self._events_at.get(token, 0) < EVENTS_REFRESH_SEC:
                 return hit[1]
+            previous = hit[1] if fresh else None
         path = plugin_data_dir() / "cache" / "events" / f"{token}-{today}.json"
         events = None
-        try:
-            with open(path, encoding="utf-8") as f:
-                events = json.load(f)
-        except (OSError, ValueError):
-            pass
+        if not fresh:  # a periodic re-check must go to the source, or it can never see a new event
+            try:
+                with open(path, encoding="utf-8") as f:
+                    events = json.load(f)
+            except (OSError, ValueError):
+                pass
         if events is None:
             merged, start, end = [], EVENTS_FROM, datetime.now(TZ_IST).date()
             while start <= end:
@@ -1901,6 +1918,12 @@ class ZerodhaSource:
                 pass
         with self.lock:
             self._events[token] = (today, events)
+            self._events_at[token] = time.time()
+        if previous is not None and previous != events:
+            p = self.plugin
+            if p and p.alive:
+                p.notify("data.eventsChanged", {"tickers": [ticker]})
+            self.log(f"corporate events {ticker}: changed, told the app to re-read", "info")
         if events:
             self.log(f"corporate events {ticker}: {len(events)} actions — "
                      + ", ".join(f"{e['action']} {e['date']} {e['label']}" for e in events[-4:]))
@@ -2004,25 +2027,6 @@ class ZerodhaSource:
                 return (row, name) if row is not None else None
         return None
 
-    def _second_history(self, token, mult, frm, to, count_back):
-        """Ask Kite REST for seconds. Its docs list no seconds interval, but the personal OMS may accept one, so probe
-        each bucket once and remember the working token. None means the source cannot serve seconds."""
-        name = self._second_history_token.get(mult, "")
-        candidates = [name] if name else [f"{mult}second", "second"]
-        for candidate in candidates:
-            try:
-                bars = self._history_one(token, candidate, frm, to, timeout=3)
-            except AuthError:
-                raise  # a real token expiry must still reach the refresh prompt
-            except Exception:  # noqa: BLE001 - a refused/timed-out probe just means "no seconds history"
-                continue
-            if candidate != self._second_history_token.get(mult):
-                self._second_history_token[mult] = candidate
-                self.log(f" seconds history: {mult}s via Kite interval '{candidate}'")
-            return bars[-count_back:] if count_back and len(bars) > count_back else bars
-        self._second_history_token[mult] = ""
-        return None
-
     def _second_bars(self, ticker, resolution, frm, to, count_back):
         """Build N-second OHLCV bars from the live ticks when Kite has no seconds history for this bucket."""
         step = SECOND_INTERVALS[resolution]
@@ -2071,17 +2075,16 @@ class ZerodhaSource:
         if row is None:
             raise PluginError(f"Unknown symbol {ticker}", -32004)
         interval = self._interval_for(resolution)
-        if resolution in SECOND_INTERVALS:
-            step = SECOND_INTERVALS[resolution]
-            served = self._second_history(row["token"], step, frm, to, count_back)
-            return served if served is not None else self._second_bars(ticker, resolution, frm, to, count_back)
         cached = self._live_bar(ticker, resolution, frm, to, count_back)
         if cached is not None:
             self._perf["cached_bars"] += 1
             return cached
-        chunk_days = (self._cap("historyDaysDaily", 1900) if interval == "day"
-                      else self._cap("historyDaysMinute", 30))
-        step = chunk_days * 86400
+        # Kite's personal OMS caps a call at 2 days of seconds, 60 days of minutes, 400 of hours and 2000 of days.
+        family = ("second" if interval.endswith("second") else "hour" if interval in HOUR_INTERVALS
+                  else "day" if interval == "day" else "minute")
+        hard_days = CHUNK_DAYS[family]
+        configured = self._cap("historyDaysDaily", 1900) if interval == "day" else self._cap("historyDaysMinute", 30)
+        step = min(configured, hard_days) * 86400
         # Only the newest chunk of the asked window. The protocol allows returning fewer, newest bars: the app
         # then asks for older pages as the user scrolls. One Kite call per request keeps us under its rate limit.
         start = max(frm, to - step + 1)
@@ -2090,7 +2093,10 @@ class ZerodhaSource:
             for bar in self._history_one(row["token"], interval, start, to, oi=bool(series)):
                 merged[bar[0]] = bar
         except PluginError as e:
-            # The chart only says "no data"; the log says why (same as the OpenAlgo plugin).
+            if resolution in SECOND_INTERVALS:
+                # Kite normally serves seconds; if this deployment refuses, fill forward from live ticks.
+                self.log(f"history {ticker} {resolution}: {e} — using live ticks", "warn")
+                return self._second_bars(ticker, resolution, frm, to, count_back)
             self.log(f"history {ticker} {resolution}: {e}", "warn")
             raise
         out = [merged[t] for t in sorted(merged)]
@@ -2422,6 +2428,7 @@ class ZerodhaSource:
             holdings = None  # keep the last good page; the other books are still fine
         events = []
         with self.lock:
+            was_connected = self.connected_broker
             previous = {oid: o.get("status") for oid, o in self.orders.items()}
             self.margins = margins
             self.positions = [p for p in (self._wire_position(r) for r in (books.get("net") or [])) if p]
@@ -2443,6 +2450,8 @@ class ZerodhaSource:
                 events.append({"kind": kind, "ticker": order["ticker"], "side": order["side"],
                                "type": order["type"], "qty": order["qty"],
                                "price": order.get("avgFillPrice"), "message": order.get("message")})
+        if not was_connected:
+            self.notice("info", "Broker connected — account books are live")
         self.last_poll = time.time()
         self.log(f"books read: {len(self.positions)} positions, {len(self.holdings)} holdings, "
                  f"{len(self.orders)} orders, {len(self.executions)} trades"
@@ -2477,6 +2486,8 @@ class ZerodhaSource:
             events = self._refresh_books()
         except PluginError as e:
             self.log(str(e), "warn")
+            if e.code == -32005:
+                self.notice("warn", str(e))  # rate limited: the app waits longer between retries
             self.last_poll = now
             return []
         # Always repush: the app otherwise keeps the initial "not connected / zero balance" state on an idle

@@ -57,6 +57,10 @@ class Books(unittest.TestCase):
         self.assertEqual(state["orders"][0]["qty"], 150)
         self.assertEqual(state["orders"][0]["status"], "working")
         self.assertEqual(self.fake.count("/oms/user/margins"), 1)
+        notices = [n["params"] for n in self.app.sock.notifications("broker.notice")]
+        self.assertTrue(notices)
+        self.assertEqual(notices[0]["level"], "info")
+        self.assertIn("connected", notices[0]["message"].lower())
 
     def test_holdings_are_offered_as_an_api_7_broker_page(self):
         self.fake.holding_rows = [{

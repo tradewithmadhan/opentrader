@@ -86,6 +86,9 @@ class SearchAndInfo(unittest.TestCase):
         self.assertEqual(info["pointValue"], 1)
         self.assertIn("1", info["intervals"])
         self.assertIn("1D", info["intervals"])
+        for iv in ("2", "4", "60", "120", "180", "240", "5S", "10S", "15S", "30S", "45S"):
+            self.assertIn(iv, info["intervals"])
+        self.assertNotIn("1S", info["intervals"], "no one-second history source")
         self.assertEqual(info["history"]["day"], 10950)
         self.assertEqual(info["history"]["minute"], plugin.HISTORY_DAYS_MAX["minute"])
         self.assertEqual(self.source.symbol_info("NCO:GOLD")["history"], {"day": 10950})
