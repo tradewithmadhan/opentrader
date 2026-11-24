@@ -190,9 +190,9 @@ normalised and its words must all appear in the searchable text, so `NIFTY 25000
 tradingsymbol is `NIFTY25NOV25000CE` and whose description is `NIFTY 25000 CE 25-NOV-26`. Results are ranked
 ticker-prefix → ticker-substring → name/description, spread across the configured segments, 50 at a time.
 
-## Plugin API 7
+## Plugin API 8
 
-The plugin speaks **API 7** and uses the upstream features adopted in this fork:
+The plugin speaks **API 8** and uses the upstream features adopted in this fork:
 
 - **Watchlists** (API 4): two sample lists are offered under the plugin's name in *Open list…* — a set of NSE blue
   chips and a set of indices. They are built from the instrument master, capped at 1000 symbols per list, and sent
@@ -206,6 +206,14 @@ The plugin speaks **API 7** and uses the upstream features adopted in this fork:
   interest (requested with `oi=1`) as a 5-value series, and the ticker's live OI is pushed as a `data.quote` while
   the series is subscribed. Add more series in `EXTRA_SERIES` and serve `<symbol>_<name>`.
 - **Broker pages** (API 7): Kite's delivery holdings are sent as the *Holdings* tab in `broker.state.pages` (see Trading).
+- **API 8:** on connect the plugin toasts the app/API version, then the start of a fresh instrument-master download and
+  finally "Pre-data ready" once the master and NSE listings are cached; broker connection has its own toast. After
+  each master load it sends `data.symbolInfoChanged` so the app drops what it kept for our symbols. **Send sample
+  toasts on start** adds one sample of each level. `data.scripts` ships **Monthly Levels (Expiry H/L)** and **MA
+  Cloud** from `scripts/`, read-only in the Indicators dialog with *Make a copy*. With **Remote indicators manifest
+  URL** the plugin also fetches a `scripts.json` at start and every **Remote indicators check interval** (default 300 s,
+  min 60); a remote script with the same id replaces the bundled one, an unchanged manifest sends nothing, and a
+  changed one is pushed with a toast naming the new studies. The last good manifest is cached for offline starts.
 - **Instrument values** (API 6): `symbolInfo.fields` lists expiry, lot size, tick size and, for NSE stocks, the
   listing date plus **ISIN**, **Face value** and **Series** from NSE's `EQUITY_L.csv` / `SME_EQUITY_L.csv`. Live OI
   quotes carry `Open Interest` / day high / low fields. Add your own values in `EXTRA_FIELDS`.

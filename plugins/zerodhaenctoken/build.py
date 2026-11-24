@@ -10,6 +10,7 @@ so build the Windows package on Windows, the macOS one on macOS, and so on.
 """
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -36,9 +37,15 @@ def write_zip(path, files):
     print(f"{path.relative_to(HERE)}  sha256 {digest}")
 
 
+def script_files():
+    """OakScripts shipped with the plugin, sent to the app with data.scripts."""
+    return [(f"scripts/{p.name}", p) for p in sorted((HERE / "scripts").glob("*.js"))]
+
+
 def dev():
     m = manifest("opentrader-plugin.dev.json")
-    write_zip(DIST / f"{m['id']}-dev.zip", [("opentrader-plugin.json", json.dumps(m, indent=2))])
+    write_zip(DIST / f"{m['id']}-dev.zip",
+              [("opentrader-plugin.json", json.dumps(m, indent=2))] + script_files())
 
 
 def release():
@@ -48,13 +55,15 @@ def release():
     work = HERE / "build"
     subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--onefile", "--clean", "--name", name,
+         "--add-data", f"{HERE / 'scripts'}{os.pathsep}scripts",
          "--distpath", str(work / "bin"), "--workpath", str(work / "tmp"), "--specpath", str(work), str(HERE / "plugin.py")],
         check=True,
     )
     exe = work / "bin" / Path(entry).name
     if not exe.exists():
         sys.exit(f"{exe} was not built: does the manifest's entry match this system ({sys.platform})?")
-    write_zip(DIST / f"{m['id']}-{m['version']}.zip", [("opentrader-plugin.json", json.dumps(m, indent=2)), (entry, exe)])
+    write_zip(DIST / f"{m['id']}-{m['version']}.zip",
+              [("opentrader-plugin.json", json.dumps(m, indent=2)), (entry, exe)] + script_files())
     shutil.rmtree(work / "tmp", ignore_errors=True)
 
 

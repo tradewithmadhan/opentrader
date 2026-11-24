@@ -22,6 +22,7 @@ import io
 import json
 import os
 import queue
+import re
 import socket
 import ssl
 import struct
@@ -33,10 +34,11 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.5.12"
-# Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
-# 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
-API = 7
+PLUGIN_VERSION = "0.6.1"
+# Plugin API 8: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
+# 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings),
+# 8 = data.symbolInfoChanged, plugin.toast and data.scripts.
+API = 8
 DEV_CONNECTION_FILE = "OpenTraderPlugins/zerodhaenctoken-dev.json"
 
 TZ_IST = timezone(timedelta(hours=5, minutes=30), "Asia/Kolkata")
@@ -114,6 +116,11 @@ EVENTS_FROM = date(1990, 1, 1)
 EVENTS_CHUNK_DAYS = 1095
 
 # Bump only when parse_master_csv's output shape changes; not on every plugin release (the master is 31 MB).
+# Plugin-provided scripts (data.scripts, API 8).
+SCRIPT_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+MAX_SCRIPTS = 50
+MAX_SCRIPT_SOURCE = 512 * 1024
+
 MASTER_CACHE_VERSION = 1
 
 # A Kite ticker connection carries at most 3000 instruments. The app can subscribe more (a large watchlist plus
@@ -885,6 +892,14 @@ class ZerodhaSource:
         self._listings_day = None
         self._listings_loading = None  # single-flight event for the two public CSVs
         self.company_details = True
+        self.sample_toasts = False  # one sample of each level on start, for testing plugin.toast
+        self._sample_toasts_sent = False
+        self.script_manifest_url = ""  # raw URL of a remote scripts.json manifest
+        self.script_poll_sec = 300
+        self._remote_scripts = {}  # id → validated script from the remote manifest / disk cache
+        self._sent_scripts = {}  # id → script last sent with data.scripts
+        self._script_stop = threading.Event()
+        self._script_poll_thread = None
         self.quote_interval = 0  # ms between data.quote updates per symbol; 0 = every tick
         self.max_quotes_per_second = 200  # total data.quote budget; 0 = every tick (old behaviour)
         self._quote_tokens = float(self.max_quotes_per_second)
@@ -1026,6 +1041,144 @@ class ZerodhaSource:
         if p and p.alive:
             p.notify("broker.notice", {"level": level, "message": self.clean(message)})
 
+    def toast(self, level, message, sound=False):
+        """A short, non-blocking message on the user's charts (Plugin API 8)."""
+        p = self.plugin
+        if p and p.alive:
+            p.notify("plugin.toast", {"level": level, "message": self.clean(message),
+                                      "sound": bool(sound)})
+
+    @staticmethod
+    def _scripts_dir():
+        base = getattr(sys, "_MEIPASS", None)  # PyInstaller one-file extraction dir
+        return Path(base) / "scripts" if base else Path(__file__).resolve().parent / "scripts"
+
+    @classmethod
+    def plugin_scripts(cls):
+        """The OakScripts shipped with this plugin, sent whole with data.scripts."""
+        names = {
+            "Monthly_Levels": "Monthly Levels (Expiry H/L)",
+            "MA_Cloud": "MA Cloud",
+        }
+        out = []
+        for path in sorted(cls._scripts_dir().glob("*.js")):
+            try:
+                source = path.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if not source or len(source) > 512 * 1024:
+                continue
+            out.append({"id": path.stem, "name": names.get(path.stem, path.stem),
+                        "kind": "indicator", "source": source})
+        return out[:50]
+
+    @staticmethod
+    def _valid_script(raw):
+        """One protocol-valid script, or None. Remote data is untrusted, so validate every field."""
+        if not isinstance(raw, dict):
+            return None
+        sid, source = raw.get("id"), raw.get("source")
+        if not isinstance(sid, str) or not SCRIPT_ID_RE.match(sid):
+            return None
+        if not isinstance(source, str) or not source.strip():
+            return None
+        if len(source.encode("utf-8")) > MAX_SCRIPT_SOURCE:
+            return None
+        name = raw.get("name") if isinstance(raw.get("name"), str) and raw["name"].strip() else sid
+        kind = raw.get("kind") if raw.get("kind") in ("indicator", "strategy") else "indicator"
+        return {"id": sid, "name": name, "kind": kind, "source": source}
+
+    @staticmethod
+    def _remote_cache_path():
+        return plugin_data_dir() / "cache" / "remote-scripts.json"
+
+    @staticmethod
+    def _read_remote_cache():
+        try:
+            with open(ZerodhaSource._remote_cache_path(), encoding="utf-8") as f:
+                data = json.load(f)
+            rows = data.get("scripts") if isinstance(data, dict) else data
+            if not isinstance(rows, list):
+                return {}
+        except (OSError, ValueError):
+            return {}
+        out = {}
+        for raw in rows:
+            script = ZerodhaSource._valid_script(raw)
+            if script:
+                out[script["id"]] = script
+        return out
+
+    def _write_remote_cache(self):
+        path = self._remote_cache_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"schema": 1, "scripts": list(self._remote_scripts.values())}, f)
+            os.replace(tmp, path)
+        except (OSError, TypeError, ValueError) as e:
+            self.log(f"remote script cache not saved: {e}", "warn")
+
+    def _fetch_remote_scripts(self):
+        """Fetch the raw scripts.json. Returns a validated id → script map, or None on failure."""
+        if not self.script_manifest_url:
+            return {}
+        data = self._external_json(self.script_manifest_url, timeout=10)
+        rows = data.get("scripts") if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            raise ValueError("the remote manifest has no scripts list")
+        out = {}
+        for raw in rows:
+            script = self._valid_script(raw)
+            if script:
+                out[script["id"]] = script
+            else:
+                self.log("a remote script was dropped: invalid id or source", "warn")
+        return out
+
+    def merged_scripts(self):
+        """Local scripts first; a remote script with the same id wins."""
+        merged = {s["id"]: s for s in self.plugin_scripts()}
+        merged.update(self._remote_scripts)
+        return list(merged.values())[:MAX_SCRIPTS]
+
+    def send_scripts(self):
+        """Send the whole set only when it changed; toast on a remote change."""
+        scripts = self.merged_scripts()
+        by_id = {s["id"]: s for s in scripts}
+        with self.lock:
+            if by_id == self._sent_scripts:
+                return False
+            previous = self._sent_scripts
+            new = [s["name"] for sid, s in by_id.items() if sid not in previous]
+            self._sent_scripts = by_id
+        p = self.plugin
+        if p and p.alive:
+            p.notify("data.scripts", {"scripts": scripts})
+            if new:
+                self.toast("info", "New plugin indicators: " + ", ".join(new[:4]))
+            elif previous and previous != by_id:
+                self.toast("info", "Plugin indicators updated from the remote manifest")
+        return True
+
+    def _script_poll_loop(self):
+        """Check the remote manifest at a fixed interval; no changes means no notification."""
+        while not self._script_stop.is_set():
+            if self.script_manifest_url:
+                try:
+                    fetched = self._fetch_remote_scripts()
+                    with self.lock:
+                        changed = fetched != self._remote_scripts
+                        self._remote_scripts = fetched
+                    if changed:
+                        self._write_remote_cache()
+                        self.log(f"remote indicators: {len(fetched)} from {self.script_manifest_url}")
+                        self.send_scripts()
+                except Exception as e:  # noqa: BLE001 - a bad poll must never break the plugin
+                    self.log(f"remote indicators not read: {self.clean(str(e))}", "warn")
+            self._script_stop.wait(self.script_poll_sec)
+
     def configure(self, settings, provides=None):
         with self.lock:
             changed = (settings.get("enctoken") != self.enctoken
@@ -1039,6 +1192,12 @@ class ZerodhaSource:
                               (settings.get("exchanges") or DEFAULT_EXCHANGES).split(",") if e.strip()]
             self.broker_enabled = "broker" in provides if provides is not None else self.broker_enabled
             self.company_details = str(settings.get("companyDetails", "true")).strip().lower() == "true"
+            self.sample_toasts = str(settings.get("sampleToasts", "false")).strip().lower() == "true"
+            self.script_manifest_url = str(settings.get("scriptManifestUrl") or "").strip()
+            try:
+                self.script_poll_sec = max(60, int(float(settings.get("scriptPollSec", 300) or 300)))
+            except (TypeError, ValueError):
+                self.script_poll_sec = 300
             try:
                 self.quote_interval = max(0, int(float(settings.get("quoteIntervalMs", 0) or 0)))
             except (TypeError, ValueError):
@@ -1055,10 +1214,32 @@ class ZerodhaSource:
                  f"user={self.user_id or 'auto'}, exchanges={','.join(self.exchanges)}, "
                  f"capabilities={','.join(provides) if provides is not None else 'unchanged'}, "
                  f"broker={'on' if self.broker_enabled else 'off'}")
+        with self.lock:
+            self._remote_scripts = self._read_remote_cache() if self.script_manifest_url else {}
+        self.send_scripts()
+        if self.script_manifest_url and (self._script_poll_thread is None or not self._script_poll_thread.is_alive()):
+            self._script_stop.set()
+            self._script_stop = threading.Event()
+            self._script_poll_thread = threading.Thread(target=self._script_poll_loop, daemon=True,
+                                                        name="RemoteScripts")
+            self._script_poll_thread.start()
+        if self.sample_toasts and not self._sample_toasts_sent:
+            self._sample_toasts_sent = True
+            self.toast("info", "Sample info toast from the Zerodha plugin")
+            self.toast("warn", "Sample warning toast from the Zerodha plugin")
+            self.toast("error", "Sample error toast from the Zerodha plugin")
+
         def load_master():
+            day = datetime.now(TZ_IST).strftime("%Y-%m-%d")
+            cached = self.instruments.day == day or self.instruments._existing_path(day).exists()
+            if not cached:
+                self.toast("info", "Downloading instrument master — first start can take a moment")
             self.instruments.ensure()
             self._load_listings()  # warm both caches before the app's symbolInfo burst arrives
             if self.plugin is not None and self.plugin.alive:
+                self.toast("info", f"Pre-data ready — {len(self.instruments.rows)} instruments and NSE listings cached. "
+                                   f"You can use the app.")
+                self.plugin.notify("data.symbolInfoChanged", {})
                 self.plugin.push_watchlists()
 
         threading.Thread(target=load_master, daemon=True).start()
@@ -2471,6 +2652,7 @@ class ZerodhaSource:
                                "price": order.get("avgFillPrice"), "message": order.get("message")})
         if not was_connected:
             self.notice("info", "Broker connected — account books are live")
+            self.toast("info", "Broker connected — account books are live")
         self.last_poll = time.time()
         self.log(f"books read: {len(self.positions)} positions, {len(self.holdings)} holdings, "
                  f"{len(self.orders)} orders, {len(self.executions)} trades"
@@ -2757,8 +2939,10 @@ class Plugin:
             raise PluginError(welcome["error"].get("message", "refused"))
         self.sock.settimeout(None)
         self.alive = True
-        self.log(f"Connected to {welcome.get('result', {}).get('app', 'OpenTrader')} "
-                 f"(Plugin API {welcome.get('result', {}).get('api')})")
+        app_name = welcome.get("result", {}).get("app", "OpenTrader")
+        app_api = welcome.get("result", {}).get("api")
+        self.log(f"Connected to {app_name} (Plugin API {app_api})")
+        self.source.toast("info", f"Connected to {app_name} — Plugin API {app_api}, preparing data")
         self.push_watchlists()
         for line in reader:
             if not line.strip():

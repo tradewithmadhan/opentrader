@@ -271,5 +271,59 @@ class Auth(unittest.TestCase):
             fake.close()
 
 
+class Api8(unittest.TestCase):
+    def test_the_plugin_ships_two_oakscripts(self):
+        scripts = plugin.ZerodhaSource.plugin_scripts()
+        names = {s["name"] for s in scripts}
+        self.assertIn("Monthly Levels (Expiry H/L)", names)
+        self.assertIn("MA Cloud", names)
+        self.assertTrue(all(s["source"].lstrip().startswith("indicator(") for s in scripts))
+        self.assertTrue(all(s["kind"] == "indicator" for s in scripts))
+
+    def test_remote_manifest_overrides_local_and_only_notifies_on_change(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.script_manifest_url = "http://example.test/scripts.json"
+            manifest = {"schema": 1, "scripts": [
+                {"id": "MA_Cloud", "name": "Remote MA Cloud", "kind": "indicator", "source": 'indicator("Remote")'},
+                {"id": "new_study", "name": "New Study", "kind": "indicator", "source": 'indicator("New")'},
+                {"id": "bad id", "name": "bad", "source": "x"},
+            ]}
+            source._external_json = lambda url, timeout=5: manifest
+            source._remote_scripts = source._fetch_remote_scripts()
+            self.assertNotIn("bad id", source._remote_scripts)
+            merged = {s["id"]: s for s in source.merged_scripts()}
+            self.assertEqual(merged["MA_Cloud"]["name"], "Remote MA Cloud")
+
+            self.assertTrue(source.send_scripts())
+            self.assertEqual(len(app.sock.payloads("data.scripts")), 1)
+            self.assertTrue(any("New Study" in t["message"] for t in app.sock.payloads("plugin.toast")))
+            self.assertFalse(source.send_scripts(), "an unchanged set is not sent again")
+            self.assertEqual(len(app.sock.payloads("data.scripts")), 1)
+        finally:
+            app.alive = False
+            fake.close()
+
+    def test_toast_and_symbol_info_changed_are_sent_to_the_app(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.toast("warn", "sample warning", True)
+            source.plugin.notify("data.symbolInfoChanged", {})
+            toasts = self_payloads(app, "plugin.toast")
+            self.assertEqual(toasts, [{"level": "warn", "message": "sample warning", "sound": True}])
+            self.assertEqual(self_payloads(app, "data.symbolInfoChanged"), [{}])
+        finally:
+            app.alive = False
+            fake.close()
+
+
+def self_payloads(app, method):
+    return [m.get("params") for m in app.sock.notifications(method)]
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,10 +1,10 @@
 {
   "id": "zerodhaenctoken",
   "name": "Zerodha (enctoken, development)",
-  "version": "0.5.12-dev",
+  "version": "0.6.1-dev",
   "publisher": "tradewithmadhan",
   "description": "The Zerodha enctoken plugin while it is developed: you run plugin.py yourself, the app writes where to connect.",
-  "api": 7,
+  "api": 8,
   "provides": ["datafeed", "broker"],
   "exchanges": ["NSE", "BSE", "NFO", "BFO", "CDS", "BCD", "MCX", "NCO", "NSE_INDEX", "BSE_INDEX", "MCX_INDEX", "GLOBAL_INDEX"],
   "runtime": { "type": "external", "connectionFile": "{localAppData}/OpenTraderPlugins/zerodhaenctoken-dev.json" },
@@ -31,6 +31,9 @@
     { "key": "maxQuotesPerSecond", "label": "Maximum chart quote updates per second", "type": "text", "default": "200" },
     { "key": "logApi", "label": "Log REST/API to file", "type": "bool", "default": "true" },
     { "key": "logWs", "label": "Log WebSocket to file", "type": "bool", "default": "true" },
+    { "key": "scriptManifestUrl", "label": "Remote indicators manifest URL", "type": "text", "default": "" },
+    { "key": "scriptPollSec", "label": "Remote indicators check interval (seconds)", "type": "text", "default": "300" },
+    { "key": "sampleToasts", "label": "Send sample toasts on start", "type": "bool", "default": "false" },
     { "key": "logDebug", "label": "Log verbose details", "type": "bool", "default": "false" }
   ]
 }
