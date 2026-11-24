@@ -87,6 +87,9 @@ export type CommandResult<T> = { status: "ok"; data: T } | { status: "error"; er
 export type WindowState = any;
 export type UpdateState = any;
 export type AppUpdateStatus = any;
+/** Why the last app-update check failed, #399. */
+export type UpdateFailure = "proxy" | "connection" | "timeout" | "server" | "other";
+export type UpdateError = { reason: UpdateFailure; detail: string };
 export type AppUpdateBeforeInstall = any;
 export type BuildInfo = any;
 

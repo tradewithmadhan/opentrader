@@ -2986,7 +2986,7 @@ dependencies = [
 
 [[package]]
 name = "opentrader"
-version = "0.4.31"
+version = "0.4.32"
 dependencies = [
  "arboard",
  "axum",
@@ -3000,6 +3000,8 @@ dependencies = [
  "minisign-verify",
  "opentrader-core",
  "reqwest 0.12.28",
+ "reqwest 0.13.4",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
