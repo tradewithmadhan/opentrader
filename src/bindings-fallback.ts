@@ -87,6 +87,8 @@ export type CommandResult<T> = { status: "ok"; data: T } | { status: "error"; er
 export type WindowState = any;
 export type UpdateState = any;
 export type AppUpdateStatus = any;
+/** A broker plugin's short toast message, #401. */
+export type PluginToast = { plugin: string; pluginName: string; level: string; message: string; sound: boolean };
 /** Why the last app-update check failed, #399. */
 export type UpdateFailure = "proxy" | "connection" | "timeout" | "server" | "other";
 export type UpdateError = { reason: UpdateFailure; detail: string };
@@ -914,6 +916,7 @@ export const events = new Proxy(
   brokerDepth: EventListen<BrokerDepth>;
   pluginTicks: EventListen<PluginTicks>;
   pluginWatchlistsChanged: EventListen<any>;
+  pluginToast: EventListen<PluginToast>;
   pluginEventsChanged: EventListen<PluginEventsChanged>;
   pluginFieldsChanged: EventListen<PluginFieldsChanged>;
 } & Record<string, EventListen<any>>;
