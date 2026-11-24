@@ -1059,6 +1059,7 @@ class ZerodhaSource:
         names = {
             "Monthly_Levels": "Monthly Levels (Expiry H/L)",
             "MA_Cloud": "MA Cloud",
+            "EMA_Cross_Strategy": "EMA Cross Strategy",
         }
         out = []
         for path in sorted(cls._scripts_dir().glob("*.js")):
@@ -1068,8 +1069,9 @@ class ZerodhaSource:
                 continue
             if not source or len(source) > 512 * 1024:
                 continue
+            kind = "strategy" if re.search(r"\bstrategy\s*\(", source) else "indicator"
             out.append({"id": path.stem, "name": names.get(path.stem, path.stem),
-                        "kind": "indicator", "source": source})
+                        "kind": kind, "source": source})
         return out[:50]
 
     @staticmethod

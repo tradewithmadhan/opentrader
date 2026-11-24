@@ -272,13 +272,15 @@ class Auth(unittest.TestCase):
 
 
 class Api8(unittest.TestCase):
-    def test_the_plugin_ships_two_oakscripts(self):
-        scripts = plugin.ZerodhaSource.plugin_scripts()
-        names = {s["name"] for s in scripts}
+    def test_the_plugin_ships_indicators_and_a_strategy(self):
+        scripts = {s["id"]: s for s in plugin.ZerodhaSource.plugin_scripts()}
+        names = {s["name"] for s in scripts.values()}
         self.assertIn("Monthly Levels (Expiry H/L)", names)
         self.assertIn("MA Cloud", names)
-        self.assertTrue(all(s["source"].lstrip().startswith("indicator(") for s in scripts))
-        self.assertTrue(all(s["kind"] == "indicator" for s in scripts))
+        self.assertIn("EMA Cross Strategy", names)
+        self.assertEqual(scripts["EMA_Cross_Strategy"]["kind"], "strategy")
+        self.assertTrue(all(s["kind"] == "indicator" for sid, s in scripts.items()
+                            if sid != "EMA_Cross_Strategy"))
 
     def test_remote_manifest_overrides_local_and_only_notifies_on_change(self):
         fake = fake_kite.FakeKite()

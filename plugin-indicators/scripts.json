@@ -2,6 +2,12 @@
   "schema": 1,
   "scripts": [
     {
+      "id": "EMA_Cross_Strategy",
+      "name": "EMA Cross Strategy",
+      "kind": "strategy",
+      "source": "strategy(\"EMA Cross Strategy\", {\n  shorttitle: \"EMA Cross\",\n  overlay: true,\n  initial_capital: 100000,\n  default_qty_type: strategy.fixed,\n  default_qty_value: 1,\n  commission_type: strategy.commission.cash_per_order,\n  commission_value: 20,\n});\n\n// A simple long-only EMA crossover strategy: enter on the up cross, exit on the down cross,\n// with a stop below the entry price. Sample only — not trading advice.\n\nconst fastLen = input.int(9, \"Fast EMA\", { minval: 2, maxval: 200 });\nconst slowLen = input.int(21, \"Slow EMA\", { minval: 2, maxval: 400 });\nconst stopPct = input.float(2.0, \"Stop %\", { minval: 0.1, maxval: 20, step: 0.1 });\n\nconst fast = ta.ema(close, fastLen);\nconst slow = ta.ema(close, slowLen);\n\nplot(fast, \"Fast EMA\", { color: \"#2962FF\", linewidth: 1 });\nplot(slow, \"Slow EMA\", { color: \"#FF9800\", linewidth: 1 });\n\nstrategy.eachBar((c) => {\n  const f = c.get(fast);\n  const s = c.get(slow);\n  const pf = c.get(fast, 1);\n  const ps = c.get(slow, 1);\n  if (Number.isFinite(f) && Number.isFinite(s) && Number.isFinite(pf) && Number.isFinite(ps)) {\n    if (f > s && pf <= ps) strategy.entry(\"Long\", strategy.long);\n    if (f < s && pf >= ps) strategy.close(\"Long\");\n  }\n  if (strategy.position_size > 0) {\n    strategy.exit(\"Stop\", { from_entry: \"Long\", stop: strategy.position_avg_price * (1 - stopPct / 100) });\n  }\n});"
+    },
+    {
       "id": "EMA_Trend",
       "name": "EMA Trend",
       "kind": "indicator",

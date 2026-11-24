@@ -33,6 +33,7 @@ kind come from the first `indicator("…")` or `strategy("…")` call.
 | `MA_Cloud.js` | EMA high/low cloud coloured by a MACD-like state machine (overlay) |
 | `EMA_Trend.js` | Two EMAs with crossover markers (overlay) |
 | `Volume_Surge.js` | Volume versus its average, with surge markers (separate pane) |
+| `EMA_Cross_Strategy.js` | Long-only EMA crossover with a stop — `kind: "strategy"`, runs in the Strategy Tester |
 
 ## Publishing
 
