@@ -33,7 +33,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.5.11"
+PLUGIN_VERSION = "0.5.12"
 # Plugin API 7: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings).
 API = 7
@@ -214,6 +214,9 @@ SERVED_INTERVALS = list(INTERVALS)
 HOUR_INTERVALS = {"60minute", "2hour", "3hour", "4hour"}
 # Hard per-request limits measured live (app settings are clamped to these).
 CHUNK_DAYS = {"second": 2, "minute": 60, "hour": 400, "day": 1900}
+# Aggregated daily timeframes (3M/12M) do not scroll the app, so a single 1900-day chunk would leave them starting
+# only ~5 years back. Fill the whole asked daily window in one answer, capped so Kite is never stormed.
+MAX_DAILY_PAGES = 8
 TICK_BUFFER_SEC = 7200  # fallback second bars, used only if Kite history refuses
 
 PROFILE_PATH = "/oms/user/profile"
@@ -1848,7 +1851,10 @@ class ZerodhaSource:
         meta = raw.get("meta") or {}
         first, second = num(meta.get("ratio_1")), num(meta.get("ratio_2"))
         if action == "dividend":
-            label = f"{(first / second):.2f}" if first is not None and second else "0.00"
+            # Kite's meta: ratio_1 is the face value, ratio_2 is the dividend per share. ratio_1/ratio_2 is the
+            # percentage denominator (often 10), which made every dividend read "10.00".
+            amount = second if second is not None else num(meta.get("amount"))
+            label = f"{amount:.2f}" if amount is not None else "0.00"
             kind = "dividend"
         elif action in ("bonus", "split"):
             label = f"{int(first or 1)}:{int(second or 1)} {action}"
@@ -1977,7 +1983,9 @@ class ZerodhaSource:
             meta = e.get("meta") or {}
             first, second = num(meta.get("ratio_1")), num(meta.get("ratio_2"))
             if action == "dividend":
-                amount = first / second if first is not None and second else None
+                # Kite's ratio_2 is the rupees-per-share paid; ratio_1 is the face value. Using ratio_1/ratio_2 made
+                # every dividend read 10.00 regardless of the actual payout.
+                amount = second if second is not None else num(meta.get("amount"))
                 if amount is None:
                     continue
                 out.append({"type": "dividend", "date": date, "amount": amount})
@@ -2085,20 +2093,31 @@ class ZerodhaSource:
         hard_days = CHUNK_DAYS[family]
         configured = self._cap("historyDaysDaily", 1900) if interval == "day" else self._cap("historyDaysMinute", 30)
         step = min(configured, hard_days) * 86400
-        # Only the newest chunk of the asked window. The protocol allows returning fewer, newest bars: the app
-        # then asks for older pages as the user scrolls. One Kite call per request keeps us under its rate limit.
+        # Intraday: only the newest chunk — the app pages backwards on scroll. Daily: fill the whole asked window,
+        # because 3M/12M charts aggregate the single answer and never scroll to fetch older pages themselves.
         start = max(frm, to - step + 1)
         merged = {}
-        try:
-            for bar in self._history_one(row["token"], interval, start, to, oi=bool(series)):
+        page_start, page_to, pages = start, to, 0
+        while True:
+            pages += 1
+            try:
+                page = self._history_one(row["token"], interval, page_start, page_to, oi=bool(series))
+            except PluginError as e:
+                if resolution in SECOND_INTERVALS:
+                    # Kite normally serves seconds; if this deployment refuses, fill forward from live ticks.
+                    self.log(f"history {ticker} {resolution}: {e} — using live ticks", "warn")
+                    return self._second_bars(ticker, resolution, frm, to, count_back)
+                self.log(f"history {ticker} {resolution}: {e}", "warn")
+                raise
+            for bar in page:
                 merged[bar[0]] = bar
-        except PluginError as e:
-            if resolution in SECOND_INTERVALS:
-                # Kite normally serves seconds; if this deployment refuses, fill forward from live ticks.
-                self.log(f"history {ticker} {resolution}: {e} — using live ticks", "warn")
-                return self._second_bars(ticker, resolution, frm, to, count_back)
-            self.log(f"history {ticker} {resolution}: {e}", "warn")
-            raise
+            if interval != "day" or not page or page_start <= frm or pages >= MAX_DAILY_PAGES:
+                break
+            older_to = page[0][0] - 86400  # one day before this page's oldest bar
+            if older_to < frm:
+                break
+            page_to = older_to
+            page_start = max(frm, page_to - step + 1)
         out = [merged[t] for t in sorted(merged)]
         if count_back and len(out) > count_back:
             out = out[-count_back:]

@@ -81,11 +81,12 @@ class Windows(unittest.TestCase):
         stamps = [b[0] for b in older + first]
         self.assertEqual(stamps, sorted(set(stamps)), "pages never repeat a bar")
 
-    def test_day_requests_also_return_one_chunk_at_a_time(self):
+    def test_day_requests_fill_the_whole_window(self):
         self.source.settings["historyDaysDaily"] = "100"
         frm, to = midnight("2026-06-01"), midnight("2026-11-01")
         first = self.source.bars("NSE:RELIANCE", "1D", frm, to, 0)
-        self.assertEqual(self.fake.count("/oms/instruments/historical/738561/day"), 1)
+        self.assertGreater(self.fake.count("/oms/instruments/historical/738561/day"), 1,
+                           "a wide daily window is filled in several pages so 3M/12M charts have full history")
         self.assertEqual([b[0] for b in first], sorted({b[0] for b in first}))
 
     def test_a_day_window_uses_the_day_endpoint_at_ist_midnight(self):
@@ -163,6 +164,22 @@ class Events(unittest.TestCase):
         finally:
             fake.close()
 
+    def test_dividend_amounts_are_the_actual_per_share_payouts(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            source.instruments.ensure()
+            raws = [
+                {"action_type": "dividend", "ex_date": "2024-01-01", "meta": {"ratio_1": 100, "ratio_2": 5.5}},
+                {"action_type": "dividend", "ex_date": "2025-01-01", "meta": {"ratio_1": 100, "ratio_2": 12.5}},
+            ]
+            source.corporate_events = lambda t: [plugin.ZerodhaSource._map_event(r) for r in raws]
+            events = source.events_for("NSE:RELIANCE")
+            self.assertEqual([e["amount"] for e in events], [5.5, 12.5])
+            self.assertEqual([plugin.ZerodhaSource._map_event(r)["label"] for r in raws], ["5.50", "12.50"])
+        finally:
+            fake.close()
+
     def test_changed_events_notify_the_app_with_the_whole_symbol(self):
         fake = fake_kite.FakeKite()
         try:
@@ -205,6 +222,35 @@ class Events(unittest.TestCase):
             self.assertTrue(oi_quotes)
             self.assertEqual(oi_quotes[-1]["price"], 12345)
             self.assertEqual(len(oi_quotes[-1]["minute"]), 6)
+        finally:
+            fake.close()
+
+
+class FullDaily(unittest.TestCase):
+    def test_a_wide_daily_request_fetches_all_pages(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            source.instruments.ensure()
+            to = datetime(2026, 11, 24, tzinfo=IST)
+            frm = datetime(2014, 1, 1, tzinfo=IST)
+            bars = source.bars("NSE:RELIANCE", "1D", int(frm.timestamp()), int(to.timestamp()), 20000)
+            self.assertGreater(fake.count("/oms/instruments/historical/738561/day"), 1)
+            self.assertLess(bars[0][0], int(datetime(2015, 1, 1, tzinfo=IST).timestamp()),
+                            "the answer must reach the old part of the window for 3M/12M aggregation")
+            self.assertGreater(len(bars), 2500)
+        finally:
+            fake.close()
+
+    def test_a_small_daily_window_stays_one_kite_call(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            source.instruments.ensure()
+            to = datetime(2026, 11, 24, tzinfo=IST)
+            frm = to - timedelta(days=200)
+            source.bars("NSE:RELIANCE", "1D", int(frm.timestamp()), int(to.timestamp()), 401)
+            self.assertEqual(fake.count("/oms/instruments/historical/738561/day"), 1)
         finally:
             fake.close()
 
