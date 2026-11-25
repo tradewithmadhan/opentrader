@@ -342,6 +342,31 @@ class Api8(unittest.TestCase):
             app.alive = False
             fake.close()
 
+    def test_pasted_enctoken_quotes_are_trimmed(self):
+        token = "R17APWJPCxBw0MWt1bQ3OHUKzbXGVVs4ICiECpayoFYRQ=="
+        self.assertEqual(plugin.ZerodhaSource.clean_token(f'"{token}"'), token)
+        self.assertEqual(plugin.ZerodhaSource.clean_token(f" '{token}' "), token)
+        self.assertEqual(plugin.ZerodhaSource.clean_token(token), token)
+
+    def test_holdings_are_offered_as_a_plugin_watchlist(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.instruments.ensure()
+            source.holdings = [{"id": "NSE:RAILTEL", "symbol": "NSE:RAILTEL", "qty": 1}]
+            lists = {w["id"]: w for w in source.watchlists()}
+            self.assertIn("zerodha-holdings", lists)
+            self.assertEqual(lists["zerodha-holdings"]["name"], "Holdings (zerodha)")
+            self.assertEqual(lists["zerodha-holdings"]["symbols"], ["NSE:RAILTEL"])
+            self.assertTrue(source.send_watchlists())
+            sent = app.sock.payloads("data.watchlists")[-1]["watchlists"]
+            self.assertIn("zerodha-holdings", [w["id"] for w in sent])
+            self.assertTrue(any("Holdings (zerodha)" in t["message"] for t in app.sock.payloads("plugin.toast")))
+        finally:
+            app.alive = False
+            fake.close()
+
     def test_toast_and_symbol_info_changed_are_sent_to_the_app(self):
         fake = fake_kite.FakeKite()
         source = harness.make_source(fake)

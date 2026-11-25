@@ -293,7 +293,7 @@ class PluginApi7(unittest.TestCase):
 
 
 class CachePruning(unittest.TestCase):
-    def test_keeps_recent_master_and_todays_events(self):
+    def test_keeps_only_todays_master_listings_and_events(self):
         harness.fresh_cache()
         cache = plugin.plugin_data_dir() / "cache"
         events = cache / "events"
@@ -301,9 +301,9 @@ class CachePruning(unittest.TestCase):
         today = plugin.datetime.now(plugin.TZ_IST).date()
         keep = {
             f"master-{plugin.PLUGIN_VERSION}-{today}.json",
-            f"master-{plugin.PLUGIN_VERSION}-{today - timedelta(days=1)}.json",
         }
         drop = {
+            f"master-{plugin.PLUGIN_VERSION}-{today - timedelta(days=1)}.json",
             f"master-{plugin.PLUGIN_VERSION}-{today - timedelta(days=5)}.json",
         }
         for name in keep | drop:
@@ -311,6 +311,10 @@ class CachePruning(unittest.TestCase):
         current_event, old_event = events / f"738561-{today}.json", events / f"738561-{today - timedelta(days=3)}.json"
         current_event.write_text("[]")
         old_event.write_text("[]")
+        current_list, old_list = (cache / f"nse-listings-{today}.json",
+                                  cache / f"nse-listings-{today - timedelta(days=1)}.json")
+        current_list.write_text("{}")
+        old_list.write_text("{}")
 
         plugin.ZerodhaSource()  # prunes on startup
 
@@ -320,6 +324,8 @@ class CachePruning(unittest.TestCase):
             self.assertFalse((cache / name).exists(), name)
         self.assertTrue(current_event.exists())
         self.assertFalse(old_event.exists())
+        self.assertTrue(current_list.exists())
+        self.assertFalse(old_list.exists(), "yesterday's listing CSV is removed too")
 
 
 class Cache(unittest.TestCase):

@@ -34,7 +34,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.6.3"
+PLUGIN_VERSION = "0.6.5"
 # Plugin API 8: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings),
 # 8 = data.symbolInfoChanged, plugin.toast and data.scripts.
@@ -925,7 +925,6 @@ class ZerodhaSource:
         """Drop stale day-stamped cache files so a long-running install doesn't accumulate ~30 MB a day."""
         root = plugin_data_dir() / "cache"
         today = datetime.now(TZ_IST).date()
-        yesterday = today - timedelta(days=1)
         removed = 0
         try:
             for path in root.glob("master-*.json"):
@@ -937,8 +936,8 @@ class ZerodhaSource:
                     day = date.fromisoformat(day_text)
                 except ValueError:
                     continue
-                # Keep every naming scheme for today/yesterday: an update must not delete the master it can reuse.
-                if day in (today, yesterday):
+                # Same-day data only: yesterday's master is removed too, so every start fetches the current one.
+                if day == today:
                     continue
                 try:
                     path.unlink()
@@ -946,7 +945,7 @@ class ZerodhaSource:
                 except OSError:
                     pass
             for path in root.glob("nse-listings-*.json"):
-                day_text = path.stem.rsplit("-", 1)[-1]
+                day_text = "-".join(path.stem.split("-")[-3:])
                 try:
                     day = date.fromisoformat(day_text)
                 except ValueError:
@@ -999,6 +998,14 @@ class ZerodhaSource:
                      f"reconnects={counts['reconnects']}")
 
     # ── settings and logging ──
+    @staticmethod
+    def clean_token(value):
+        """A pasted enctoken may arrive with surrounding quotes; strip whitespace and one matching pair."""
+        text = str(value or "").strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'"):
+            text = text[1:-1].strip()
+        return text
+
     def clean(self, text):
         """A message with the enctoken removed (nothing secret reaches the log)."""
         s = str(text)
@@ -1328,7 +1335,7 @@ class ZerodhaSource:
                        or settings.get("apiUrl") != self.settings.get("apiUrl")
                        or settings.get("wsUrl") != self.settings.get("wsUrl"))
             self.settings = dict(settings)
-            self.enctoken = str(settings.get("enctoken") or "").strip()
+            self.enctoken = self.clean_token(settings.get("enctoken"))
             self.user_id = str(settings.get("userId") or "").strip()
             self.exchanges = [e.strip().upper() for e in
                               (settings.get("exchanges") or DEFAULT_EXCHANGES).split(",") if e.strip()]
@@ -1425,7 +1432,7 @@ class ZerodhaSource:
                 self.awaiting_token = False
                 self.log("Enctoken refresh cancelled; the stream stays stopped", "warn")
                 return
-            self.enctoken = str(value).strip()
+            self.enctoken = self.clean_token(value)
             self.settings["enctoken"] = self.enctoken
             self.awaiting_token = False
             gen = self.ws_generation + 1
@@ -2264,10 +2271,21 @@ class ZerodhaSource:
         return events
 
     def watchlists(self):
-        """Two sample watchlists (Plugin API 4) from the master, with whole symbols. Replace with your own sets."""
+        """Sample lists from the master plus today's delivery holdings (Plugin API 4), as whole symbols."""
+        lists = []
+        held = []
+        seen = set()
+        for h in self.holdings:
+            sym = h.get("symbol")
+            if isinstance(sym, str) and sym and sym not in seen:
+                seen.add(sym)
+                held.append(sym)
+        if held:
+            lists.append({"id": "zerodha-holdings", "name": "Holdings (zerodha)",
+                          "symbols": held[:1000], "sections": []})
         rows = self.instruments.rows
         if not rows:
-            return []
+            return lists
         by_ticker = {r["ticker"].upper(): r for r in rows if r["exchange"] == "NSE"}
 
         def whole(names):
@@ -2288,7 +2306,6 @@ class ZerodhaSource:
             if row is not None and f"NSE:{row['ticker']}" not in indices:
                 indices.append(f"NSE:{row['ticker']}")
         indices = indices[:1000]
-        lists = []
         if blue:
             lists.append({"id": "zerodha-blue-chips", "name": "NSE blue chips (sample)",
                           "symbols": blue, "sections": []})
@@ -2777,6 +2794,7 @@ class ZerodhaSource:
         with self.lock:
             was_connected = self.connected_broker
             previous = {oid: o.get("status") for oid, o in self.orders.items()}
+            held_before = [h.get("symbol") for h in self.holdings]
             self.margins = margins
             self.positions = [p for p in (self._wire_position(r) for r in (books.get("net") or [])) if p]
             if holdings is not None:
@@ -2797,6 +2815,8 @@ class ZerodhaSource:
                 events.append({"kind": kind, "ticker": order["ticker"], "side": order["side"],
                                "type": order["type"], "qty": order["qty"],
                                "price": order.get("avgFillPrice"), "message": order.get("message")})
+        if holdings is not None and [h.get("symbol") for h in self.holdings] != held_before:
+            self.send_watchlists()  # the Holdings list follows today's delivery holdings
         if not was_connected:
             self.notice("info", "Broker connected — account books are live")
             self.toast("info", "Broker connected — account books are live")

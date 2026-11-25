@@ -13,7 +13,8 @@ personal API.
 
 1. Log in at [kite.zerodha.com](https://kite.zerodha.com) in Chrome/Edge.
 2. Open Developer Tools (F12) → **Application** → **Cookies** → `kite.zerodha.com`.
-3. Copy the value of the `enctoken` cookie.
+3. Copy the value of the `enctoken` cookie. Surrounding quotes (`"…"`) are stripped automatically, whether you paste
+   into Settings or the refresh prompt.
 4. Paste it into **Settings > Plugins > Zerodha (enctoken) > Enctoken**. It is stored in the system credential
    store, is never shown again, and is redacted from the plugin log.
 
@@ -194,10 +195,10 @@ ticker-prefix → ticker-substring → name/description, spread across the confi
 
 The plugin speaks **API 8** and uses the upstream features adopted in this fork:
 
-- **Watchlists** (API 4): two sample lists are offered under the plugin's name in *Open list…* — a set of NSE blue
-  chips and a set of indices. They are built from the instrument master, capped at 1000 symbols per list, and sent
-  again each time the master is loaded. Replace `watchlists()` (and `SAMPLE_BLUE_CHIPS` / `SAMPLE_INDICES`) with
-  your own sets, e.g. the members of an index or the contracts of the month.
+- **Watchlists** (API 4): **Holdings (zerodha)** is built from today's delivery holdings and refreshed whenever they
+  change; two sample lists — NSE blue chips and indices — come from the instrument master. All are whole symbols,
+  capped at 1000 per list, and sent only when the set changes (with a toast). Replace `watchlists()` (and
+  `SAMPLE_BLUE_CHIPS` / `SAMPLE_INDICES`) with your own sets.
 - **Events** (API 5): `data.events` answers with Kite's corporate actions in the app's shape — dividends with an
   `amount`, bonuses and splits as `from`/`to` (a 1:1 bonus is `1 → 2`). Earnings are not supplied by the personal
   API; add them in `events_for()` when you have a source. Events are fetched in 3-year chunks, cached per day and
