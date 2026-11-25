@@ -156,6 +156,27 @@ class Stream(unittest.TestCase):
         self.assertEqual(bars[0][4], 12345)
         self.assertEqual(self.fake.count(path), before, "the OI refresh needs no second history call")
 
+    def test_customone_series_answer_has_five_values_on_the_base_grid(self):
+        ticker = "NSE_INDEX:NIFTY_CUSTOMONE"
+        now = int(time.time())
+        bars = self.source.bars(ticker, "1D", plugin.ist_midnight(now - 10 * 86400), now, 10)
+        self.assertTrue(bars)
+        for bar in bars:
+            self.assertEqual(len(bar), 6)
+            step = float((bar[0] // 60) % 1000)
+            self.assertEqual(bar[1:], [step + 10, step + 20, step + 30, step + 40, step + 50])
+
+    def test_customone_series_quote_carries_the_five_values(self):
+        ticker = "NSE_INDEX:NIFTY_CUSTOMONE"
+        self.source.set_subscriptions([ticker])
+        token = self.source.instruments.row("NSE_INDEX:NIFTY")["token"]
+        self.fake.ws.push_ticks([fake_kite.FakeWs.packet_index(token, 25000.0)])
+        self.assertTrue(harness.wait_until(lambda: self.source.quotes.get(ticker, {}).get("day"), 3.0))
+        bar = self.source.quotes[ticker]["day"]
+        self.assertEqual(len(bar), 6)
+        self.assertEqual([b - a for a, b in zip(bar[1:5], bar[2:5])], [10.0, 10.0, 10.0])
+        self.assertTrue(any(p.get("ticker") == ticker for p in self.app.sock.payloads("data.quote")))
+
     def test_an_empty_watch_does_clear_after_the_grace_period(self):
         self.app.on_notification("broker.watchDepth", {"tickers": ["NSE:RELIANCE"]})
         self.assertTrue(harness.wait_until(
@@ -277,10 +298,30 @@ class Api8(unittest.TestCase):
         names = {s["name"] for s in scripts.values()}
         self.assertIn("Monthly Levels (Expiry H/L)", names)
         self.assertIn("MA Cloud", names)
+        self.assertIn("CustomOne 5 values", names)
         self.assertIn("EMA Cross Strategy", names)
         self.assertEqual(scripts["EMA_Cross_Strategy"]["kind"], "strategy")
         self.assertTrue(all(s["kind"] == "indicator" for sid, s in scripts.items()
                             if sid != "EMA_Cross_Strategy"))
+
+    def test_customone_is_declared_only_for_the_sample_symbols(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        try:
+            source.instruments.ensure()
+
+            def names(symbol):
+                return [s["name"] if isinstance(s, dict) else s
+                        for s in plugin.ZerodhaSource.series_for(source.instruments.row(symbol))]
+
+            self.assertIn("CUSTOMONE", names("NSE_INDEX:NIFTY"))
+            self.assertNotIn("CUSTOMONE", names("NSE:RELIANCE"))
+            self.assertIn("OI", names("NFO:NIFTY25NOVFUT"))
+            self.assertNotIn("CUSTOMONE", names("NFO:NIFTY25NOVFUT"))
+            self.assertEqual(source._series_row("NSE_INDEX:NIFTY_CUSTOMONE")[1], "CUSTOMONE")
+            self.assertIsNone(source._series_row("NFO:NIFTY25NOVFUT_CUSTOMONE"))
+        finally:
+            fake.close()
 
     def test_remote_manifest_overrides_local_and_only_notifies_on_change(self):
         fake = fake_kite.FakeKite()
@@ -301,7 +342,9 @@ class Api8(unittest.TestCase):
 
             self.assertTrue(source.send_scripts())
             self.assertEqual(len(app.sock.payloads("data.scripts")), 1)
-            self.assertTrue(any("New Study" in t["message"] for t in app.sock.payloads("plugin.toast")))
+            self.assertIn("new_study", merged)
+            self.assertTrue(any(t["message"].startswith("New plugin indicators:")
+                                for t in app.sock.payloads("plugin.toast")))
             self.assertFalse(source.send_scripts(), "an unchanged set is not sent again")
             self.assertEqual(len(app.sock.payloads("data.scripts")), 1)
         finally:

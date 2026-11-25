@@ -34,7 +34,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.6.5"
+PLUGIN_VERSION = "0.6.6"
 # Plugin API 8: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings),
 # 8 = data.symbolInfoChanged, plugin.toast and data.scripts.
@@ -104,6 +104,10 @@ SAMPLE_BLUE_CHIPS = ("RELIANCE", "TCS", "INFOSYS", "HDFCBANK", "ICICIBANK", "SBI
 SAMPLE_INDICES = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "INDIAVIX", "SENSEX", "BANKEX")
 EXTRA_FIELDS = []   # more {"name":…, "value":…} instrument values, added to every symbol's fields
 EXTRA_SERIES = []   # more extra series names, added to every symbol's series (serve <ticker>_<name>)
+# A sample extra series: five values in one bar's OHLCV slots, read by CustomOne_5Values with one request.security.
+# Declared only for these symbols so a stray <symbol>_CUSTOMONE on another symbol gets no made-up numbers.
+CUSTOMONE_SYMBOLS = {"NSE_INDEX:NIFTY"}
+CUSTOMONE_NAME = "CUSTOMONE"
 
 # A brief empty broker.watchQuote/watchDepth is ignored: the app re-sends the watch on each chart switch, and
 # dropping full mode for that instant floods Kite with mode frames and blanks the ticket's bid/ask.
@@ -1072,6 +1076,7 @@ class ZerodhaSource:
             "Monthly_Levels": "Monthly Levels (Expiry H/L)",
             "MA_Cloud": "MA Cloud",
             "EMA_Cross_Strategy": "EMA Cross Strategy",
+            "CustomOne_5Values": "CustomOne 5 values",
         }
         out = []
         for path in sorted(cls._scripts_dir().glob("*.js")):
@@ -1924,11 +1929,10 @@ class ZerodhaSource:
                 if meta is None:
                     continue
                 ticker, tick_size = meta
-                oi_wanted = (t.get("oi") is not None and any(
-                    (sr := self._series_row(s)) is not None and sr[0]["token"] == token
-                    for s in self.oi_subscribed))
+                wanted_series = {s for s in self.oi_subscribed
+                                 if (sr := self._series_row(s)) is not None and sr[0]["token"] == token}
                 if ticker not in self.subscribed and ticker not in self.watched \
-                        and ticker not in self.watched_depth and not oi_wanted:
+                        and ticker not in self.watched_depth and not wanted_series:
                     continue
                 q = self.quotes.setdefault(ticker, {})
                 ohlc = t.get("ohlc") or {}
@@ -1983,19 +1987,28 @@ class ZerodhaSource:
                     messages.append({"jsonrpc": "2.0", "method": "broker.quote",
                                      "params": {"ticker": ticker, "bid": bid, "ask": ask, "last": price}})
                 oi = t.get("oi")
-                if oi is not None and self.oi_subscribed:
-                    for series_ticker in self.oi_subscribed:
+                if wanted_series:
+                    stamp = now // 60 * 60
+                    for series_ticker in wanted_series:
                         series = self._series_row(series_ticker)
-                        if not series or series[0]["token"] != token:
+                        if not series:
                             continue
+                        row, name = series
+                        if name == "OI":
+                            if oi is None:
+                                continue
+                            values = [oi, oi, oi, oi, 0]
+                            fields = [{"name": "Open Interest", "value": oi},
+                                      {"name": "OI day high", "value": t.get("oi_day_high")},
+                                      {"name": "OI day low", "value": t.get("oi_day_low")}]
+                        else:
+                            values = self.customone_values(now)
+                            fields = [{"name": f"Custom {i + 1}", "value": v} for i, v in enumerate(values)]
                         oq = self.quotes.setdefault(series_ticker, {})
-                        stamp = now // 60 * 60
-                        oq["minute"] = [stamp, oi, oi, oi, oi, 0]
-                        oq["day"] = [ist_midnight(now), oi, oi, oi, oi, 0]
-                        oq["price"] = oi
-                        oq["fields"] = [{"name": "Open Interest", "value": oi},
-                                        {"name": "OI day high", "value": t.get("oi_day_high")},
-                                        {"name": "OI day low", "value": t.get("oi_day_low")}]
+                        oq["minute"] = [stamp] + values
+                        oq["day"] = [ist_midnight(now)] + values
+                        oq["price"] = values[3]
+                        oq["fields"] = fields
                         self._perf["quotes"] += 1
                         messages.append({"jsonrpc": "2.0", "method": "data.quote",
                                          "params": self._quote_of(series_ticker, oq)})
@@ -2363,21 +2376,32 @@ class ZerodhaSource:
 
     @staticmethod
     def series_for(row):
-        """Extra series (Plugin API 6): Kite serves open interest with oi=1 on F&O history."""
+        """Extra series (Plugin API 6): Kite serves open interest with oi=1 on F&O history.
+
+        CUSTOMONE is a sample of five values packed in one bar's OHLCV slots; only the symbols in
+        CUSTOMONE_SYMBOLS declare it, so scripts on other symbols cannot read made-up numbers from it.
+        """
         series = ["OI"] if row["type"] in ("futures", "option") else []
+        if f'{row["exchange"]}:{row["ticker"]}' in CUSTOMONE_SYMBOLS:
+            series.append({"name": CUSTOMONE_NAME, "description": "Custom One (five sample values)",
+                           "pricescale": 1})
         series.extend(EXTRA_SERIES)
         return series
 
     def _series_row(self, ticker):
-        """An extra series' ticker (`<symbol>_OI`) → its (base row, series name), or None."""
-        for name in ["OI"] + list(EXTRA_SERIES):
+        """An extra series' ticker (`<symbol>_OI`, `<symbol>_CUSTOMONE`) → its (base row, series name), or None."""
+        for name in ["OI", CUSTOMONE_NAME] + list(EXTRA_SERIES):
             suffix = "_" + name
             if ticker.upper().endswith(suffix.upper()):
                 base = ticker[:-len(suffix)]
                 row = self.instruments.row(base)
                 if row is None and ":" not in base:
                     row = next((r for r in self.instruments.rows if r["ticker"].upper() == base.upper()), None)
-                return (row, name) if row is not None else None
+                if row is None:
+                    return None
+                if name == CUSTOMONE_NAME and f'{row["exchange"]}:{row["ticker"]}' not in CUSTOMONE_SYMBOLS:
+                    return None
+                return row, name
         return None
 
     def _second_bars(self, ticker, resolution, frm, to, count_back):
@@ -2422,6 +2446,20 @@ class ZerodhaSource:
             return None
         return [list(bar)]
 
+    @staticmethod
+    def customone_values(when):
+        """Five sample values of one bar, stable for its time: 10..50 plus a slow step. A script reads them as
+        [open, high, low, close, volume] of <symbol>_CUSTOMONE, so one request.security gives all five."""
+        step = float((int(when) // 60) % 1000)
+        return [step + 10, step + 20, step + 30, step + 40, step + 50]
+
+    def _customone_bars(self, ticker, resolution, frm, to, count_back):
+        """Sample series: take the base symbol's real bar times, put five sample values in each bar's slots."""
+        suffix = "_" + CUSTOMONE_NAME
+        base = ticker[:-len(suffix)] if ticker.upper().endswith(suffix.upper()) else ticker
+        source = self.bars(base, resolution, frm, to, count_back)
+        return [[bar[0]] + self.customone_values(bar[0]) for bar in source]
+
     def bars(self, ticker, resolution, frm, to, count_back):
         series = self._series_row(ticker)
         row = series[0] if series else self.instruments.row(ticker)
@@ -2432,6 +2470,8 @@ class ZerodhaSource:
         if cached is not None:
             self._perf["cached_bars"] += 1
             return cached
+        if series and series[1] == CUSTOMONE_NAME:
+            return self._customone_bars(ticker, resolution, frm, to, count_back)
         # Kite's personal OMS caps a call at 2 days of seconds, 60 days of minutes, 400 of hours and 2000 of days.
         family = ("second" if interval.endswith("second") else "hour" if interval in HOUR_INTERVALS
                   else "day" if interval == "day" else "minute")

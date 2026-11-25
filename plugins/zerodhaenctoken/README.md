@@ -205,15 +205,18 @@ The plugin speaks **API 8** and uses the upstream features adopted in this fork:
   logged.
 - **Extra series** (API 6): F&O symbols declare an `OI` series. `data.bars` on `<symbol>_OI` returns Kite's open
   interest (requested with `oi=1`) as a 5-value series, and the ticker's live OI is pushed as a `data.quote` while
-  the series is subscribed. Add more series in `EXTRA_SERIES` and serve `<symbol>_<name>`.
+  the series is subscribed. `NSE_INDEX:NIFTY` also declares a sample `CUSTOMONE` series: its bars carry five values
+  in the OHLCV slots, so one `request.security(syminfo.tickerid + "_CUSTOMONE", "", () => [open, high, low, close,
+  volume])` reads all five. The bundled **CustomOne 5 values** indicator plots them. Add more series in
+  `EXTRA_SERIES` and serve `<symbol>_<name>`.
 - **Broker pages** (API 7): Kite's delivery holdings are sent as the *Holdings* tab in `broker.state.pages` (see Trading).
 - **API 8:** on connect the plugin toasts the app/API version, then the start of a fresh instrument-master download and
   finally "Pre-data ready" once the master and NSE listings are cached; broker connection has its own toast. All of
   them ask for the **top-right** corner by default; change **Toast position** in the plugin settings if needed (the
   app's own toast setting can still override it). After
   each master load it sends `data.symbolInfoChanged` so the app drops what it kept for our symbols. **Send sample
-  toasts on start** adds one sample of each level. `data.scripts` ships **Monthly Levels (Expiry H/L)** and **MA
-  Cloud** from `scripts/`, read-only in the Indicators dialog with *Make a copy*. With **Remote indicators manifest
+  toasts on start** adds one sample of each level. `data.scripts` ships **Monthly Levels (Expiry H/L)**, **MA
+  Cloud** and **CustomOne 5 values** from `scripts/`, read-only in the Indicators dialog with *Make a copy*. With **Remote indicators manifest
   URL** (a raw folder such as `…/plugin-indicators/`) the plugin also fetches `scripts.json` and `watchlists.json` at
   start and every **Remote indicators check interval** (default 300 s, min 60). Each file is optional; a remote entry
   with the same id replaces the bundled one, unchanged files send nothing, and a changed one is pushed with a toast.
