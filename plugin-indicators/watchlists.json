@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "watchlists": [
+    {
+      "id": "zerodha-blue-chips",
+      "name": "NSE blue chips (remote sample)",
+      "symbols": ["NSE:RELIANCE", "NSE:TCS", "NSE:INFOSYS", "NSE:HDFCBANK", "NSE:ICICIBANK",
+                  "NSE:SBIN", "NSE:BHARTIARTL", "NSE:ITC", "NSE:KOTAKBANK", "NSE:LT"],
+      "sections": []
+    },
+    {
+      "id": "zerodha-indices",
+      "name": "Indices (remote sample)",
+      "symbols": [],
+      "sections": [
+        {"name": "Benchmarks", "symbols": ["NSE_INDEX:NIFTY", "NSE_INDEX:BANKNIFTY",
+                                           "NSE_INDEX:FINNIFTY", "NSE_INDEX:MIDCPNIFTY"]}
+      ]
+    }
+  ]
+}

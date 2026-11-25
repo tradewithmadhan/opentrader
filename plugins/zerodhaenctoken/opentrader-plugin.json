@@ -1,7 +1,7 @@
 {
   "id": "zerodhaenctoken",
   "name": "Zerodha (enctoken)",
-  "version": "0.6.1",
+  "version": "0.6.3",
   "publisher": "tradewithmadhan",
   "description": "Your Zerodha Kite account's market data on the charts: instruments, history and live ticks from the personal API and the Kite ticker, using a browser enctoken.",
   "api": 8,
@@ -43,8 +43,17 @@
       "help": "Writes settings, history, books and order commands to zerodha-api.log in the plugin data folder. The enctoken is never written." },
     { "key": "logWs", "label": "Log WebSocket to file", "type": "bool", "default": "true",
       "help": "Writes stream connect/reconnect and subscription summary lines to zerodha-ws.log." },
-    { "key": "scriptManifestUrl", "label": "Remote indicators manifest URL", "type": "text", "default": "",
-      "help": "Raw URL of a scripts.json manifest (e.g. GitHub raw). Checked at start and every interval; a remote script with the same id replaces the bundled one." },
+    { "key": "toastPosition", "label": "Toast position", "type": "select", "default": "top-right",
+      "options": [
+        { "value": "top-left", "label": "Top left" }, { "value": "top-center", "label": "Top center" },
+        { "value": "top-right", "label": "Top right" }, { "value": "bottom-left", "label": "Bottom left" },
+        { "value": "bottom-center", "label": "Bottom center" }, { "value": "bottom-right", "label": "Bottom right" }
+      ],
+      "help": "Where this plugin's toasts ask to appear; the app's own toast setting can still override it." },
+    { "key": "pluginDataUrl", "label": "Remote plugin data folder URL", "type": "text", "default": "",
+      "help": "Raw folder URL holding scripts.json and/or watchlists.json (e.g. GitHub raw .../plugin-indicators/). Each file is optional; both are checked at start and every interval. Missing or unchanged files are ignored." },
+    { "key": "scriptManifestUrl", "label": "Legacy scripts.json URL", "type": "text", "default": "",
+      "help": "Old setting: a full scripts.json URL. Its folder is used when the new URL above is empty." },
     { "key": "scriptPollSec", "label": "Remote indicators check interval (seconds)", "type": "text", "default": "300",
       "help": "Minimum 60 seconds. No notification is sent when the remote list is unchanged." },
     { "key": "sampleToasts", "label": "Send sample toasts on start", "type": "bool", "default": "false",

@@ -308,6 +308,40 @@ class Api8(unittest.TestCase):
             app.alive = False
             fake.close()
 
+    def test_one_folder_url_finds_both_manifests(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.plugin_data_url = "https://example.test/plugin-indicators?ref=main"
+            self.assertEqual(source._data_url(), "https://example.test/plugin-indicators/?ref=main")
+            seen = []
+
+            def fake_manifest(url, timeout=5):
+                seen.append(url)
+                if url.endswith("/watchlists.json?ref=main"):
+                    return {"watchlists": [
+                        {"id": "remote-list", "name": "Remote list", "symbols": ["NSE:TCS"], "sections": []},
+                        {"id": "", "name": "bad", "symbols": []}]}
+                return {"scripts": [{"id": "remote_script", "name": "Remote", "kind": "indicator", "source": "x"}]}
+
+            source._external_json = fake_manifest
+            source._remote_scripts = source._fetch_remote_scripts()
+            source._remote_watchlists = source._fetch_remote_watchlists()
+            self.assertEqual(len(seen), 2)
+            self.assertIn("remote_script", source._remote_scripts)
+            self.assertIn("remote-list", source._remote_watchlists)
+            self.assertNotIn("", source._remote_watchlists)
+
+            self.assertTrue(source.send_watchlists())
+            lists = app.sock.payloads("data.watchlists")[-1]["watchlists"]
+            self.assertIn("remote-list", [w["id"] for w in lists])
+            self.assertTrue(any("Remote list" in t["message"] for t in app.sock.payloads("plugin.toast")))
+            self.assertFalse(source.send_watchlists(), "unchanged watchlists send nothing")
+        finally:
+            app.alive = False
+            fake.close()
+
     def test_toast_and_symbol_info_changed_are_sent_to_the_app(self):
         fake = fake_kite.FakeKite()
         source = harness.make_source(fake)
@@ -316,8 +350,23 @@ class Api8(unittest.TestCase):
             source.toast("warn", "sample warning", True)
             source.plugin.notify("data.symbolInfoChanged", {})
             toasts = self_payloads(app, "plugin.toast")
-            self.assertEqual(toasts, [{"level": "warn", "message": "sample warning", "sound": True}])
+            self.assertEqual(toasts, [{"level": "warn", "message": "sample warning", "sound": True,
+                                       "position": "top-right"}])
             self.assertEqual(self_payloads(app, "data.symbolInfoChanged"), [{}])
+        finally:
+            app.alive = False
+            fake.close()
+
+    def test_toast_position_setting(self):
+        fake = fake_kite.FakeKite()
+        settings = harness.settings(fake, toastPosition="bottom-center")
+        source = harness.make_source(fake, toastPosition="bottom-center")
+        app = harness.make_plugin(source)
+        try:
+            source.configure(settings)
+            source.toast("info", "where")
+            payload = self_payloads(app, "plugin.toast")[-1]
+            self.assertEqual(payload["position"], "bottom-center")
         finally:
             app.alive = False
             fake.close()

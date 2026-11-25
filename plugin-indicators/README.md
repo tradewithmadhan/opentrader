@@ -6,7 +6,8 @@ Scripts a plugin can publish to OpenTrader with Plugin API 8's `data.scripts`.
 
 - `*.js` — ordinary OakScript studies/strategies. Edit these.
 - `generate.py` — turns them into the single `scripts.json` manifest.
-- `scripts.json` — generated output; this is the one file a plugin fetches from a raw URL.
+- `scripts.json` — generated output; a plugin fetches this file from a raw URL.
+- `watchlists.json` — optional ready-made watchlists in the same `data.watchlists` shape the plugin sends to the app.
 
 ## Generate
 
@@ -37,14 +38,17 @@ kind come from the first `indicator("…")` or `strategy("…")` call.
 
 ## Publishing
 
-Host this folder in a Git repository and point the plugin's `scriptManifestUrl` at the **raw** URL of
-`scripts.json`, e.g.
+Host this folder in a Git repository and point the plugin's **Remote plugin data folder URL** at the **raw folder**,
+e.g.
 
 ```
-https://raw.githubusercontent.com/<owner>/<repo>/main/plugin-indicators/scripts.json
+https://raw.githubusercontent.com/<owner>/<repo>/main/plugin-indicators/
 ```
 
-A plugin polls that URL, compares the manifest with what it last sent, and calls `data.scripts` only when it changes.
-Scripts appear in the Indicators dialog under the plugin's name, read-only with *Make a copy*.
+The plugin appends `scripts.json` and `watchlists.json` and checks both at the configured interval. Either file may
+be absent; absent or unchanged files are ignored. When one changes it is sent whole — `data.scripts` puts the studies
+in the Indicators dialog under the plugin's name (read-only, *Make a copy*), and `data.watchlists` refreshes the
+plugin's lists in *Open list…*. Both changes raise a toast. To clear a category, publish an empty manifest
+(`{"scripts":[]}` / `{"watchlists":[]}`); simply deleting the file leaves the last sent set in place.
 
 Only publish scripts from a repository you trust: they execute code inside the charting app.

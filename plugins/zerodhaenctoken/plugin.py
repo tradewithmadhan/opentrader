@@ -34,7 +34,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.6.1"
+PLUGIN_VERSION = "0.6.3"
 # Plugin API 8: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings),
 # 8 = data.symbolInfoChanged, plugin.toast and data.scripts.
@@ -120,6 +120,7 @@ EVENTS_CHUNK_DAYS = 1095
 SCRIPT_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 MAX_SCRIPTS = 50
 MAX_SCRIPT_SOURCE = 512 * 1024
+TOAST_POSITIONS = ("top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right")
 
 MASTER_CACHE_VERSION = 1
 
@@ -892,12 +893,16 @@ class ZerodhaSource:
         self._listings_day = None
         self._listings_loading = None  # single-flight event for the two public CSVs
         self.company_details = True
+        self.toast_position = "top-right"  # where this plugin's toasts ask to appear
         self.sample_toasts = False  # one sample of each level on start, for testing plugin.toast
         self._sample_toasts_sent = False
-        self.script_manifest_url = ""  # raw URL of a remote scripts.json manifest
+        self.script_manifest_url = ""  # legacy: full scripts.json URL; kept as an alias for plugin_data_url
+        self.plugin_data_url = ""  # raw folder URL holding scripts.json and/or watchlists.json
         self.script_poll_sec = 300
         self._remote_scripts = {}  # id → validated script from the remote manifest / disk cache
         self._sent_scripts = {}  # id → script last sent with data.scripts
+        self._remote_watchlists = {}  # id → validated list from the remote manifest / disk cache
+        self._sent_watchlists = {}  # id → list last sent with data.watchlists
         self._script_stop = threading.Event()
         self._script_poll_thread = None
         self.quote_interval = 0  # ms between data.quote updates per symbol; 0 = every tick
@@ -1042,11 +1047,11 @@ class ZerodhaSource:
             p.notify("broker.notice", {"level": level, "message": self.clean(message)})
 
     def toast(self, level, message, sound=False):
-        """A short, non-blocking message on the user's charts (Plugin API 8)."""
+        """A short, non-blocking message on the user's charts (Plugin API 8), top-right by default."""
         p = self.plugin
         if p and p.alive:
             p.notify("plugin.toast", {"level": level, "message": self.clean(message),
-                                      "sound": bool(sound)})
+                                      "sound": bool(sound), "position": self.toast_position})
 
     @staticmethod
     def _scripts_dir():
@@ -1122,14 +1127,112 @@ class ZerodhaSource:
         except (OSError, TypeError, ValueError) as e:
             self.log(f"remote script cache not saved: {e}", "warn")
 
-    def _fetch_remote_scripts(self):
-        """Fetch the raw scripts.json. Returns a validated id → script map, or None on failure."""
-        if not self.script_manifest_url:
+    @staticmethod
+    def _valid_watchlist(raw):
+        """One protocol-valid watchlist, or None. Remote data is untrusted."""
+        if not isinstance(raw, dict):
+            return None
+        sid, name = raw.get("id"), raw.get("name")
+        if not isinstance(sid, str) or not 0 < len(sid) <= 64:
+            return None
+        if not isinstance(name, str) or not name.strip():
+            name = sid
+        symbols = [s for s in (raw.get("symbols") or []) if isinstance(s, str) and s.strip()]
+        sections = []
+        for sec in (raw.get("sections") or []):
+            if not isinstance(sec, dict) or not isinstance(sec.get("name"), str):
+                continue
+            rows = [s for s in (sec.get("symbols") or []) if isinstance(s, str) and s.strip()]
+            sections.append({"name": sec["name"], "symbols": rows})
+        if len(symbols) + sum(len(s["symbols"]) for s in sections) > 1000:
+            return None
+        return {"id": sid, "name": name, "symbols": symbols, "sections": sections}
+
+    @staticmethod
+    def _watchlist_cache_path():
+        return plugin_data_dir() / "cache" / "remote-watchlists.json"
+
+    @staticmethod
+    def _read_watchlist_cache():
+        try:
+            with open(ZerodhaSource._watchlist_cache_path(), encoding="utf-8") as f:
+                data = json.load(f)
+            rows = data.get("watchlists") if isinstance(data, dict) else data
+            if not isinstance(rows, list):
+                return {}
+        except (OSError, ValueError):
             return {}
-        data = self._external_json(self.script_manifest_url, timeout=10)
-        rows = data.get("scripts") if isinstance(data, dict) else data
+        out = {}
+        for raw in rows:
+            item = ZerodhaSource._valid_watchlist(raw)
+            if item:
+                out[item["id"]] = item
+        return out
+
+    def _write_watchlist_cache(self):
+        path = self._watchlist_cache_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"schema": 1, "watchlists": list(self._remote_watchlists.values())}, f)
+            os.replace(tmp, path)
+        except (OSError, TypeError, ValueError) as e:
+            self.log(f"remote watchlist cache not saved: {e}", "warn")
+
+    def _fetch_remote_watchlists(self):
+        """Validated id → list map. An absent watchlists.json means no remote lists."""
+        rows = self._fetch_manifest("watchlists.json", "watchlists")
+        if rows is None:
+            return {}
+        out = {}
+        for raw in rows:
+            item = self._valid_watchlist(raw)
+            if item:
+                out[item["id"]] = item
+            else:
+                self.log("a remote watchlist was dropped: invalid id or contents", "warn")
+        return out
+
+    def _data_url(self):
+        """The raw folder URL holding scripts.json / watchlists.json, from either setting."""
+        base = (self.plugin_data_url or self.script_manifest_url or "").strip()
+        if not base:
+            return ""
+        parts = urllib.parse.urlsplit(base)
+        path = parts.path
+        if path.endswith(("/scripts.json", "/watchlists.json", "scripts.json", "watchlists.json")):
+            path = path.rsplit("/", 1)[0] + "/"
+        elif not path.endswith("/"):
+            path += "/"
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+    def _file_url(self, name):
+        base = self._data_url()
+        if not base:
+            return ""
+        parts = urllib.parse.urlsplit(base)
+        path = parts.path.rstrip("/") + "/" + name
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+    def _fetch_manifest(self, name, key):
+        """Fetch one optional file from the base URL. None means the file isn't published."""
+        url = self._file_url(name)
+        if not url:
+            return None
+        data = self._external_json(url, timeout=10)
+        if data is None:
+            return None
+        rows = data.get(key) if isinstance(data, dict) else data
         if not isinstance(rows, list):
-            raise ValueError("the remote manifest has no scripts list")
+            raise ValueError(f"the remote {name} has no {key} list")
+        return rows
+
+    def _fetch_remote_scripts(self):
+        """Validated id → script map. An absent scripts.json means no remote scripts."""
+        rows = self._fetch_manifest("scripts.json", "scripts")
+        if rows is None:
+            return {}
         out = {}
         for raw in rows:
             script = self._valid_script(raw)
@@ -1164,10 +1267,36 @@ class ZerodhaSource:
                 self.toast("info", "Plugin indicators updated from the remote manifest")
         return True
 
+    def merged_watchlists(self):
+        """Local sample lists first; a remote list with the same id wins."""
+        merged = {w["id"]: w for w in self.watchlists()}
+        merged.update(self._remote_watchlists)
+        return list(merged.values())[:100]
+
+    def send_watchlists(self):
+        """Send the whole set only when it changed; toast on a remote change."""
+        lists = self.merged_watchlists()
+        by_id = {w["id"]: w for w in lists}
+        with self.lock:
+            if by_id == self._sent_watchlists:
+                return False
+            previous = self._sent_watchlists
+            new = [w["name"] for wid, w in by_id.items() if wid not in previous]
+            self._sent_watchlists = by_id
+        p = self.plugin
+        if p and p.alive:
+            p.notify("data.watchlists", {"watchlists": lists})
+            if new:
+                self.toast("info", "New plugin watchlists: " + ", ".join(new[:4]))
+            elif previous and previous != by_id:
+                self.toast("info", "Plugin watchlists updated from the remote manifest")
+        return True
+
     def _script_poll_loop(self):
-        """Check the remote manifest at a fixed interval; no changes means no notification."""
+        """Check both optional manifest files at one interval; no changes means no notification."""
         while not self._script_stop.is_set():
-            if self.script_manifest_url:
+            base = self._data_url()
+            if base:
                 try:
                     fetched = self._fetch_remote_scripts()
                     with self.lock:
@@ -1175,10 +1304,21 @@ class ZerodhaSource:
                         self._remote_scripts = fetched
                     if changed:
                         self._write_remote_cache()
-                        self.log(f"remote indicators: {len(fetched)} from {self.script_manifest_url}")
+                        self.log(f"remote indicators: {len(fetched)} from {self._file_url('scripts.json')}")
                         self.send_scripts()
                 except Exception as e:  # noqa: BLE001 - a bad poll must never break the plugin
                     self.log(f"remote indicators not read: {self.clean(str(e))}", "warn")
+                try:
+                    fetched = self._fetch_remote_watchlists()
+                    with self.lock:
+                        changed = fetched != self._remote_watchlists
+                        self._remote_watchlists = fetched
+                    if changed:
+                        self._write_watchlist_cache()
+                        self.log(f"remote watchlists: {len(fetched)} from {self._file_url('watchlists.json')}")
+                        self.send_watchlists()
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"remote watchlists not read: {self.clean(str(e))}", "warn")
             self._script_stop.wait(self.script_poll_sec)
 
     def configure(self, settings, provides=None):
@@ -1194,8 +1334,11 @@ class ZerodhaSource:
                               (settings.get("exchanges") or DEFAULT_EXCHANGES).split(",") if e.strip()]
             self.broker_enabled = "broker" in provides if provides is not None else self.broker_enabled
             self.company_details = str(settings.get("companyDetails", "true")).strip().lower() == "true"
+            position = str(settings.get("toastPosition", "top-right") or "").strip().lower()
+            self.toast_position = position if position in TOAST_POSITIONS else "top-right"
             self.sample_toasts = str(settings.get("sampleToasts", "false")).strip().lower() == "true"
             self.script_manifest_url = str(settings.get("scriptManifestUrl") or "").strip()
+            self.plugin_data_url = str(settings.get("pluginDataUrl") or "").strip()
             try:
                 self.script_poll_sec = max(60, int(float(settings.get("scriptPollSec", 300) or 300)))
             except (TypeError, ValueError):
@@ -1217,9 +1360,11 @@ class ZerodhaSource:
                  f"capabilities={','.join(provides) if provides is not None else 'unchanged'}, "
                  f"broker={'on' if self.broker_enabled else 'off'}")
         with self.lock:
-            self._remote_scripts = self._read_remote_cache() if self.script_manifest_url else {}
+            self._remote_scripts = self._read_remote_cache() if self._data_url() else {}
+            self._remote_watchlists = self._read_watchlist_cache() if self._data_url() else {}
         self.send_scripts()
-        if self.script_manifest_url and (self._script_poll_thread is None or not self._script_poll_thread.is_alive()):
+        self.send_watchlists()
+        if self._data_url() and (self._script_poll_thread is None or not self._script_poll_thread.is_alive()):
             self._script_stop.set()
             self._script_stop = threading.Event()
             self._script_poll_thread = threading.Thread(target=self._script_poll_loop, daemon=True,
@@ -2826,10 +2971,8 @@ class Plugin:
             self.notify("data.quote", q)
 
     def push_watchlists(self):
-        lists = self.source.watchlists()
-        if lists:
-            self.notify("data.watchlists", {"watchlists": lists})
-            self.log(f"data.watchlists: {len(lists)} lists")
+        if self.source.send_watchlists():
+            self.log(f"data.watchlists: {len(self.source.merged_watchlists())} lists")
 
     def push_state(self):
         state = self.source.state()

@@ -1,7 +1,7 @@
 {
   "id": "zerodhaenctoken",
   "name": "Zerodha (enctoken, development)",
-  "version": "0.6.1-dev",
+  "version": "0.6.3-dev",
   "publisher": "tradewithmadhan",
   "description": "The Zerodha enctoken plugin while it is developed: you run plugin.py yourself, the app writes where to connect.",
   "api": 8,
@@ -31,7 +31,14 @@
     { "key": "maxQuotesPerSecond", "label": "Maximum chart quote updates per second", "type": "text", "default": "200" },
     { "key": "logApi", "label": "Log REST/API to file", "type": "bool", "default": "true" },
     { "key": "logWs", "label": "Log WebSocket to file", "type": "bool", "default": "true" },
-    { "key": "scriptManifestUrl", "label": "Remote indicators manifest URL", "type": "text", "default": "" },
+    { "key": "toastPosition", "label": "Toast position", "type": "select", "default": "top-right",
+      "options": [
+        { "value": "top-left", "label": "Top left" }, { "value": "top-center", "label": "Top center" },
+        { "value": "top-right", "label": "Top right" }, { "value": "bottom-left", "label": "Bottom left" },
+        { "value": "bottom-center", "label": "Bottom center" }, { "value": "bottom-right", "label": "Bottom right" }
+      ] },
+    { "key": "pluginDataUrl", "label": "Remote plugin data folder URL", "type": "text", "default": "" },
+    { "key": "scriptManifestUrl", "label": "Legacy scripts.json URL", "type": "text", "default": "" },
     { "key": "scriptPollSec", "label": "Remote indicators check interval (seconds)", "type": "text", "default": "300" },
     { "key": "sampleToasts", "label": "Send sample toasts on start", "type": "bool", "default": "false" },
     { "key": "logDebug", "label": "Log verbose details", "type": "bool", "default": "false" }

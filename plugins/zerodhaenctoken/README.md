@@ -207,13 +207,16 @@ The plugin speaks **API 8** and uses the upstream features adopted in this fork:
   the series is subscribed. Add more series in `EXTRA_SERIES` and serve `<symbol>_<name>`.
 - **Broker pages** (API 7): Kite's delivery holdings are sent as the *Holdings* tab in `broker.state.pages` (see Trading).
 - **API 8:** on connect the plugin toasts the app/API version, then the start of a fresh instrument-master download and
-  finally "Pre-data ready" once the master and NSE listings are cached; broker connection has its own toast. After
+  finally "Pre-data ready" once the master and NSE listings are cached; broker connection has its own toast. All of
+  them ask for the **top-right** corner by default; change **Toast position** in the plugin settings if needed (the
+  app's own toast setting can still override it). After
   each master load it sends `data.symbolInfoChanged` so the app drops what it kept for our symbols. **Send sample
   toasts on start** adds one sample of each level. `data.scripts` ships **Monthly Levels (Expiry H/L)** and **MA
   Cloud** from `scripts/`, read-only in the Indicators dialog with *Make a copy*. With **Remote indicators manifest
-  URL** the plugin also fetches a `scripts.json` at start and every **Remote indicators check interval** (default 300 s,
-  min 60); a remote script with the same id replaces the bundled one, an unchanged manifest sends nothing, and a
-  changed one is pushed with a toast naming the new studies. The last good manifest is cached for offline starts.
+  URL** (a raw folder such as `…/plugin-indicators/`) the plugin also fetches `scripts.json` and `watchlists.json` at
+  start and every **Remote indicators check interval** (default 300 s, min 60). Each file is optional; a remote entry
+  with the same id replaces the bundled one, unchanged files send nothing, and a changed one is pushed with a toast.
+  The last good copies are cached for offline starts. The old `scriptManifestUrl` setting still works as an alias.
 - **Instrument values** (API 6): `symbolInfo.fields` lists expiry, lot size, tick size and, for NSE stocks, the
   listing date plus **ISIN**, **Face value** and **Series** from NSE's `EQUITY_L.csv` / `SME_EQUITY_L.csv`. Live OI
   quotes carry `Open Interest` / day high / low fields. Add your own values in `EXTRA_FIELDS`.
