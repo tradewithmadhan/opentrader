@@ -88,7 +88,7 @@ export type WindowState = any;
 export type UpdateState = any;
 export type AppUpdateStatus = any;
 /** A broker plugin's short toast message, #401. */
-export type PluginToast = { plugin: string; pluginName: string; level: string; message: string; sound: boolean };
+export type PluginToast = { plugin: string; pluginName: string; level: string; message: string; sound: boolean; position?: string | null };
 /** Why the last app-update check failed, #399. */
 export type UpdateFailure = "proxy" | "connection" | "timeout" | "server" | "other";
 export type UpdateError = { reason: UpdateFailure; detail: string };
