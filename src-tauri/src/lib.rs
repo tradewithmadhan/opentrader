@@ -165,6 +165,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             data::types::ChartAggregate,
             data::types::TradeTick,
             data::types::SecondAggregate,
+            data::types::ChartTrade,
             data::types::MarketTier,
             data::provider::capabilities::ProviderCapabilities,
             screener::ScreenerUpdate,
