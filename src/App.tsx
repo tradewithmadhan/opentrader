@@ -104,8 +104,9 @@ import { tradingUi } from "./data/trading/trading-ui";
 import { replayBroker } from "./data/trading/replay-broker";
 import { pluginBroker } from "./data/trading/plugin-broker";
 import { events } from "./bindings";
+import { recoverPluginSymbols, refreshPluginSessions } from "./data/session/symbol-sessions";
+import { servedExchanges } from "./data/plugin-exchanges";
 import { forgetUnknownSymbols } from "./data/unknown-symbols";
-import { refreshPluginSessions } from "./data/session/symbol-sessions";
 import { affects as pluginChangeAffects } from "./data/plugin-events";
 import { wakeRetries } from "./data/connection";
 import { createDrawingStore } from "./window/drawings/drawing-store";
@@ -471,17 +472,19 @@ function App() {
   onMount(() => { if (isTauri() && windowLabel === "main") openFirstStartOnboarding(); });
 
   // A data plugin that connects again may know its symbols again (an expired contract returns): each window
-  // forgets the symbols it gave up on and asks for them once more; it may also describe its symbols otherwise
+  // forgets the symbols it gave up on and asks for them once more. It may also describe its symbols otherwise
   // (an update: #340's bar grid), so the sessions are read again and the charts reload when one changed. The
   // requests waiting for a plugin that was not connected yet (restored charts and watchlists at start, #371) are
-  // asked again at once.
+  // asked again at once, and the symbols asked for before their plugin served them are read from it (#409).
+  const reloadCharts = () => emitAppEvent("chart-reload-data");
   onMount(() => {
     if (!isTauri()) return;
     const stop = events.pluginsChanged.listen(() => {
       forgetUnknownSymbols();
       forgetTickerInfo();
       wakeRetries();
-      void refreshPluginSessions().then((changed) => changed && emitAppEvent("chart-reload-data"));
+      void refreshPluginSessions().then((changed) => changed && reloadCharts());
+      void recoverPluginSymbols(servedExchanges, reloadCharts);
     });
     onCleanup(() => void stop.then((f) => f()));
   });
@@ -493,7 +496,8 @@ function App() {
       const which = pluginChangeAffects(payload);
       forgetUnknownSymbols(which);
       forgetTickerInfo(which);
-      void refreshPluginSessions(which).then((changed) => changed && emitAppEvent("chart-reload-data"));
+      void refreshPluginSessions(which).then((changed) => changed && reloadCharts());
+      void recoverPluginSymbols(servedExchanges, reloadCharts, which);
     });
     onCleanup(() => void stop.then((f) => f()));
   });
