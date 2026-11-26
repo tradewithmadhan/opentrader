@@ -1,3 +1,36 @@
+/*
+ * Monthly Levels (Expiry H/L) — OakScript indicator port.
+ *
+ * Source: TV/PineJS custom study "Monthly Levels (Expiry H/L) (custom)"
+ *   D:\MadhaN\TV-Openalgo\react-migration\tv-react\src\indicators\monthlyLevelsIndicator.ts
+ *
+ * Ported to OakScript (Pine Script v6-style JS) for the OpenTrader script editor.
+ * Paste the body below the "paste start" line into the editor.
+ *
+ * Semantics (port verbatim):
+ *   • The chart day is read as the IST trading date (daily bars are stamped 00:00 IST = 18:30 UTC
+ *     of the previous day, so a +5.5h shift is applied), as "DD-MMM-YYYY".
+ *   • On each date in the hardcoded NSE expiry set (29-JAN-2015 … 28-DEC-2027):
+ *       – the first bar starts a new level from that day's open, with the connector from the
+ *         previous level drawn clear (Pine: color = level != level[1] ? na : color), then
+ *       – rolling high / low of the expiry day is tracked from that day's open.
+ *   • On every other date the level freezes flat at the last expiry day's H/L.
+ *   • 2 linebr plots: Monthly High Level (#00FF00, width 1), Monthly Low Level (#FF0000, width 1).
+ *     Both are also drawn as current-expiry lines, width 1.
+ *   • overlay = true (price pane). Two inputs: show history / current-expiry line.
+ *
+ * Deviations / notes:
+ *   • TV used plottype 11 (stepped line) with a NaN gap on the transition bar. Here the level
+ *     has a value on every bar and only the segment into a new level is transparent, so the first
+ *     bar of each expiry is kept in the data window/legend while the jump is not drawn — the same
+ *     method used for Square Root Levels and the MadhaN history plots. linebr paints the segment
+ *     into a bar in that bar's colour; steplinebr would also hide the flat run out of the bar.
+ *   • On NASDAQ:AMZN the NSE expiry dates never match → the level stays NaN (correct no-op).
+ *     Needs an NSE symbol (e.g. NIFTY/BANKNIFTY weekly expiry) for a real visual test.
+ */
+
+// ---- paste start -----------------------------------------------------------
+
 indicator("Monthly Levels (Expiry H/L)", { shorttitle: "Monthly Levels", overlay: true, precision: 2 });
 
 const historyEnabled = input.bool(true, "Show History Levels");
@@ -27,12 +60,15 @@ const EXPIRY_DATES = new Set([
   '28-MAR-2024', '25-APR-2024', '30-MAY-2024', '27-JUN-2024', '25-JUL-2024', '29-AUG-2024',
   '26-SEP-2024', '31-OCT-2024', '28-NOV-2024', '26-DEC-2024', '30-JAN-2025', '27-FEB-2025',
   '27-MAR-2025', '24-APR-2025', '29-MAY-2025', '26-JUN-2025', '31-JUL-2025', '28-AUG-2025',
-  '30-SEP-2025', '28-OCT-2025', '25-NOV-2025', '30-DEC-2025', '27-JAN-2026', '24-FEB-2026',
-  '30-MAR-2026', '30-APR-2026', '28-MAY-2026', '25-JUN-2026', '30-JUL-2026',
-  '27-AUG-2026', '24-SEP-2026', '29-OCT-2026', '26-NOV-2026', '31-DEC-2026',
-  '28-JAN-2027', '25-FEB-2027', '31-MAR-2027', '29-APR-2027', '27-MAY-2027',
-  '24-JUN-2027', '29-JUL-2027', '26-AUG-2027', '30-SEP-2027', '28-OCT-2027',
-  '25-NOV-2027', '30-DEC-2027',
+  '30-SEP-2025', '28-OCT-2025', '25-NOV-2025', '30-DEC-2025',
+  // 2026 and 2027: NSE moved monthly F&O expiry to the last Tuesday of the month (circular
+  // NSE/FAOP/68747, contracts from 01/09/2025); a holiday moves it to the previous trading day.
+  // 2026 comes from the NSE expireDts API; 2027 JAN/FEB are confirmed by it, the rest are the
+  // published last-Tuesday dates (NSE's 2027 holiday circular is still pending).
+  '27-JAN-2026', '24-FEB-2026', '30-MAR-2026', '28-APR-2026', '26-MAY-2026', '30-JUN-2026',
+  '28-JUL-2026', '25-AUG-2026', '29-SEP-2026', '27-OCT-2026', '23-NOV-2026', '29-DEC-2026',
+  '25-JAN-2027', '23-FEB-2027', '30-MAR-2027', '27-APR-2027', '25-MAY-2027', '29-JUN-2027',
+  '27-JUL-2027', '31-AUG-2027', '28-SEP-2027', '26-OCT-2027', '30-NOV-2027', '28-DEC-2027',
 ]);
 
 const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];

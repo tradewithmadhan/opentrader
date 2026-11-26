@@ -27,6 +27,20 @@ credential store per plugin version; upgrading does not carry the value over. Un
 `enctoken=empty`, history refuses to run and no ticks arrive, while symbol search still works from the public
 instrument CSV. The dev manifest deliberately uses a plain text field so this doesn't happen during development.
 
+## Verify a release download
+
+A plugin released outside OpenTrader's catalog is installed from file and shows a **not verified** warning: only
+packages signed with the app's own release key get that badge, and that key belongs to the app maintainers. You can
+still check that the zip you downloaded is the one published by comparing its SHA-256 with the checksum in the
+release notes:
+
+```
+Get-FileHash .\zerodhaenctoken-<version>.zip -Algorithm SHA256
+```
+
+A `.sig` file you make yourself does not grant the badge in the official app — the app checks it against its own
+key, not yours.
+
 ## Develop with the app running
 
 1. `python build.py dev` and install `dist/zerodhaenctoken-dev.zip` from **Settings > Plugins > Install from file**.
