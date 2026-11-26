@@ -36,6 +36,7 @@ Compare with `git diff upstream/main HEAD`.
 | `issues/fixed_expose-chart-primitives-to-scripts.md` | d1edcde7 Scripts: the bars in view, the chart type, drawings pinned to the pane<br>7218e3e9 oakscriptjs 0.20.0, lightweight-charts-indicators 0.27.0 | fork-only / no upstream history |
 | `issues/fixed_order-drag-modify-not-working.md` | 1085fca3 OpenAlgo 0.1.27: send broker.depth snapshots on upstream's protocol<br>84c88327 Rename fixed upstream issue drafts with fixed_ prefix | fork-only / no upstream history |
 | `issues/fixed_order-ticket-product-selection.md` | 84c88327 Rename fixed upstream issue drafts with fixed_ prefix | fork-only / no upstream history |
+| `issues/fixed_pass-symbol-metadata-to-scripts.md` | c70a9458 Scripts read every syminfo field and the symbol's dividends, splits and earnings | fork-only / no upstream history |
 | `issues/fixed_plugin-startup-data-not-loading.md` | 1085fca3 OpenAlgo 0.1.27: send broker.depth snapshots on upstream's protocol | fork-only / no upstream history |
 | `issues/fixed_script-session-corrections.md` | 84c88327 Rename fixed upstream issue drafts with fixed_ prefix | fork-only / no upstream history |
 | `issues/fixed_study-error-not-recalculated-on-symbol-change.md` | 1fcb3034 Studies ask for their other symbols again on another chart symbol, timeframe or inputs | fork-only / no upstream history |

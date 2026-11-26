@@ -28,6 +28,7 @@ export type SplitEvent = any;
 export type NewsItem = any;
 export type ChartAggregate = any;
 export type SecondAggregate = any;
+export type ChartTrade = any;
 export type TradeTick = any;
 export type DataStatus = any;
 export type History = any;
@@ -665,6 +666,7 @@ const LIVE_EVENTS: Record<string, (s: any, fn: (e: any) => void) => Promise<() =
   chartAggregate: (s, fn) => s.onChartAggregate((e: any) => fn({ payload: e })),
   secondAggregate: (s, fn) => s.onSecondAggregate((e: any) => fn({ payload: e })),
   tradeTick: (s, fn) => s.onTradeTick((e: any) => fn({ payload: e })),
+  chartTrade: (s, fn) => s.onChartTrade((e: any) => fn({ payload: e })),
 };
 
 async function bridgedEvent(name: string, fn: (e: any) => void): Promise<() => void> {
@@ -926,4 +928,5 @@ export const events = new Proxy(
   pluginEventsChanged: EventListen<PluginEventsChanged>;
   pluginFieldsChanged: EventListen<PluginFieldsChanged>;
   pluginScriptsChanged: EventListen<any>;
+  chartTrade: EventListen<ChartTrade>;
 } & Record<string, EventListen<any>>;
