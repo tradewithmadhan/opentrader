@@ -228,7 +228,11 @@ The plugin speaks **API 8** and uses the upstream features adopted in this fork:
   on the same five-minute cadence), grouped into sections by the report's `purpose`. **NSE Volume Gainers** and
   **NSE Corporate Announcements** (sections by `desc`) come from NSE's live feeds on the same cadence;
   **NSE Newly Listed** groups symbols first listed in the last 90 / 180 days from the cached listing CSVs (once a day);
-  **My Holdings — Upcoming Events** joins our holdings with the event calendar hourly. The instrument master supplies
+  **My Holdings — Upcoming Events** joins our holdings with the event calendar hourly. NSE's dated
+  `sec_list_<ddmmyyyy>.csv` supplies one list per price band (**NSE 2% / 5% / 10% Price band**), two alphabetical
+  halves for the 20% EQ series, **NSE 20% Price band SM**, and **NSE GSM STAGE** with sections per stage; because
+  that file describes the *next* day, the previous trading day's file is read (Monday uses Friday), once a day.
+  The instrument master supplies
   **NSE blue chips (sample)** and three index lists: **Indices** (sections *NSE Index* and *BSE Index*),
   **NSE Indices** and **BSE Indices** (one section each), built from all `type=index` rows — about 140 NSE and
   90 BSE indices in today's master. All are whole symbols, capped at 1000 per list, and sent only when the set

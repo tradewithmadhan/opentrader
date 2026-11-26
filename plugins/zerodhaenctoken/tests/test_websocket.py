@@ -324,6 +324,43 @@ class Api8(unittest.TestCase):
         finally:
             fake.close()
 
+    def test_price_band_and_gsm_watchlists(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.instruments.ensure()
+            csv_text = (
+                "Symbol,Series,Security Name,Band,Remarks\n"
+                "RELIANCE,EQ,RELIANCE INDUSTRIES,20,-\n"
+                "TCS,EQ,TATA CONSULTANCY SERVICES,20,-\n"
+                "NEWCO,SM,NEW CO,20,-\n"
+                "RELIANCE,EQ,RELIANCE INDUSTRIES,5,-\n"
+                "TCS,EQ,TATA CONSULTANCY SERVICES,10,-\n"
+                'NEWCO,SM,NEW CO,2,"GSM STAGE - 0"\n'
+            )
+            source._nse.get = lambda name, url=None, **kw: csv_text if name == "security_list" else ""
+            self.assertTrue(source._refresh_security_lists())
+            self.assertEqual(source.band_2_symbols, ["NSE:NEWCO"])
+            self.assertEqual(source.band_5_symbols, ["NSE:RELIANCE"])
+            self.assertEqual(source.band_10_symbols, ["NSE:TCS"])
+            self.assertEqual(source.band_20_eq1, ["NSE:RELIANCE"])
+            self.assertEqual(source.band_20_eq2, ["NSE:TCS"])
+            self.assertEqual(source.band_20_sm, ["NSE:NEWCO"])
+            self.assertEqual(source.gsm_sections,
+                             [{"name": "GSM STAGE - 0", "symbols": ["NSE:NEWCO"]}])
+            self.assertFalse(source._refresh_security_lists(), "one file per IST day")
+            self.assertTrue(source.send_watchlists())
+            sent = {w["id"]: w["name"] for w in app.sock.payloads("data.watchlists")[-1]["watchlists"]}
+            self.assertEqual(sent["zerodha-band-2"], "NSE 2% Price band")
+            self.assertEqual(sent["zerodha-band-20-eq-1"], "NSE 20% Price band EQ (1/2)")
+            self.assertEqual(sent["zerodha-band-20-eq-2"], "NSE 20% Price band EQ (2/2)")
+            self.assertEqual(sent["zerodha-band-20-sm"], "NSE 20% Price band SM")
+            self.assertEqual(sent["zerodha-gsm-stage"], "NSE GSM STAGE")
+        finally:
+            app.alive = False
+            fake.close()
+
     def test_four_dynamic_watchlists(self):
         fake = fake_kite.FakeKite()
         source = harness.make_source(fake)

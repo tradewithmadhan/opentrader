@@ -61,6 +61,20 @@ class NseReports(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
 
+    def test_security_list_url_previous_day_and_parser(self):
+        from datetime import date
+        self.assertEqual(nse.security_list_url(date(2026, 11, 25)),
+                         "https://nsearchives.nseindia.in/content/equities/sec_list_25112026.csv")
+        self.assertEqual(nse.previous_trading_day(date(2026, 11, 26)), date(2026, 11, 25))
+        self.assertEqual(nse.previous_trading_day(date(2026, 11, 30)), date(2026, 11, 27))
+        text = ('Symbol,Series,Security Name,Band,Remarks\n'
+                'RELIANCE,EQ,RELIANCE INDUSTRIES,20,-\n'
+                'NEWCO,SM,NEW CO,2,"GSM STAGE - 0"\n')
+        self.assertEqual(nse.parse_security_list(text), [
+            {"symbol": "RELIANCE", "series": "EQ", "band": "20", "remarks": "-"},
+            {"symbol": "NEWCO", "series": "SM", "band": "2", "remarks": "GSM STAGE - 0"},
+        ])
+
     def test_volume_gainers_and_announcements(self):
         self.assertIn("index=equities", nse.corporate_announcements_url("equities"))
         self.assertEqual(nse.parse_volume_gainers('{"data":[{"symbol":"RELIANCE"},{"symbol":"TCS"}]}'),

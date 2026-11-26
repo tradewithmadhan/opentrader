@@ -30,9 +30,11 @@ REPORTS = {
     "event_calendar": "https://www.nseindia.in/api/event-calendar",
     "volume_gainers": "https://www.nseindia.in/api/live-analysis-volume-gainers",
     "corporate_announcements": "https://www.nseindia.in/api/corporate-announcements",
+    "security_list": "https://nsearchives.nseindia.in/content/equities/sec_list_{}.csv",
 }
 EVENT_CALENDAR_URL = REPORTS["event_calendar"]
 CORPORATE_URL = REPORTS["corporate_announcements"]
+SECURITY_LIST_URL = REPORTS["security_list"]
 # The .com archive mirrors still answer on their own, but after a .in API call in the same session they can
 # return nothing. Keep .in as the common host and use these only if it fails.
 FALLBACKS = {
@@ -52,6 +54,7 @@ REPORT_HEADERS = {
                        "Referer": "https://www.nseindia.in/"},
     "corporate_announcements": {"Accept": "application/json,text/plain,*/*",
                                 "Referer": "https://www.nseindia.in/"},
+    "security_list": {"Accept": "text/csv,*/*", "Referer": HOME},
 }
 # Pages whose cookies the report hosts look for, tried in order until one sets them.
 WARM_URLS = (HOME, "https://www.nseindia.com/")
@@ -203,6 +206,35 @@ def parse_listings(text):
                 "face": row.get("FACE VALUE") or row.get("FACE_VALUE") or "",
                 "series": row.get("SERIES") or "",
             }
+    return out
+
+
+def security_list_url(day):
+    """The dated price-band CSV URL; `day` is a date, written ddmmyyyy as NSE names the file."""
+    return SECURITY_LIST_URL.format(day.strftime("%d%m%Y"))
+
+
+def previous_trading_day(day):
+    """The day before `day`, skipping Saturday and Sunday (Monday gives Friday)."""
+    previous = day - timedelta(days=1)
+    while previous.weekday() >= 5:
+        previous -= timedelta(days=1)
+    return previous
+
+
+def parse_security_list(text):
+    """The price-band CSV → {symbol, series, band, remarks} rows; band may be 'No Band'."""
+    out = []
+    for raw in csv.DictReader(io.StringIO(text)):
+        symbol = str(raw.get("Symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        out.append({
+            "symbol": symbol,
+            "series": str(raw.get("Series") or "").strip().upper(),
+            "band": str(raw.get("Band") or "").strip(),
+            "remarks": str(raw.get("Remarks") or "").strip(),
+        })
     return out
 
 

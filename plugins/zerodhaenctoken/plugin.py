@@ -36,7 +36,7 @@ from pathlib import Path
 import nse
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.6.8"
+PLUGIN_VERSION = "0.6.9"
 # Plugin API 8: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings),
 # 8 = data.symbolInfoChanged, plugin.toast and data.scripts.
@@ -941,6 +941,14 @@ class ZerodhaSource:
         self.holdings_event_sections = []  # our holdings that have an upcoming calendar event
         self._holdings_events_at = 0.0  # local join, refreshed hourly rather than every five minutes
         self._newly_listed_at = 0.0  # the listing CSVs are day-stamped, so once a day is enough
+        self._security_list_day = None  # IST day of the price-band CSV already read
+        self.band_2_symbols = []
+        self.band_5_symbols = []
+        self.band_10_symbols = []
+        self.band_20_eq1 = []
+        self.band_20_eq2 = []
+        self.band_20_sm = []
+        self.gsm_sections = []
         self._price_band_stop = threading.Event()
         self._price_band_thread = None
         self.company_details = True
@@ -1600,6 +1608,79 @@ class ZerodhaSource:
                  f"{len(sections)} purposes, {'CHANGED' if changed else 'unchanged'}", category="nse")
         return changed
 
+    def _refresh_security_lists(self):
+        """NSE's dated security list describes the NEXT day, so read the previous trading day's file."""
+        today = datetime.now(TZ_IST).date()
+        stamp = today.strftime("%Y-%m-%d")
+        if self._security_list_day == stamp:
+            return False
+        day = nse.previous_trading_day(today)
+        text = ""
+        for _ in range(7):
+            url = nse.security_list_url(day)
+            started = time.monotonic()
+            text = self._nse.get("security_list", url=url, timeout=8)
+            status, elapsed = self._nse.session.last_status, int((time.monotonic() - started) * 1000)
+            if text:
+                self.log(f"NSE price bands: read {day:%d-%m-%Y} list (HTTP {status}, {elapsed}ms)",
+                         category="nse")
+                break
+            self.log(f"NSE price bands: no list for {day:%d-%m-%Y} (HTTP {status or 'no response'}) "
+                     f"— trying an earlier trading day", "warn", "nse")
+            day = nse.previous_trading_day(day)
+        if not text:
+            return False
+        master = self.instruments.rows
+        if not master:
+            self.log("NSE price bands: instrument master not loaded yet — validation deferred", category="nse")
+            return False
+        parsed = nse.parse_security_list(text)
+        bands, gsm = {"2": [], "5": [], "10": [], "20": []}, []
+        for row in parsed:
+            if "GSM" in row["remarks"].upper():
+                gsm.append(row)
+            if row["band"] in bands:
+                bands[row["band"]].append(row)
+
+        plain = lambda band: self._resolve_nse_symbols([r["symbol"] for r in bands[band]], master)[0][:1000]
+        band2, band5, band10 = plain("2"), plain("5"), plain("10")
+        # Ordinary EQ is the only class above 1000; split it alphabetically into two halves.
+        eq_names = sorted({r["symbol"] for r in bands["20"] if r["series"] == "EQ"})
+        eq_map = self._resolve_nse_map(eq_names, master)
+        eq_all = [eq_map[n] for n in eq_names if n in eq_map]
+        middle = (len(eq_all) + 1) // 2
+        eq1, eq2 = eq_all[:middle], eq_all[middle:]
+        sm_names = sorted({r["symbol"] for r in bands["20"] if r["series"] == "SM"})
+        eq_sm = self._resolve_nse_symbols(sm_names, master)[0][:1000]
+
+        gsm_map = self._resolve_nse_map({r["symbol"] for r in gsm}, master)
+        stages = {}
+        for row in gsm:
+            symbol = gsm_map.get(row["symbol"])
+            if not symbol:
+                continue
+            names = stages.setdefault(row["remarks"] or "GSM", [])
+            if symbol not in names:
+                names.append(symbol)
+        gsm_sections = [{"name": stage, "symbols": sorted(names)[:1000]}
+                        for stage, names in sorted(stages.items())]
+
+        with self.lock:
+            changed = (band2 != self.band_2_symbols or band5 != self.band_5_symbols
+                       or band10 != self.band_10_symbols or eq1 != self.band_20_eq1
+                       or eq2 != self.band_20_eq2 or eq_sm != self.band_20_sm
+                       or gsm_sections != self.gsm_sections)
+            if changed:
+                self.band_2_symbols, self.band_5_symbols, self.band_10_symbols = band2, band5, band10
+                self.band_20_eq1, self.band_20_eq2 = eq1, eq2
+                self.band_20_sm, self.gsm_sections = eq_sm, gsm_sections
+            self._security_list_day = stamp
+        self.log(f"NSE price bands {day:%d-%m-%Y}: 2%={len(band2)} 5%={len(band5)} 10%={len(band10)} "
+                 f"20% EQ={len(eq_all)} in 2 lists, SM={len(eq_sm)}; "
+                 f"GSM={sum(len(s['symbols']) for s in gsm_sections)} in {len(gsm_sections)} stages, "
+                 f"{'CHANGED' if changed else 'unchanged'}", category="nse")
+        return changed
+
     def _price_band_loop(self):
         """Refresh the NSE lists on start and every five minutes; send watchlists only when one changed."""
         while not self._price_band_stop.is_set():
@@ -1609,6 +1690,7 @@ class ZerodhaSource:
                 changed = self._refresh_volume_gainers() or changed
                 changed = self._refresh_corporate_announcements() or changed
                 changed = self._refresh_newly_listed() or changed
+                changed = self._refresh_security_lists() or changed
                 changed = self._refresh_holdings_events() or changed
                 if changed:
                     self.push_watchlists()
@@ -1718,6 +1800,7 @@ class ZerodhaSource:
             self._refresh_volume_gainers()
             self._refresh_corporate_announcements()
             self._refresh_newly_listed()
+            self._refresh_security_lists()
             self._refresh_holdings_events()
             if self.plugin is not None and self.plugin.alive:
                 self.toast("info", f"Pre-data ready — {len(self.instruments.rows)} instruments and NSE listings cached. "
@@ -2583,6 +2666,20 @@ class ZerodhaSource:
         if self.holdings_event_sections:
             lists.append({"id": "zerodha-holdings-events", "name": "My Holdings — Upcoming Events",
                           "symbols": [], "sections": self.holdings_event_sections})
+        bands = (
+            ("zerodha-band-2", "NSE 2% Price band", self.band_2_symbols),
+            ("zerodha-band-5", "NSE 5% Price band", self.band_5_symbols),
+            ("zerodha-band-10", "NSE 10% Price band", self.band_10_symbols),
+            ("zerodha-band-20-eq-1", "NSE 20% Price band EQ (1/2)", self.band_20_eq1),
+            ("zerodha-band-20-eq-2", "NSE 20% Price band EQ (2/2)", self.band_20_eq2),
+            ("zerodha-band-20-sm", "NSE 20% Price band SM", self.band_20_sm),
+        )
+        for wid, name, symbols in bands:
+            if symbols:
+                lists.append({"id": wid, "name": name, "symbols": list(symbols)[:1000], "sections": []})
+        if self.gsm_sections:
+            lists.append({"id": "zerodha-gsm-stage", "name": "NSE GSM STAGE",
+                          "symbols": [], "sections": self.gsm_sections})
         rows = self.instruments.rows
         if not rows:
             return lists
