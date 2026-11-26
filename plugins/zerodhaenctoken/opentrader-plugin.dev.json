@@ -1,7 +1,7 @@
 {
   "id": "zerodhaenctoken",
   "name": "Zerodha (enctoken, development)",
-  "version": "0.6.6-dev",
+  "version": "0.6.8-dev",
   "publisher": "tradewithmadhan",
   "description": "The Zerodha enctoken plugin while it is developed: you run plugin.py yourself, the app writes where to connect.",
   "api": 8,
@@ -31,6 +31,7 @@
     { "key": "maxQuotesPerSecond", "label": "Maximum chart quote updates per second", "type": "text", "default": "200" },
     { "key": "logApi", "label": "Log REST/API to file", "type": "bool", "default": "true" },
     { "key": "logWs", "label": "Log WebSocket to file", "type": "bool", "default": "true" },
+    { "key": "logNse", "label": "Log NSE requests to file", "type": "bool", "default": "true" },
     { "key": "toastPosition", "label": "Toast position", "type": "select", "default": "top-right",
       "options": [
         { "value": "top-left", "label": "Top left" }, { "value": "top-center", "label": "Top center" },

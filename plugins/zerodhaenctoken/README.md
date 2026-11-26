@@ -158,7 +158,20 @@ For NSE symbols the depth is tightened per symbol from NSE's official listing li
 `SME_EQUITY_L.csv`, fetched once a day and cached): a stock listed 30 days ago declares 30 days of history instead
 of 30 years, so the app never asks for years before its listing. Symbols without a listing row, and other
 exchanges, use the configured maxima. The two listing lists are small and their cache is pruned with the other
-day-stamped files.
+day-stamped files. `nse.py` owns all NSE HTTP access: it warms `https://www.nseindia.in/` once for its cookies and
+reuses that session for every `.in` report in its `REPORTS` registry, retrying with a fresh session on a refusal.
+Adding another NSE report is one registry entry, not another HTTP call in `plugin.py`.
+
+The live **Price Band Hitters** endpoint is polled every five minutes on the same session; its tickers are offered as
+a watchlist named *NSE Price Band Hitters* and pushed again whenever the set changes. Each ticker is validated
+against our instrument master. Master rows keep Kite's `tradingsymbol` as `ticker` for its own API calls and add a
+`symbol` field with the suffix removed (`STLTECH-BE` → `STLTECH`), which is what the app sees: search results and
+the watchlist use clean symbols, and both `NSE:STLTECH` and `NSE:STLTECH-BE` resolve to the same instrument. This is
+the convention for new features: **`symbol` is the app-facing identity, `ticker` stays Kite's own tradingsymbol**, so
+a report from any source can be matched to an instrument and shown to the user without Kite's series suffix. Unmatched
+tickers are skipped. Every NSE check — success or
+failure, with HTTP status, elapsed time and a few example tickers — is written to `zerodha-nse.log` in the plugin
+data folder (toggle with **Log NSE requests to file**).
 
 To avoid a burst of Kite calls (rate limits), each `data.bars` request returns only the **newest chunk** of the
 asked window — one day call (≤1900 days) or one intraday call (≤30 days). The protocol lets a plugin return fewer,
@@ -196,9 +209,16 @@ ticker-prefix → ticker-substring → name/description, spread across the confi
 The plugin speaks **API 8** and uses the upstream features adopted in this fork:
 
 - **Watchlists** (API 4): **Holdings (zerodha)** is built from today's delivery holdings and refreshed whenever they
-  change; two sample lists — NSE blue chips and indices — come from the instrument master. All are whole symbols,
-  capped at 1000 per list, and sent only when the set changes (with a toast). Replace `watchlists()` (and
-  `SAMPLE_BLUE_CHIPS` / `SAMPLE_INDICES`) with your own sets.
+  change. **NSE Price Band Hitters** comes from NSE's live report (see above); **NSE all Forthcomming** and
+  **NSE Today Events** come from NSE's event calendar (all forthcoming rows, and today's equities + SME rows,
+  on the same five-minute cadence), grouped into sections by the report's `purpose`. **NSE Volume Gainers** and
+  **NSE Corporate Announcements** (sections by `desc`) come from NSE's live feeds on the same cadence;
+  **NSE Newly Listed** groups symbols first listed in the last 90 / 180 days from the cached listing CSVs (once a day);
+  **My Holdings — Upcoming Events** joins our holdings with the event calendar hourly. The instrument master supplies
+  **NSE blue chips (sample)** and three index lists: **Indices** (sections *NSE Index* and *BSE Index*),
+  **NSE Indices** and **BSE Indices** (one section each), built from all `type=index` rows — about 140 NSE and
+  90 BSE indices in today's master. All are whole symbols, capped at 1000 per list, and sent only when the set
+  changes (with a toast). Replace `watchlists()` (and `SAMPLE_BLUE_CHIPS`) with your own sets.
 - **Events** (API 5): `data.events` answers with Kite's corporate actions in the app's shape — dividends with an
   `amount`, bonuses and splits as `from`/`to` (a 1:1 bonus is `1 → 2`). Earnings are not supplied by the personal
   API; add them in `events_for()` when you have a source. Events are fetched in 3-year chunks, cached per day and

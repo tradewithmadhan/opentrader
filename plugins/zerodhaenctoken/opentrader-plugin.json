@@ -1,7 +1,7 @@
 {
   "id": "zerodhaenctoken",
   "name": "Zerodha (enctoken)",
-  "version": "0.6.6",
+  "version": "0.6.8",
   "publisher": "tradewithmadhan",
   "description": "Your Zerodha Kite account's market data on the charts: instruments, history and live ticks from the personal API and the Kite ticker, using a browser enctoken.",
   "api": 8,
@@ -43,6 +43,8 @@
       "help": "Writes settings, history, books and order commands to zerodha-api.log in the plugin data folder. The enctoken is never written." },
     { "key": "logWs", "label": "Log WebSocket to file", "type": "bool", "default": "true",
       "help": "Writes stream connect/reconnect and subscription summary lines to zerodha-ws.log." },
+    { "key": "logNse", "label": "Log NSE requests to file", "type": "bool", "default": "true",
+      "help": "Writes every NSE report check (listing CSVs and Price Band Hitters, with HTTP status and timing) to zerodha-nse.log." },
     { "key": "toastPosition", "label": "Toast position", "type": "select", "default": "top-right",
       "options": [
         { "value": "top-left", "label": "Top left" }, { "value": "top-center", "label": "Top center" },

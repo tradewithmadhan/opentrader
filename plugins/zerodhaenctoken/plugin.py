@@ -33,8 +33,10 @@ import urllib.parse
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import nse
+
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.6.6"
+PLUGIN_VERSION = "0.6.8"
 # Plugin API 8: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings),
 # 8 = data.symbolInfoChanged, plugin.toast and data.scripts.
@@ -73,8 +75,8 @@ KITE_VERSION = "3.0.0"
 COMPANY_API = "https://api.dharun.dev/v1"
 # NSE's official listing lists carry a DATE OF LISTING per symbol, used to cap how far back the app asks for a
 # symbol that has not existed that long. The SME file has slightly different headers and 2-digit years.
-NSE_EQUITY_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
-NSE_SME_LIST_URL = "https://nsearchives.nseindia.com/emerge/corporates/content/SME_EQUITY_L.csv"
+NSE_EQUITY_LIST_URL = nse.REPORTS["equity"]
+NSE_SME_LIST_URL = nse.REPORTS["sme"]
 # How far back the app may scroll, per bar family. This is the `history` value returned from data.symbolInfo;
 # it is NOT the per-request Kite chunk size (that is historyDaysMinute/historyDaysDaily, set in the manifest).
 #
@@ -95,19 +97,20 @@ NSE_SME_LIST_URL = "https://nsearchives.nseindia.com/emerge/corporates/content/S
 # Week/month charts use the day family; 3m..240m charts use the minute family.
 HISTORY_DAYS_MAX = {"minute": 10950, "day": 10950}
 
-# Plugin API 4/6 extension points. Two sample watchlists are offered from the master; replace or extend these
-# with your own lists, and add any extra fields or series you can source here.
+# Plugin API 4/6 extension points. A sample blue-chip list plus the master's NSE/BSE indices are offered as
+# watchlists; replace or extend these with your own lists, and add extra fields or series you can source here.
 SAMPLE_BLUE_CHIPS = ("RELIANCE", "TCS", "INFOSYS", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL", "ITC",
                      "KOTAKBANK", "LICI", "LT", "HCLTECH", "ASIANPAINT", "MARUTI", "TITAN", "ULTRACEMCO",
                      "SUNPHARMA", "BAJFINANCE", "NESTLEIND", "WIPRO", "ONGC", "TATAMOTORS", "ADANIENT",
                      "M&M", "TATASTEEL", "JSWSTEEL", "POWERGRID", "NTPC", "COALINDIA", "DRREDDY")
-SAMPLE_INDICES = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "INDIAVIX", "SENSEX", "BANKEX")
 EXTRA_FIELDS = []   # more {"name":…, "value":…} instrument values, added to every symbol's fields
 EXTRA_SERIES = []   # more extra series names, added to every symbol's series (serve <ticker>_<name>)
 # A sample extra series: five values in one bar's OHLCV slots, read by CustomOne_5Values with one request.security.
 # Declared only for these symbols so a stray <symbol>_CUSTOMONE on another symbol gets no made-up numbers.
 CUSTOMONE_SYMBOLS = {"NSE_INDEX:NIFTY"}
 CUSTOMONE_NAME = "CUSTOMONE"
+# NSE's live price-band-hitter list becomes a watchlist, refreshed on this cadence.
+PRICE_BAND_POLL_SEC = 300
 
 # A brief empty broker.watchQuote/watchDepth is ignored: the app re-sends the watch on each chart switch, and
 # dropping full mode for that instant floods Kite with mode frames and blanks the ticket's bid/ask.
@@ -313,6 +316,19 @@ def plugin_data_dir():
     return Path(env) if env else Path(local_app_data()) / "OpenTraderPlugins" / PLUGIN_ID
 
 
+def clean_symbol(ticker, exchange):
+    """The symbol users type and other reports use, from Kite's tradingsymbol.
+
+    Kite's NSE/BSE cash rows carry a series suffix (`STLTECH-BE`, `ABH-SM`, `IEML-RE1-ST`) that no other
+    report has. Keep `ticker` for Kite's own calls and expose the bare name as `symbol` to the app.
+    """
+    if exchange in ("NSE", "BSE") and "-" in ticker:
+        base, _, suffix = ticker.rpartition("-")
+        if base and 1 <= len(suffix) <= 3 and suffix.isalnum():
+            return base.upper()
+    return ticker.upper()
+
+
 def parse_master_csv(text):
     """Kite's public instrument CSV → rows keyed by (app exchange, ticker).
 
@@ -369,7 +385,7 @@ def parse_master_csv(text):
         except ValueError:
             continue
         out.append({
-            "exchange": app_exchange, "ticker": ticker, "token": token,
+            "exchange": app_exchange, "ticker": ticker, "token": token, "symbol": clean_symbol(ticker, app_exchange),
             "kite_exchange": kite_exchange, "name": name, "description": " ".join(parts),
             "type": kind, "tick": tick, "lot": lot, "expiry": expiry,
         })
@@ -445,7 +461,15 @@ class Instruments:
                     pass
             with self.lock:
                 self.rows = rows
-                self.by_key = {(r["exchange"], r["ticker"]): r for r in rows}
+                # A cache written before `symbol` existed is filled in memory; no 30 MB re-download for this.
+                for r in rows:
+                    if not r.get("symbol"):
+                        r["symbol"] = clean_symbol(r["ticker"], r["exchange"])
+                self.by_key = {}
+                for r in rows:  # Kite's ticker wins a collision with a bare symbol of another row
+                    self.by_key.setdefault((r["exchange"], r["ticker"]), r)
+                for r in rows:
+                    self.by_key.setdefault((r["exchange"], r["symbol"]), r)
                 self.by_token = {r["token"]: r for r in rows}
                 # Hot path: the tick thread reads this on every packet without taking the instruments lock.
                 self.token_meta = {r["token"]: (f"{r['exchange']}:{r['ticker']}", r["tick"]) for r in rows}
@@ -477,6 +501,17 @@ class Instruments:
                 return None
             return self.by_key.get((exchange.upper(), symbol.upper()))
 
+    def clean_of(self, whole):
+        """The bare app symbol of a whole Kite ticker, when it differs (STLTECH-BE → NSE:STLTECH)."""
+        exchange, sep, ticker = whole.partition(":")
+        if not sep:
+            return None
+        with self.lock:
+            row = self.by_key.get((exchange.upper(), ticker.upper()))
+        if not row or row["symbol"].upper() == ticker.upper():
+            return None
+        return f"{exchange}:{row['symbol']}"
+
     def token_row(self, token):
         with self.lock:
             return self.by_token.get(int(token))
@@ -499,10 +534,10 @@ class Instruments:
                 return self.catalog
             catalog = []
             for r in self.rows:
-                ticker_up, name_up = r["ticker"].upper(), r["name"].upper()
+                symbol_up, name_up = r["symbol"].upper(), r["name"].upper()
                 description_up = r["description"].upper()
-                catalog.append((ticker_up, name_up, f"{r['exchange']}:{r['ticker']}", r["type"],
-                                r["description"], f"{ticker_up} {name_up} {description_up}"))
+                catalog.append((symbol_up, name_up, f"{r['exchange']}:{r['symbol']}", r["type"],
+                                r["description"], f"{symbol_up} {r['ticker'].upper()} {name_up} {description_up}"))
             self.catalog = catalog
             return catalog
 
@@ -896,6 +931,18 @@ class ZerodhaSource:
         self._listings = {}  # bare symbol → listing row
         self._listings_day = None
         self._listings_loading = None  # single-flight event for the two public CSVs
+        self._nse = nse.Client(timeout=5)  # one session for every NSE report; never logs a token (NSE needs none)
+        self.price_band_symbols = []  # whole NSE symbols from the latest price-band-hitter report
+        self.nse_upcoming_sections = []  # all forthcoming calendar rows, grouped by purpose
+        self.nse_today_sections = []  # today's calendar rows, grouped by purpose
+        self.volume_gainers_symbols = []  # NSE volume gainers
+        self.corporate_announcements_sections = []  # latest announcements, grouped by purpose
+        self.newly_listed_sections = []  # 90 / 180 day listings from the cached listing CSVs
+        self.holdings_event_sections = []  # our holdings that have an upcoming calendar event
+        self._holdings_events_at = 0.0  # local join, refreshed hourly rather than every five minutes
+        self._newly_listed_at = 0.0  # the listing CSVs are day-stamped, so once a day is enough
+        self._price_band_stop = threading.Event()
+        self._price_band_thread = None
         self.company_details = True
         self.toast_position = "top-right"  # where this plugin's toasts ask to appear
         self.sample_toasts = False  # one sample of each level on start, for testing plugin.toast
@@ -948,7 +995,7 @@ class ZerodhaSource:
                     removed += 1
                 except OSError:
                     pass
-            for path in root.glob("nse-listings-*.json"):
+            for path in root.glob("nse-*.json"):
                 day_text = "-".join(path.stem.split("-")[-3:])
                 try:
                     day = date.fromisoformat(day_text)
@@ -1016,12 +1063,13 @@ class ZerodhaSource:
         return s.replace(self.enctoken, "…") if self.enctoken and self.enctoken in s else s
 
     def _log_enabled(self, category):
-        key = {"api": "logApi", "ws": "logWs", "debug": "logDebug"}.get(category, "logApi")
+        key = {"api": "logApi", "ws": "logWs", "debug": "logDebug", "nse": "logNse"}.get(category, "logApi")
         default = "false" if category == "debug" else "true"
         return str(self.settings.get(key, default)).strip().lower() == "true"
 
     def _log_path(self, category):
-        return plugin_data_dir() / ("zerodha-ws.log" if category == "ws" else "zerodha-api.log")
+        return plugin_data_dir() / {"ws": "zerodha-ws.log", "nse": "zerodha-nse.log"}.get(
+            category, "zerodha-api.log")
 
     def _write_log(self, category, line):
         """Append to a per-category file with a rolling ~1 MB cap. Logging must never break the plugin."""
@@ -1304,6 +1352,271 @@ class ZerodhaSource:
                 self.toast("info", "Plugin watchlists updated from the remote manifest")
         return True
 
+    @staticmethod
+    def _resolve_nse_map(names, rows):
+        """Bare NSE tickers → clean app symbols from our master.
+
+        Kite stores many cash symbols as NAME-SM / NAME-BE / NAME-ST while NSE's reports use bare names;
+        match exact first, then the ticker with its last series suffix removed.
+        """
+        exact = {r["ticker"].upper(): r for r in rows if r["exchange"] == "NSE"}
+        prefixed = {}
+        for r in rows:
+            if r["exchange"] == "NSE" and "-" in r["ticker"]:
+                prefixed.setdefault(r["ticker"].upper().rsplit("-", 1)[0], r)
+        out = {}
+        for name in names:
+            row = exact.get(name) or prefixed.get(name)
+            if row:
+                out[name] = f"NSE:{row['symbol']}"
+        return out
+
+    def _resolve_nse_symbols(self, names, rows):
+        """Bare tickers → clean symbols, with the number that could not be resolved."""
+        found = self._resolve_nse_map(names, rows)
+        return [found[n] for n in names if n in found][:1000], len(names) - len(found)
+
+    def _refresh_price_band(self):
+        """Read NSE's live price-band-hitter report and keep its tickers for the watchlist."""
+        started = time.monotonic()
+        url = nse.REPORTS.get("price_band_hitters", "")
+        text = self._nse.get("price_band_hitters", timeout=8)
+        status = self._nse.session.last_status
+        elapsed = int((time.monotonic() - started) * 1000)
+        if not text:
+            self.log(f"Price Band Hitters: check FAILED — no body from {url} "
+                     f"(HTTP {status or 'no response'}, {elapsed}ms)", "warn", "nse")
+            return False
+        hitters = nse.parse_price_band_hitters(text)
+        if not hitters:
+            self.log(f"Price Band Hitters: check FAILED — no tickers parsed from {url} "
+                     f"(HTTP {status}, {elapsed}ms)", "warn", "nse")
+            return False
+        rows = self.instruments.rows
+        if not rows:
+            self.log(f"Price Band Hitters: {len(hitters)} tickers from NSE, instrument master not loaded yet "
+                     f"— validation deferred (HTTP {status}, {elapsed}ms)", category="nse")
+            return False
+        symbols, skipped = self._resolve_nse_symbols(hitters, rows)
+        if not symbols:
+            self.log(f"Price Band Hitters: check FAILED — none of the {len(hitters)} tickers is an NSE symbol "
+                     f"in our instrument master (HTTP {status}, {elapsed}ms)", "warn", "nse")
+            return False
+        with self.lock:
+            changed = symbols != self.price_band_symbols
+            if changed:
+                self.price_band_symbols = symbols
+        state = "CHANGED" if changed else "unchanged"
+        example = ", ".join(symbols[:5])
+        self.log(f"Price Band Hitters: {len(symbols)} validated symbols, {state} "
+                 f"({skipped} skipped — not in our NSE master; "
+                 f"HTTP {status}, {elapsed}ms; e.g. {example})", category="nse")
+        return changed
+
+    def _refresh_nse_calendars(self):
+        """Two watchlists from NSE's event calendar: all forthcoming, and today's, equities + SME."""
+        rows = self.instruments.rows
+        if not rows:
+            self.log("NSE event calendar: instrument master not loaded yet — validation deferred", category="nse")
+            return False
+        day = datetime.now(TZ_IST).strftime("%d-%m-%Y")
+        groups = (
+            ("NSE all Forthcomming", "nse_upcoming_sections",
+             (nse.event_calendar_url(), nse.event_calendar_url(index="sme"))),
+            ("NSE Today Events", "nse_today_sections",
+             (nse.event_calendar_url(index="equities", from_date=day, to_date=day),
+              nse.event_calendar_url(index="sme", from_date=day, to_date=day))),
+        )
+        changed_any = False
+        for label, field, urls in groups:
+            events = []
+            seen = set()
+            for url in urls:
+                started = time.monotonic()
+                text = self._nse.get("event_calendar", url=url, timeout=8)
+                status = self._nse.session.last_status
+                elapsed = int((time.monotonic() - started) * 1000)
+                if not text:
+                    self.log(f"{label}: check FAILED — no body from {url} "
+                             f"(HTTP {status or 'no response'}, {elapsed}ms)", "warn", "nse")
+                    continue
+                for event in nse.event_calendar_rows(text):
+                    key = (event["symbol"], event["purpose"])
+                    if key not in seen:
+                        seen.add(key)
+                        events.append(event)
+            if not events:
+                continue
+            found = self._resolve_nse_map({e["symbol"] for e in events}, rows)
+            grouped = {}
+            for event in events:
+                symbol = found.get(event["symbol"])
+                if not symbol:
+                    continue
+                names = grouped.setdefault(event["purpose"], [])
+                if symbol not in names:
+                    names.append(symbol)
+            sections = [{"name": purpose, "symbols": sorted(names)[:1000]}
+                        for purpose, names in sorted(grouped.items())]
+            sections = sections[:1000]
+            total = sum(len(s["symbols"]) for s in sections)
+            skipped = sum(1 for e in events if e["symbol"] not in found)
+            with self.lock:
+                changed = sections != getattr(self, field)
+                if changed:
+                    setattr(self, field, sections)
+            changed_any = changed or changed_any
+            self.log(f"{label}: {total} validated symbols in {len(sections)} purposes, "
+                     f"{'CHANGED' if changed else 'unchanged'} "
+                     f"({skipped} skipped — not in our NSE master; "
+                     f"e.g. {', '.join(sorted(found.values())[:5])})", category="nse")
+        return changed_any
+
+    def _refresh_volume_gainers(self):
+        """NSE's volume-gainers list, validated against our master."""
+        started = time.monotonic()
+        text = self._nse.get("volume_gainers", timeout=8)
+        status, elapsed = self._nse.session.last_status, int((time.monotonic() - started) * 1000)
+        if not text:
+            self.log(f"NSE Volume Gainers: check FAILED — no body "
+                     f"(HTTP {status or 'no response'}, {elapsed}ms)", "warn", "nse")
+            return False
+        rows = self.instruments.rows
+        if not rows:
+            self.log("NSE Volume Gainers: instrument master not loaded yet — validation deferred", category="nse")
+            return False
+        symbols, skipped = self._resolve_nse_symbols(nse.parse_volume_gainers(text), rows)
+        with self.lock:
+            changed = symbols != self.volume_gainers_symbols
+            if changed:
+                self.volume_gainers_symbols = symbols
+        self.log(f"NSE Volume Gainers: {len(symbols)} validated symbols, "
+                 f"{'CHANGED' if changed else 'unchanged'} ({skipped} skipped; HTTP {status}, {elapsed}ms)"
+                 f"{'; e.g. ' + ', '.join(symbols[:5]) if symbols else ''}", category="nse")
+        return changed
+
+    def _refresh_corporate_announcements(self):
+        """Latest NSE announcements (equities + SME), grouped by the announcement's purpose."""
+        events, seen = [], set()
+        for index in ("equities", "sme"):
+            url = nse.corporate_announcements_url(index)
+            started = time.monotonic()
+            text = self._nse.get("corporate_announcements", url=url, timeout=8)
+            status, elapsed = self._nse.session.last_status, int((time.monotonic() - started) * 1000)
+            if not text:
+                self.log(f"NSE Corporate Announcements: check FAILED for {index} — no body "
+                         f"(HTTP {status or 'no response'}, {elapsed}ms)", "warn", "nse")
+                continue
+            for event in nse.parse_corporate_announcements(text):
+                key = (event["symbol"], event["purpose"], event["date"])
+                if key not in seen:
+                    seen.add(key)
+                    events.append(event)
+        rows = self.instruments.rows
+        if not rows or not events:
+            return False
+        found = self._resolve_nse_map({e["symbol"] for e in events}, rows)
+        grouped = {}
+        for event in events:
+            symbol = found.get(event["symbol"])
+            if not symbol:
+                continue
+            names = grouped.setdefault(event["purpose"], [])
+            if symbol not in names:
+                names.append(symbol)
+        sections = [{"name": purpose, "symbols": sorted(names)[:1000]}
+                    for purpose, names in sorted(grouped.items())][:1000]
+        with self.lock:
+            changed = sections != self.corporate_announcements_sections
+            if changed:
+                self.corporate_announcements_sections = sections
+        total = sum(len(s["symbols"]) for s in sections)
+        skipped = sum(1 for e in events if e["symbol"] not in found)
+        self.log(f"NSE Corporate Announcements: {total} validated symbols in {len(sections)} purposes, "
+                 f"{'CHANGED' if changed else 'unchanged'} ({skipped} skipped)", category="nse")
+        return changed
+
+    def _refresh_newly_listed(self):
+        """Symbols first listed in the last 90 / 180 days, from today's cached listing CSVs."""
+        now_mono = time.monotonic()
+        if now_mono - self._newly_listed_at < 86400:
+            return False
+        day = datetime.now(TZ_IST).strftime("%Y-%m-%d")
+        path = plugin_data_dir() / "cache" / f"nse-listings-{day}.json"
+        try:
+            with open(path, encoding="utf-8") as handle:
+                listings = json.load(handle)
+        except (OSError, ValueError):
+            return False
+        rows = self.instruments.rows
+        if not rows or not listings:
+            return False
+        self._newly_listed_at = now_mono
+        now = time.time()
+        sections = []
+        for label, days in (("Last 90 days", 90), ("Last 180 days", 180)):
+            names = sorted(k for k, v in listings.items()
+                           if v.get("date") and now - v["date"] <= days * 86400)
+            symbols, _ = self._resolve_nse_symbols(names, rows)
+            if symbols:
+                sections.append({"name": label, "symbols": symbols})
+        with self.lock:
+            changed = sections != self.newly_listed_sections
+            if changed:
+                self.newly_listed_sections = sections
+        self.log(f"NSE Newly Listed: {sum(len(s['symbols']) for s in sections)} symbols in "
+                 f"{len(sections)} windows, {'CHANGED' if changed else 'unchanged'}", category="nse")
+        return changed
+
+    def _refresh_holdings_events(self):
+        """Our holdings that appear in the upcoming event calendar, grouped by purpose (local join)."""
+        now_mono = time.monotonic()
+        if now_mono - self._holdings_events_at < 3600:
+            return False
+        self._holdings_events_at = now_mono
+        rows = self.instruments.rows
+        if not rows:
+            return False
+        held = set()
+        with self.lock:
+            holdings = list(self.holdings)
+        for holding in holdings:
+            symbol = holding.get("symbol")
+            if not isinstance(symbol, str) or not symbol:
+                continue
+            row = self.instruments.row(symbol)
+            exchange, _, ticker = symbol.partition(":")
+            held.add(f"{exchange}:{row['symbol'] if row else ticker}".upper())
+        sections = []
+        for section in self.nse_upcoming_sections:
+            symbols = [s for s in section["symbols"] if s.upper() in held]
+            if symbols:
+                sections.append({"name": section["name"], "symbols": symbols})
+        with self.lock:
+            changed = sections != self.holdings_event_sections
+            if changed:
+                self.holdings_event_sections = sections
+        self.log(f"My Holdings upcoming events: {sum(len(s['symbols']) for s in sections)} in "
+                 f"{len(sections)} purposes, {'CHANGED' if changed else 'unchanged'}", category="nse")
+        return changed
+
+    def _price_band_loop(self):
+        """Refresh the NSE lists on start and every five minutes; send watchlists only when one changed."""
+        while not self._price_band_stop.is_set():
+            try:
+                changed = self._refresh_price_band()
+                changed = self._refresh_nse_calendars() or changed
+                changed = self._refresh_volume_gainers() or changed
+                changed = self._refresh_corporate_announcements() or changed
+                changed = self._refresh_newly_listed() or changed
+                changed = self._refresh_holdings_events() or changed
+                if changed:
+                    self.push_watchlists()
+            except Exception as e:  # noqa: BLE001 - an NSE failure must never break the plugin
+                self.log(f"NSE reports not read: {self.clean(str(e))}", "warn", "nse")
+            if self._price_band_stop.wait(PRICE_BAND_POLL_SEC):
+                break
+
     def _script_poll_loop(self):
         """Check both optional manifest files at one interval; no changes means no notification."""
         while not self._script_stop.is_set():
@@ -1382,6 +1695,11 @@ class ZerodhaSource:
             self._script_poll_thread = threading.Thread(target=self._script_poll_loop, daemon=True,
                                                         name="RemoteScripts")
             self._script_poll_thread.start()
+        if self._price_band_thread is None or not self._price_band_thread.is_alive():
+            self._price_band_stop = threading.Event()
+            self._price_band_thread = threading.Thread(target=self._price_band_loop, daemon=True,
+                                                      name="PriceBandHitters")
+            self._price_band_thread.start()
         if self.sample_toasts and not self._sample_toasts_sent:
             self._sample_toasts_sent = True
             self.toast("info", "Sample info toast from the Zerodha plugin")
@@ -1395,6 +1713,12 @@ class ZerodhaSource:
                 self.toast("info", "Downloading instrument master — first start can take a moment")
             self.instruments.ensure()
             self._load_listings()  # warm both caches before the app's symbolInfo burst arrives
+            self._refresh_price_band()  # the watchlists are ready with the app's first symbolInfo burst
+            self._refresh_nse_calendars()
+            self._refresh_volume_gainers()
+            self._refresh_corporate_announcements()
+            self._refresh_newly_listed()
+            self._refresh_holdings_events()
             if self.plugin is not None and self.plugin.alive:
                 self.toast("info", f"Pre-data ready — {len(self.instruments.rows)} instruments and NSE listings cached. "
                                    f"You can use the app.")
@@ -1661,42 +1985,7 @@ class ZerodhaSource:
             self._write_profile_cache()
         return profile
 
-    # ── per-symbol history depth from NSE's listing lists ──
-    @staticmethod
-    def _public_csv(url, timeout=20):
-        """A public CSV GET with the same browser headers; '' on any problem."""
-        parts = urllib.parse.urlsplit(url)
-        if not parts.hostname:
-            return ""
-        secure = parts.scheme == "https"
-        conn = (http.client.HTTPSConnection(parts.hostname, parts.port or 443, timeout=timeout) if secure
-                else http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=timeout))
-        try:
-            headers = dict(BROWSER_HEADERS)
-            headers.update({"Accept": "text/csv,*/*", "Referer": "https://www.nseindia.com/"})
-            conn.request("GET", parts.path or "/", headers=headers)
-            r = conn.getresponse()
-            raw = r.read()
-            if (r.getheader("Content-Encoding") or "").lower() == "gzip":
-                raw = gzip.decompress(raw)
-            if r.status != 200:
-                return ""
-            return raw.decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001 - enrichment must never break symbol info
-            return ""
-        finally:
-            conn.close()
-
-    @staticmethod
-    def _parse_listing_date(text):
-        for fmt in ("%d-%b-%Y", "%d-%b-%y", "%Y-%m-%d"):
-            try:
-                d = datetime.strptime(str(text).strip(), fmt).date()
-                return int(datetime(d.year, d.month, d.day, tzinfo=TZ_IST).timestamp())
-            except (ValueError, TypeError):
-                pass
-        return None
-
+    # ── per-symbol history depth from NSE's listing lists (fetched by nse.py over one session) ──
     def _load_listings(self):
         """Single-flight: a watchlist must not make 30 symbolInfo threads fetch the same two CSVs at once."""
         today = datetime.now(TZ_IST).strftime("%Y-%m-%d")
@@ -1714,42 +2003,13 @@ class ZerodhaSource:
             return
         try:
             path = plugin_data_dir() / "cache" / f"nse-listings-{today}.json"
-            data = None
-            try:
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-            except (OSError, ValueError):
-                pass
-            if data is None:
-                data = {}
-                for url in (NSE_EQUITY_LIST_URL, NSE_SME_LIST_URL):
-                    text = self._public_csv(url, timeout=5)
-                    if not text:
-                        continue
-                    for raw in csv.DictReader(io.StringIO(text)):
-                        row = {str(k).strip(): str(v or "").strip() for k, v in raw.items() if k}
-                        symbol = row.get("SYMBOL") or ""
-                        date_text = row.get("DATE OF LISTING") or row.get("DATE_OF_LISTING") or ""
-                        if not symbol or not date_text:
-                            continue
-                        when = self._parse_listing_date(date_text)
-                        if when:
-                            data[symbol.upper()] = {
-                                "date": when,
-                                "isin": row.get("ISIN NUMBER") or row.get("ISIN_NUMBER") or row.get("ISIN") or "",
-                                "face": row.get("FACE VALUE") or row.get("FACE_VALUE") or "",
-                                "series": row.get("SERIES") or "",
-                            }
-                try:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(path, "w", encoding="utf-8") as f:
-                        json.dump(data, f)
-                except OSError:
-                    pass
+            data = nse.load_listings(self._nse, path, urls={
+                "equity": NSE_EQUITY_LIST_URL, "sme": NSE_SME_LIST_URL,
+            }, timeout=5)
             with self.lock:
                 self._listings, self._listings_day = data, today
         except Exception as e:  # noqa: BLE001 - the listing data is optional
-            self.log(f"NSE listing lists not read: {e}", "warn")
+            self.log(f"NSE listing lists not read: {e}", "warn", "nse")
         finally:
             with self.lock:
                 event, self._listings_loading = self._listings_loading, None
@@ -1933,7 +2193,13 @@ class ZerodhaSource:
                                  if (sr := self._series_row(s)) is not None and sr[0]["token"] == token}
                 if ticker not in self.subscribed and ticker not in self.watched \
                         and ticker not in self.watched_depth and not wanted_series:
-                    continue
+                    # A clean symbol (NSE:STLTECH) and Kite's ticker (NSE:STLTECH-BE) are the same instrument.
+                    clean = self.instruments.clean_of(ticker)
+                    if clean and (clean in self.subscribed or clean in self.watched
+                                  or clean in self.watched_depth):
+                        ticker = clean
+                    else:
+                        continue
                 q = self.quotes.setdefault(ticker, {})
                 ohlc = t.get("ohlc") or {}
                 prev = ohlc.get("close") or 0
@@ -2296,6 +2562,27 @@ class ZerodhaSource:
         if held:
             lists.append({"id": "zerodha-holdings", "name": "Holdings (zerodha)",
                           "symbols": held[:1000], "sections": []})
+        if self.price_band_symbols:
+            lists.append({"id": "zerodha-price-band-hitters", "name": "NSE Price Band Hitters",
+                          "symbols": list(self.price_band_symbols), "sections": []})
+        if self.nse_upcoming_sections:
+            lists.append({"id": "zerodha-nse-upcoming", "name": "NSE all Forthcomming",
+                          "symbols": [], "sections": self.nse_upcoming_sections})
+        if self.nse_today_sections:
+            lists.append({"id": "zerodha-nse-today-events", "name": "NSE Today Events",
+                          "symbols": [], "sections": self.nse_today_sections})
+        if self.volume_gainers_symbols:
+            lists.append({"id": "zerodha-volume-gainers", "name": "NSE Volume Gainers",
+                          "symbols": list(self.volume_gainers_symbols)[:1000], "sections": []})
+        if self.corporate_announcements_sections:
+            lists.append({"id": "zerodha-corporate-announcements", "name": "NSE Corporate Announcements",
+                          "symbols": [], "sections": self.corporate_announcements_sections})
+        if self.newly_listed_sections:
+            lists.append({"id": "zerodha-newly-listed", "name": "NSE Newly Listed",
+                          "symbols": [], "sections": self.newly_listed_sections})
+        if self.holdings_event_sections:
+            lists.append({"id": "zerodha-holdings-events", "name": "My Holdings — Upcoming Events",
+                          "symbols": [], "sections": self.holdings_event_sections})
         rows = self.instruments.rows
         if not rows:
             return lists
@@ -2310,21 +2597,27 @@ class ZerodhaSource:
             return out[:1000]
 
         blue = whole(SAMPLE_BLUE_CHIPS)
-        indices = []
-        for r in rows:
-            if r["type"] == "index" and r["exchange"] in ("NSE_INDEX", "BSE_INDEX"):
-                indices.append(f"{r['exchange']}:{r['ticker']}")
-        for name in SAMPLE_INDICES:
-            row = by_ticker.get(name.upper())
-            if row is not None and f"NSE:{row['ticker']}" not in indices:
-                indices.append(f"NSE:{row['ticker']}")
-        indices = indices[:1000]
+        nse_idx = [f"NSE_INDEX:{r['symbol']}" for r in rows
+                   if r["type"] == "index" and r["exchange"] == "NSE_INDEX"][:1000]
+        bse_idx = [f"BSE_INDEX:{r['symbol']}" for r in rows
+                   if r["type"] == "index" and r["exchange"] == "BSE_INDEX"][:1000]
         if blue:
             lists.append({"id": "zerodha-blue-chips", "name": "NSE blue chips (sample)",
                           "symbols": blue, "sections": []})
-        if indices:
-            lists.append({"id": "zerodha-indices", "name": "Indices (sample)",
-                          "symbols": [], "sections": [{"name": "Indices", "symbols": indices}]})
+        if nse_idx or bse_idx:
+            sections = []
+            if nse_idx:
+                sections.append({"name": "NSE Index", "symbols": nse_idx})
+            if bse_idx:
+                sections.append({"name": "BSE Index", "symbols": bse_idx})
+            lists.append({"id": "zerodha-indices", "name": "Indices",
+                          "symbols": [], "sections": sections})
+        if nse_idx:
+            lists.append({"id": "zerodha-nse-indices", "name": "NSE Indices", "symbols": [],
+                          "sections": [{"name": "NSE Index", "symbols": nse_idx}]})
+        if bse_idx:
+            lists.append({"id": "zerodha-bse-indices", "name": "BSE Indices", "symbols": [],
+                          "sections": [{"name": "BSE Index", "symbols": bse_idx}]})
         return lists
 
     def events_for(self, ticker):

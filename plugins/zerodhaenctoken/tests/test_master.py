@@ -269,7 +269,9 @@ class PluginApi7(unittest.TestCase):
             source = harness.make_source(fake)
             source.instruments.ensure()
             lists = source.watchlists()
-            self.assertEqual(len(lists), 2)
+            self.assertEqual({w["id"] for w in lists},
+                             {"zerodha-blue-chips", "zerodha-indices", "zerodha-nse-indices",
+                              "zerodha-bse-indices"})
             for item in lists:
                 self.assertLessEqual(len(item["symbols"]) + sum(len(s["symbols"]) for s in item["sections"]), 1000)
                 for sym in item["symbols"] + [x for s in item["sections"] for x in s["symbols"]]:

@@ -1,5 +1,6 @@
 """Realtime: a tick on Kite's binary stream reaches the app at once, with the right divisor and field order."""
 
+import json
 import time
 import unittest
 
@@ -320,6 +321,164 @@ class Api8(unittest.TestCase):
             self.assertNotIn("CUSTOMONE", names("NFO:NIFTY25NOVFUT"))
             self.assertEqual(source._series_row("NSE_INDEX:NIFTY_CUSTOMONE")[1], "CUSTOMONE")
             self.assertIsNone(source._series_row("NFO:NIFTY25NOVFUT_CUSTOMONE"))
+        finally:
+            fake.close()
+
+    def test_four_dynamic_watchlists(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.instruments.ensure()
+
+            def answer(name, url=None, **kw):
+                if name == "volume_gainers":
+                    return json.dumps({"data": [{"symbol": "RELIANCE"}, {"symbol": "TCS"}]})
+                if name == "corporate_announcements":
+                    return json.dumps([{"symbol": "RELIANCE", "desc": "Dividend",
+                                        "an_dt": "26-Nov-2026"}])
+                return ""
+
+            source._nse.get = answer
+            self.assertTrue(source._refresh_volume_gainers())
+            self.assertEqual(source.volume_gainers_symbols, ["NSE:RELIANCE", "NSE:TCS"])
+            self.assertTrue(source._refresh_corporate_announcements())
+            self.assertEqual(source.corporate_announcements_sections,
+                             [{"name": "Dividend", "symbols": ["NSE:RELIANCE"]}])
+
+            day = plugin.datetime.now(plugin.TZ_IST).strftime("%Y-%m-%d")
+            cache = plugin.plugin_data_dir() / "cache"
+            cache.mkdir(parents=True, exist_ok=True)
+            now = time.time()
+            with open(cache / f"nse-listings-{day}.json", "w", encoding="utf-8") as handle:
+                json.dump({"RELIANCE": {"date": now - 10 * 86400},
+                           "TCS": {"date": now - 100 * 86400}}, handle)
+            self.assertTrue(source._refresh_newly_listed())
+            sections = {s["name"]: s["symbols"] for s in source.newly_listed_sections}
+            self.assertEqual(sections["Last 90 days"], ["NSE:RELIANCE"])
+            self.assertEqual(sections["Last 180 days"], ["NSE:RELIANCE", "NSE:TCS"])
+
+            source.holdings = [{"symbol": "NSE:RELIANCE"}]
+            source.nse_upcoming_sections = [{"name": "Dividend", "symbols": ["NSE:RELIANCE"]}]
+            source._holdings_events_at = 0.0
+            self.assertTrue(source._refresh_holdings_events())
+            self.assertEqual(source.holdings_event_sections,
+                             [{"name": "Dividend", "symbols": ["NSE:RELIANCE"]}])
+
+            self.assertTrue(source.send_watchlists())
+            sent = {w["id"]: w["name"] for w in app.sock.payloads("data.watchlists")[-1]["watchlists"]}
+            self.assertEqual(sent["zerodha-volume-gainers"], "NSE Volume Gainers")
+            self.assertEqual(sent["zerodha-corporate-announcements"], "NSE Corporate Announcements")
+            self.assertEqual(sent["zerodha-newly-listed"], "NSE Newly Listed")
+            self.assertEqual(sent["zerodha-holdings-events"], "My Holdings — Upcoming Events")
+        finally:
+            app.alive = False
+            fake.close()
+
+    def test_nse_event_calendars_become_watchlists(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.instruments.ensure()
+            equities = json.dumps([{"symbol": "RELIANCE", "purpose": "Dividend"},
+                                   {"symbol": "TCS", "purpose": "Fund Raising"}])
+            sme = json.dumps([{"bm_symbol": "NEWCO", "bm_purpose": "Board Meeting"}])
+
+            def answer(name, url=None, **kw):
+                return sme if "index=sme" in (url or "") else equities
+
+            source._nse.get = answer
+            self.assertTrue(source._refresh_nse_calendars())
+            expected = [
+                {"name": "Board Meeting", "symbols": ["NSE:NEWCO"]},
+                {"name": "Dividend", "symbols": ["NSE:RELIANCE"]},
+                {"name": "Fund Raising", "symbols": ["NSE:TCS"]},
+            ]
+            self.assertEqual(source.nse_upcoming_sections, expected)
+            self.assertEqual(source.nse_today_sections, expected)
+            self.assertTrue(source.send_watchlists())
+            sent = {w["id"]: w for w in app.sock.payloads("data.watchlists")[-1]["watchlists"]}
+            self.assertEqual(sent["zerodha-nse-upcoming"]["name"], "NSE all Forthcomming")
+            self.assertEqual(sent["zerodha-nse-upcoming"]["sections"], expected)
+            self.assertEqual(sent["zerodha-nse-today-events"]["name"], "NSE Today Events")
+            self.assertEqual(sent["zerodha-nse-today-events"]["sections"], expected)
+        finally:
+            app.alive = False
+            fake.close()
+
+    def test_three_index_watchlists_replace_the_sample_list(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        try:
+            source.instruments.ensure()
+            lists = {w["id"]: w for w in source.watchlists()}
+            self.assertNotIn("Indices (sample)", {w["name"] for w in lists.values()})
+            both = lists["zerodha-indices"]
+            self.assertEqual(both["name"], "Indices")
+            sections = {s["name"]: s["symbols"] for s in both["sections"]}
+            self.assertIn("NSE_INDEX:NIFTY", sections["NSE Index"])
+            self.assertIn("BSE_INDEX:SENSEX", sections["BSE Index"])
+            self.assertEqual(lists["zerodha-nse-indices"]["name"], "NSE Indices")
+            self.assertEqual(lists["zerodha-nse-indices"]["sections"][0]["name"], "NSE Index")
+            self.assertEqual(lists["zerodha-bse-indices"]["name"], "BSE Indices")
+            self.assertEqual(lists["zerodha-bse-indices"]["sections"][0]["name"], "BSE Index")
+        finally:
+            fake.close()
+
+    def test_nse_requests_have_their_own_log_file(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        try:
+            self.assertEqual(source._log_path("nse").name, "zerodha-nse.log")
+            self.assertTrue(source._log_enabled("nse"))
+            source.log("probe", category="nse")
+            self.assertTrue(source._log_path("nse").exists())
+        finally:
+            fake.close()
+
+    def test_price_band_hitters_become_a_watchlist(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.instruments.ensure()  # validation needs the instrument master
+            payload = json.dumps({
+                "upper": {"AllSec": {"data": [{"symbol": "RELIANCE"}, {"symbol": "TCS"}]}},
+                "lower": {"AllSec": {"data": [{"symbol": "INFY"}]}},
+            })
+            source._nse.get = lambda name, **kw: payload
+            self.assertTrue(source._refresh_price_band())
+            # INFY is not an NSE row in the fake master, so it is dropped.
+            self.assertEqual(source.price_band_symbols, ["NSE:RELIANCE", "NSE:TCS"])
+            self.assertTrue(source.send_watchlists())
+            sent = {w["id"]: w for w in app.sock.payloads("data.watchlists")[-1]["watchlists"]}
+            self.assertEqual(sent["zerodha-price-band-hitters"]["name"], "NSE Price Band Hitters")
+            self.assertEqual(sent["zerodha-price-band-hitters"]["symbols"], source.price_band_symbols)
+            logs = [t["message"] for t in app.sock.payloads("log")]
+            self.assertTrue(any("Price Band Hitters" in m and "CHANGED" in m for m in logs))
+            self.assertFalse(source._refresh_price_band(), "an unchanged list sends nothing")
+            source._nse.get = lambda name, **kw: ""
+            self.assertFalse(source._refresh_price_band())
+            self.assertTrue(any("Price Band Hitters: check FAILED" in m for m in
+                                [t["message"] for t in app.sock.payloads("log")]))
+        finally:
+            app.alive = False
+            fake.close()
+
+    def test_price_band_symbols_resolve_to_kite_tickers_with_series_suffix(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        try:
+            source.instruments.ensure()
+            source.instruments.rows.append({"exchange": "NSE", "ticker": "STLTECH-BE", "token": 9999,
+                                            "symbol": "STLTECH", "type": "stock"})
+            payload = json.dumps({"upper": {"AllSec": {"data": [
+                {"symbol": "STLTECH"}, {"symbol": "NOPE"},
+            ]}}})
+            source._nse.get = lambda name, **kw: payload
+            self.assertTrue(source._refresh_price_band())
+            self.assertEqual(source.price_band_symbols, ["NSE:STLTECH"])
         finally:
             fake.close()
 
