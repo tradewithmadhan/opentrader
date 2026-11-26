@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 /// Company reference info for the WatchlistDetail panel. All optional —
 /// the frontend renders an em-dash for any missing field.
-#[derive(Serialize, specta::Type)]
+#[derive(Serialize, specta::Type, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TickerInfo {
     pub ticker: String,
@@ -41,6 +41,19 @@ pub struct TickerInfo {
     /// so the webview can use it as an <img src> without ever seeing the
     /// gateway token — the backend attaches the token when it serves the bytes.
     pub icon_url: Option<String>,
+    /// Shares outstanding of the share class (scripts' `syminfo.shares_outstanding_total`).
+    pub shares_outstanding: Option<f64>,
+    /// What a data plugin says of its instrument for scripts' `syminfo.*` (Plugin API 10): the root of a future
+    /// ("NIFTY"), its ISIN, base currency ("EUR" of EURUSD), the two-letter code of the country it trades in, the
+    /// contract a continuous future stands for, its last trading day (`YYYY-MM-DD`) and the unit of its volume
+    /// ("base", "quote", "tick", "n/a").
+    pub root: Option<String>,
+    pub isin: Option<String>,
+    pub base_currency: Option<String>,
+    pub country: Option<String>,
+    pub current_contract: Option<String>,
+    pub expiration: Option<String>,
+    pub volume_type: Option<String>,
 }
 
 /// A `tickers/<T>` answer. Missing values are `null`.
@@ -72,6 +85,8 @@ struct DetailsAnswer {
     market_cap: Option<f64>,
     #[serde(default)]
     figi: Option<String>,
+    #[serde(default)]
+    shares_outstanding: Option<f64>,
     #[serde(default)]
     list_date: Option<String>,
     /// `<gateway>/market/v1/logos/<T>`, or null.
@@ -192,6 +207,8 @@ pub async fn fetch_ticker_info(ticker: &str) -> Result<TickerInfo> {
         security_type: r.kind.clone(),
         point_value: None,
         icon_url: r.logo.map(|u| icon_proxy_url(&u)),
+        shares_outstanding: r.shares_outstanding,
+        ..Default::default()
     })
 }
 

@@ -282,6 +282,7 @@ async fn economic_info(sym: &SymbolRef) -> Result<TickerInfo> {
         security_type: Some("economic".into()),
         point_value: None,
         icon_url: None,
+        ..Default::default()
     })
 }
 

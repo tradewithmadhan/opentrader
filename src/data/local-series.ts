@@ -273,6 +273,14 @@ export async function localTickerInfo(symbol: string): Promise<TickerInfo> {
     symbolType: null,
     securityType: null,
     iconUrl: null,
+    sharesOutstanding: null,
+    root: null,
+    isin: null,
+    baseCurrency: null,
+    country: null,
+    currentContract: null,
+    expiration: null,
+    volumeType: null,
   };
 }
 
