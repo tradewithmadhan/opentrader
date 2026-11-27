@@ -36,11 +36,12 @@ from pathlib import Path
 import nse
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.6.9"
-# Plugin API 8: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
+PLUGIN_VERSION = "0.7.0"
+# Plugin API 10: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings),
-# 8 = data.symbolInfoChanged, plugin.toast and data.scripts.
-API = 8
+# 8 = data.symbolInfoChanged, plugin.toast and data.scripts, 9 = tradeTicker (continuous futures),
+# 10 = script syminfo fields (root, expiration, isin, baseCurrency, country, volumeType).
+API = 10
 DEV_CONNECTION_FILE = "OpenTraderPlugins/zerodhaenctoken-dev.json"
 
 TZ_IST = timezone(timedelta(hours=5, minutes=30), "Asia/Kolkata")
@@ -403,6 +404,9 @@ class Instruments:
         self.by_token = {}
         self.by_kite = {}
         self.token_meta = {}
+        # Continuous futures: synthetic `<ROOT>1!` → the front contract, plus token → app symbols for quotes.
+        self.continuous = {}
+        self.token_aliases = {}
         self.catalog = None
         self.day = None
         self.loading = None
@@ -474,6 +478,7 @@ class Instruments:
                 # Hot path: the tick thread reads this on every packet without taking the instruments lock.
                 self.token_meta = {r["token"]: (f"{r['exchange']}:{r['ticker']}", r["tick"]) for r in rows}
                 self.by_kite = {(r["kite_exchange"], r["ticker"]): r for r in rows}
+                self._build_continuous(rows)
                 self.catalog = None
                 self.day = today
                 self.source.log(f"instrument master: {len(rows)} rows ready")
@@ -486,11 +491,49 @@ class Instruments:
                     self.by_token = {}
                     self.by_kite = {}
                     self.token_meta = {}
+                    self.continuous = {}
+                    self.token_aliases = {}
         finally:
             with self.lock:
                 event, self.loading = self.loading, None
             event.set()
         return self.rows
+
+    def _build_continuous(self, rows):
+        """One synthetic `<ROOT>1!` symbol per NFO root with more than one expiry (TradingView style)."""
+        self.continuous = {}
+        self.token_aliases = {}
+        today = datetime.now(TZ_IST).date()
+        by_root = {}
+        for row in rows:
+            if row["exchange"] != "NFO" or row.get("type") != "futures" or not row.get("expiry"):
+                continue
+            try:
+                expiry = date.fromisoformat(row["expiry"])
+            except (ValueError, TypeError):
+                continue
+            root = str(row.get("name") or "").strip().upper()
+            if root.isalnum():
+                by_root.setdefault(root, []).append((expiry, row))
+        for root, entries in by_root.items():
+            if len({e[0] for e in entries}) < 2:
+                continue
+            entries.sort(key=lambda e: (e[0], e[1]["ticker"]))
+            upcoming = [e for e in entries if e[0] >= today] or entries
+            expiry, front = upcoming[0]
+            symbol = f"{root}1!"
+            synthetic = dict(front)
+            synthetic.update({"symbol": symbol, "name": root,
+                              "description": f"{root} Continuous Future", "continuous": True,
+                              "root": root, "expiration": expiry.isoformat()})
+            with self.lock:
+                self.by_key[("NFO", symbol)] = synthetic
+            whole = f"NFO:{symbol}"
+            self.continuous[whole] = front["ticker"]
+            aliases = self.token_aliases.setdefault(front["token"], [])
+            for name in (whole, f"NFO:{front['symbol']}"):
+                if name not in aliases:
+                    aliases.append(name)
 
     def row(self, ticker):
         """The row of a whole symbol ("NSE:RELIANCE"), or None."""
@@ -511,6 +554,18 @@ class Instruments:
         if not row or row["symbol"].upper() == ticker.upper():
             return None
         return f"{exchange}:{row['symbol']}"
+
+    def app_symbols_for(self, whole):
+        """Other app names of the same instrument: the clean symbol and any continuous future over it."""
+        exchange, sep, ticker = whole.partition(":")
+        if not sep:
+            return []
+        with self.lock:
+            row = self.by_key.get((exchange.upper(), ticker.upper()))
+            aliases = list(self.token_aliases.get(row["token"], [])) if row else []
+        names = [f"{exchange}:{row['symbol']}"] if row else []
+        names.extend(aliases)
+        return [name for name in dict.fromkeys(names) if name.upper() != whole.upper()]
 
     def token_row(self, token):
         with self.lock:
@@ -537,7 +592,12 @@ class Instruments:
                 symbol_up, name_up = r["symbol"].upper(), r["name"].upper()
                 description_up = r["description"].upper()
                 catalog.append((symbol_up, name_up, f"{r['exchange']}:{r['symbol']}", r["type"],
-                                r["description"], f"{symbol_up} {r['ticker'].upper()} {name_up} {description_up}"))
+                                r["description"], f"{symbol_up} {r['ticker'].upper()} {name_up} {description_up}",
+                                False))
+            for whole in self.continuous:
+                _, _, symbol = whole.partition(":")
+                catalog.append((symbol.upper(), symbol.upper(), whole, "futures",
+                                f"{symbol} Continuous Future", f"{symbol.upper()} CONTINUOUS FUTURE", True))
             self.catalog = catalog
             return catalog
 
@@ -550,9 +610,9 @@ class Instruments:
             q = rest.strip()
         words = q.split()
         tiers = ({}, {}, {})
-        for ticker_up, name_up, whole, kind, description, searchable in self.catalog_get():
+        for ticker_up, name_up, whole, kind, description, searchable, continuous in self.catalog_get():
             exchange = whole.split(":", 1)[0]
-            if exchange not in exchanges:
+            if exchange not in exchanges or (continuous and "1!" not in q):
                 continue
             hit = (ticker_up, whole, kind, description)
             if q and ticker_up.startswith(q):
@@ -941,6 +1001,7 @@ class ZerodhaSource:
         self.holdings_event_sections = []  # our holdings that have an upcoming calendar event
         self._holdings_events_at = 0.0  # local join, refreshed hourly rather than every five minutes
         self._newly_listed_at = 0.0  # the listing CSVs are day-stamped, so once a day is enough
+        self._continuous_map = {}  # continuous symbol → front contract, to spot a monthly roll
         self._security_list_day = None  # IST day of the price-band CSV already read
         self.band_2_symbols = []
         self.band_5_symbols = []
@@ -1793,7 +1854,16 @@ class ZerodhaSource:
             cached = self.instruments.day == day or self.instruments._existing_path(day).exists()
             if not cached:
                 self.toast("info", "Downloading instrument master — first start can take a moment")
+            previous = dict(self.instruments.continuous)
             self.instruments.ensure()
+            current = dict(self.instruments.continuous)
+            rolled = [symbol for symbol, contract in current.items()
+                      if symbol in previous and previous[symbol] != contract]
+            if rolled and self.plugin is not None and self.plugin.alive:
+                self.plugin.notify("data.symbolInfoChanged", {"tickers": rolled})
+                self.log(f"Continuous futures rolled: {', '.join(rolled[:8])}"
+                         + (f" (+{len(rolled) - 8} more)" if len(rolled) > 8 else ""))
+            self._continuous_map = current
             self._load_listings()  # warm both caches before the app's symbolInfo burst arrives
             self._refresh_price_band()  # the watchlists are ready with the app's first symbolInfo burst
             self._refresh_nse_calendars()
@@ -2274,15 +2344,12 @@ class ZerodhaSource:
                 ticker, tick_size = meta
                 wanted_series = {s for s in self.oi_subscribed
                                  if (sr := self._series_row(s)) is not None and sr[0]["token"] == token}
-                if ticker not in self.subscribed and ticker not in self.watched \
-                        and ticker not in self.watched_depth and not wanted_series:
-                    # A clean symbol (NSE:STLTECH) and Kite's ticker (NSE:STLTECH-BE) are the same instrument.
-                    clean = self.instruments.clean_of(ticker)
-                    if clean and (clean in self.subscribed or clean in self.watched
-                                  or clean in self.watched_depth):
-                        ticker = clean
-                    else:
-                        continue
+                # A clean symbol, a continuous future and the Kite contract can all be on screen at once:
+                # they share one token, so every subscribed name gets the same quote.
+                targets = [ticker] + [a for a in self.instruments.app_symbols_for(ticker)
+                                      if a in self.subscribed or a in self.watched or a in self.watched_depth]
+                if not targets and not wanted_series:
+                    continue
                 q = self.quotes.setdefault(ticker, {})
                 ohlc = t.get("ohlc") or {}
                 prev = ohlc.get("close") or 0
@@ -2323,13 +2390,17 @@ class ZerodhaSource:
                 if t.get("depth"):
                     q["depth"] = t["depth"]
 
-                if ticker in self.subscribed and (
-                        not self.quote_interval or now_ms - (q.get("_last_sent") or 0) >= self.quote_interval):
-                    # Queued, not sent: the per-second budget below decides which of this frame's candidates go out.
-                    quote_candidates.append((ticker, now_ms, {"jsonrpc": "2.0", "method": "data.quote",
-                                                              "params": self._quote_of(ticker, q)}))
-                elif ticker in self.subscribed:
-                    self._perf["skipped"] += 1
+                for name in targets:
+                    if name not in self.subscribed:
+                        continue
+                    last = self.quotes.get(name, {}).get("_last_sent") or 0
+                    if not self.quote_interval or now_ms - last >= self.quote_interval:
+                        # Queued, not sent: the per-second budget below decides which of this frame's
+                        # candidates go out. Every name sharing the token gets the same price.
+                        quote_candidates.append((name, now_ms, {"jsonrpc": "2.0", "method": "data.quote",
+                                                                "params": self._quote_of(name, q)}))
+                    else:
+                        self._perf["skipped"] += 1
                 if ticker in self.watched or ticker in self.watched_depth:
                     self._perf["bquotes"] += 1
                     bid, ask = self._bid_ask(q, tick_size)
@@ -2422,6 +2493,21 @@ class ZerodhaSource:
             # app) so the chart doesn't keep asking for an interval the source cannot answer.
             "intervals": ["1D"] if exchange == "NCO" else list(SERVED_INTERVALS),
         }
+        # API 9/10: a continuous future trades as its front contract. Scripts read syminfo.root for every
+        # symbol (the underlying for derivatives, the symbol itself otherwise) and the expiry of derivatives.
+        if row.get("continuous"):
+            info["tradeTicker"] = f"{exchange}:{row['ticker']}"
+        underlying = row.get("root") or (str(row["name"]).upper()
+                                         if row["type"] in ("futures", "option") and row.get("name")
+                                         else row["symbol"])
+        info["root"] = underlying
+        if row["type"] in ("futures", "option"):
+            expiry = row.get("expiration") or row.get("expiry")
+            if expiry:
+                info["expiration"] = expiry
+        info["baseCurrency"] = "INR"
+        info["country"] = "IN"
+        info["volumeType"] = "base"
         # Ensure a snapshot exists. The first call of the day may fetch the two small CSVs; every other caller
         # returns at once (single-flight) and reads the local cache, so a watchlist is served in parallel.
         self._load_listings()
@@ -2441,6 +2527,10 @@ class ZerodhaSource:
         try:
             info["series"] = self.series_for(row)
             listed = self._listed_text(row["ticker"], listings) if exchange == "NSE" else None
+            if exchange == "NSE":
+                entry = self._listing_of(row["ticker"], listings)
+                if entry and entry.get("isin"):
+                    info["isin"] = entry["isin"]
             info["fields"] = self.fields_for(
                 row, listed, self._listing_fields(row["ticker"], listings) if exchange == "NSE" else None)
         except Exception:  # noqa: BLE001
@@ -2748,17 +2838,17 @@ class ZerodhaSource:
 
     @staticmethod
     def fields_for(row, listed=None, listing=None):
-        """Instrument values (Plugin API 6) from the master and the NSE listing CSVs."""
+        """Instrument values the app's own Symbol Info does not show.
+
+        Tick size and ISIN are built in (ISIN via API 10), and the lot is Point value, so those are not
+        repeated here: scripts read them from syminfo and the dialog shows the built-in fields.
+        """
         fields = []
         if row.get("expiry"):
             fields.append({"name": "Expiry", "value": row["expiry"]})
-        if row.get("type") in ("futures", "option"):
-            fields.append({"name": "Lot size", "value": row["lot"]})
-        if row.get("tick"):
-            fields.append({"name": "Tick size", "value": row["tick"]})
         if listed:
             fields.append({"name": "Listed", "value": listed})
-        for key, label in (("isin", "ISIN"), ("face", "Face value"), ("series", "Series")):
+        for key, label in (("face", "Face value"), ("series", "Series")):
             if listing and listing.get(key):
                 fields.append({"name": label, "value": listing[key]})
         fields.extend(EXTRA_FIELDS)

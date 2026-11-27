@@ -324,6 +324,24 @@ class Api8(unittest.TestCase):
         finally:
             fake.close()
 
+    def test_continuous_and_contract_share_one_quote(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.instruments.ensure()
+            source.set_subscriptions(["NFO:NIFTY1!", "NFO:NIFTY26DECFUT"])
+            source.on_ticks([{"instrument_token": 779523, "last_price": 25000.0,
+                              "ohlc": {"close": 24900.0}, "volume": 100}])
+            sent = {q["ticker"]: q for q in app.sock.payloads("data.quote")}
+            self.assertIn("NFO:NIFTY1!", sent)
+            self.assertIn("NFO:NIFTY26DECFUT", sent)
+            self.assertEqual(sent["NFO:NIFTY1!"]["price"], 25000.0)
+            self.assertEqual(sent["NFO:NIFTY1!"]["prevClose"], 24900.0)
+        finally:
+            app.alive = False
+            fake.close()
+
     def test_price_band_and_gsm_watchlists(self):
         fake = fake_kite.FakeKite()
         source = harness.make_source(fake)

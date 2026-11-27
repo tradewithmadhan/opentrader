@@ -57,6 +57,12 @@ Symbols are `<segment>:<Kite tradingsymbol>`, for example `NSE:RELIANCE`, `NFO:N
 NSE_INDEX, BSE_INDEX, MCX_INDEX and GLOBAL_INDEX; narrow the **Segments to serve** setting if your account does
 not have all of them.
 
+Every NFO root with more than one expiry also gets a **continuous future** symbol `NFO:<ROOT>1!` (TradingView
+style), pointing at the nearest contract — e.g. `NFO:NIFTY1!` → `NFO:NIFTY26DECFUT`. Its `data.symbolInfo` carries
+`tradeTicker`, so the order ticket, DOM, positions and orders use the real contract, plus API 10 `root`,
+`expiration`, `baseCurrency` and `country` for scripts. Search only shows `1!` symbols when the query contains `1!`;
+a monthly roll is detected from the daily master and the app is told with a targeted `data.symbolInfoChanged`.
+
 Two source quirks are handled: Kite leaves `instrument_type` blank on index rows, so index segments are typed from
 the segment; and futures rows carry `strike = 0`, which is omitted from descriptions (e.g. `BANKEX FUT 26-NOV-26`).
 
@@ -252,16 +258,21 @@ The plugin speaks **API 8** and uses the upstream features adopted in this fork:
   finally "Pre-data ready" once the master and NSE listings are cached; broker connection has its own toast. All of
   them ask for the **top-right** corner by default; change **Toast position** in the plugin settings if needed (the
   app's own toast setting can still override it). After
-  each master load it sends `data.symbolInfoChanged` so the app drops what it kept for our symbols. **Send sample
+  each master load it sends `data.symbolInfoChanged` with `{}` so the app drops what it kept for **all** our symbols.
+  That notification also accepts `{"tickers":["NSE:RELIANCE"]}` for just a few symbols — full symbols, as the app
+  asks us — and drops their cached info, extra series and "unknown" state; the app then re-asks `data.symbolInfo`
+  and reloads bars for the ones on screen. Targeted notifications are planned but not wired yet. **Send sample
   toasts on start** adds one sample of each level. `data.scripts` ships **Monthly Levels (Expiry H/L)**, **MA
   Cloud** and **CustomOne 5 values** from `scripts/`, read-only in the Indicators dialog with *Make a copy*. With **Remote indicators manifest
   URL** (a raw folder such as `…/plugin-indicators/`) the plugin also fetches `scripts.json` and `watchlists.json` at
   start and every **Remote indicators check interval** (default 300 s, min 60). Each file is optional; a remote entry
   with the same id replaces the bundled one, unchanged files send nothing, and a changed one is pushed with a toast.
   The last good copies are cached for offline starts. The old `scriptManifestUrl` setting still works as an alias.
-- **Instrument values** (API 6): `symbolInfo.fields` lists expiry, lot size, tick size and, for NSE stocks, the
-  listing date plus **ISIN**, **Face value** and **Series** from NSE's `EQUITY_L.csv` / `SME_EQUITY_L.csv`. Live OI
-  quotes carry `Open Interest` / day high / low fields. Add your own values in `EXTRA_FIELDS`.
+- **Instrument values** (API 6): `symbolInfo.fields` holds only what the app's own Symbol Info does not show:
+  **Expiry**, the listing date plus **Face value** and **Series** for NSE stocks from `EQUITY_L.csv` /
+  `SME_EQUITY_L.csv`. Tick size, ISIN (API 10) and the lot (Point value) are built in and are not repeated here;
+  scripts read them from `syminfo`. Live OI quotes carry `Open Interest` / day high / low fields. Add your own
+  values in `EXTRA_FIELDS`.
 
 ## Tests
 

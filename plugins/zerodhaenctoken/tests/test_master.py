@@ -102,10 +102,12 @@ class SearchAndInfo(unittest.TestCase):
         try:
             info = self.source.symbol_info("NSE:RELIANCE")
             fields = {f["name"]: f["value"] for f in info["fields"]}
-            self.assertEqual(fields["ISIN"], "INE002A01018")
+            self.assertEqual(info["isin"], "INE002A01018")
             self.assertEqual(fields["Face value"], "10")
             self.assertEqual(fields["Series"], "EQ")
             self.assertRegex(fields["Listed"], r"^\d{2}/\d{2}/\d{4}$")
+            self.assertNotIn("ISIN", fields)
+            self.assertNotIn("Tick size", fields)
             fut = self.source.symbol_info("NFO:NIFTY25NOVFUT")
             self.assertNotIn("ISIN", [f["name"] for f in fut["fields"]])
         finally:
@@ -255,13 +257,61 @@ class ListingDepth(unittest.TestCase):
 
 
 class PluginApi7(unittest.TestCase):
-    def test_manifest_and_source_speak_api_8(self):
+    def test_manifest_and_source_speak_api_10(self):
         import json
         root = os.path.dirname(os.path.abspath(plugin.__file__))
         for name in ("opentrader-plugin.json", "opentrader-plugin.dev.json"):
             manifest = json.load(open(os.path.join(root, name), encoding="utf-8"))
-            self.assertEqual(manifest["api"], 8)
-        self.assertEqual(plugin.API, 8)
+            self.assertEqual(manifest["api"], 10)
+        self.assertEqual(plugin.API, 10)
+
+    def test_continuous_future_maps_to_the_front_contract(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            source.instruments.ensure()
+            info = source.symbol_info("NFO:NIFTY1!")
+            self.assertEqual(info["tradeTicker"], "NFO:NIFTY26DECFUT")
+            self.assertEqual(info["root"], "NIFTY")
+            self.assertEqual(info["expiration"], "2026-12-29")
+            self.assertEqual(info["baseCurrency"], "INR")
+            self.assertIn("NFO:NIFTY1!", source.instruments.continuous)
+            self.assertEqual(source.instruments.row("NFO:NIFTY1!")["token"],
+                             source.instruments.row("NFO:NIFTY26DECFUT")["token"])
+        finally:
+            fake.close()
+
+    def test_root_and_expiration_cover_all_and_derivatives(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            source.instruments.ensure()
+            equity = source.symbol_info("NSE:RELIANCE")
+            self.assertEqual(equity["type"], "stock")
+            self.assertEqual(equity["root"], "RELIANCE")
+            self.assertNotIn("expiration", equity)
+            future = source.symbol_info("NFO:NIFTY26DECFUT")
+            self.assertEqual(future["type"], "futures")
+            self.assertEqual(future["root"], "NIFTY")
+            self.assertEqual(future["expiration"], "2026-12-29")
+            option = source.symbol_info("NFO:NIFTY25NOV25000CE")
+            self.assertEqual(option["type"], "option")
+            self.assertEqual(option["root"], "NIFTY")
+            self.assertEqual(option["expiration"], "2026-11-25")
+        finally:
+            fake.close()
+
+    def test_continuous_symbol_only_in_search_when_asked(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            source.instruments.ensure()
+            plain = {r["ticker"] for r in source.search("NIFTY")}
+            asked = {r["ticker"] for r in source.search("NIFTY1!")}
+            self.assertNotIn("NFO:NIFTY1!", plain)
+            self.assertIn("NFO:NIFTY1!", asked)
+        finally:
+            fake.close()
 
     def test_watchlists_are_whole_symbols_and_capped(self):
         fake = fake_kite.FakeKite()
@@ -286,10 +336,11 @@ class PluginApi7(unittest.TestCase):
             source = harness.make_source(fake)
             fut = source.symbol_info("NFO:NIFTY25NOVFUT")
             self.assertEqual(fut["series"], ["OI"])
-            self.assertIn("Lot size", [f["name"] for f in fut["fields"]])
+            self.assertEqual([f["name"] for f in fut["fields"]], ["Expiry"])
+            self.assertIn("pointValue", fut)
             eq = source.symbol_info("NSE:RELIANCE")
             self.assertEqual(eq["series"], [])
-            self.assertIn("Tick size", [f["name"] for f in eq["fields"]])
+            self.assertNotIn("Tick size", [f["name"] for f in eq["fields"]])
         finally:
             fake.close()
 

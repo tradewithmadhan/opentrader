@@ -50,6 +50,7 @@ MASTER_ROWS = [
     row(256265, "NSE", "NIFTY 50", "NIFTY 50", "IDX", "INDICES"),       # → NSE_INDEX:NIFTY
     row(260105, "BSE", "SENSEX", "SENSEX", "IDX", "INDICES"),            # → BSE_INDEX:SENSEX
     row(779521, "NFO", "NIFTY25NOVFUT", "NIFTY", "FUT", expiry="2026-11-25", lot="75"),
+    row(779523, "NFO", "NIFTY26DECFUT", "NIFTY", "FUT", expiry="2026-12-29", lot="75"),
     row(779522, "NFO", "NIFTY25NOV25000CE", "NIFTY", "CE", expiry="2026-11-25", strike="25000", lot="75"),
     row(4127297, "CDS", "USDINR25NOVFUT", "USDINR", "FUT", tick="0.0025"),
     row(5349633, "MCX", "CRUDEOIL25NOVFUT", "CRUDEOIL", "FUT", expiry="2026-11-20"),
