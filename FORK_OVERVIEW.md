@@ -34,9 +34,11 @@ Compare with `git diff upstream/main HEAD`.
 | `issues/fixed_confirm-before-deleting-script.md` | 403fbeed Deleting a script asks first and takes it off every chart; layouts, alerts and chats ask too | fork-only / no upstream history |
 | `issues/fixed_dom-ladder-broker-depth.md` | 1085fca3 OpenAlgo 0.1.27: send broker.depth snapshots on upstream's protocol | fork-only / no upstream history |
 | `issues/fixed_expose-chart-primitives-to-scripts.md` | d1edcde7 Scripts: the bars in view, the chart type, drawings pinned to the pane<br>7218e3e9 oakscriptjs 0.20.0, lightweight-charts-indicators 0.27.0 | fork-only / no upstream history |
+| `issues/fixed_indicator-settings-dropdown-after-moving-dialog.md` | d8bce6f3 Dialogs: drop-downs open under their button after the dialog is moved | fork-only / no upstream history |
 | `issues/fixed_order-drag-modify-not-working.md` | 1085fca3 OpenAlgo 0.1.27: send broker.depth snapshots on upstream's protocol<br>84c88327 Rename fixed upstream issue drafts with fixed_ prefix | fork-only / no upstream history |
 | `issues/fixed_order-ticket-product-selection.md` | 84c88327 Rename fixed upstream issue drafts with fixed_ prefix | fork-only / no upstream history |
 | `issues/fixed_pass-symbol-metadata-to-scripts.md` | c70a9458 Scripts read every syminfo field and the symbol's dividends, splits and earnings | fork-only / no upstream history |
+| `issues/fixed_pine-style-input-widgets-for-scripts.md` | 5e110caa Script settings: timeframe drop-down, symbol search, text area, choice lists for numbers and enums | fork-only / no upstream history |
 | `issues/fixed_plugin-startup-data-not-loading.md` | 1085fca3 OpenAlgo 0.1.27: send broker.depth snapshots on upstream's protocol | fork-only / no upstream history |
 | `issues/fixed_script-session-corrections.md` | 84c88327 Rename fixed upstream issue drafts with fixed_ prefix | fork-only / no upstream history |
 | `issues/fixed_study-error-not-recalculated-on-symbol-change.md` | 1fcb3034 Studies ask for their other symbols again on another chart symbol, timeframe or inputs | fork-only / no upstream history |
