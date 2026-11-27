@@ -173,6 +173,7 @@ routes!(
     get_data_provider,
     get_provider_capabilities,
     get_funding_status,
+    server_clock,
     screener_open,
     screener_close,
     screener_scan,
@@ -342,6 +343,9 @@ async fn get_provider_capabilities(state: &Shared, _: &HeaderMap, _: &Bytes) -> 
 
 async fn get_funding_status(_: &Shared, _: &HeaderMap, _: &Bytes) -> Answer {
     ok(funding::get_funding_status().await?)
+}
+async fn server_clock(_: &Shared, _: &HeaderMap, _: &Bytes) -> Answer {
+    ok(core::server_clock())
 }
 
 // ── Screener (owners prefixed with the client, so tabs stay apart) ──
