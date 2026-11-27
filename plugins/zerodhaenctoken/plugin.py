@@ -36,7 +36,7 @@ from pathlib import Path
 import nse
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.7.0"
+PLUGIN_VERSION = "0.7.1"
 # Plugin API 10: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings),
 # 8 = data.symbolInfoChanged, plugin.toast and data.scripts, 9 = tradeTicker (continuous futures),
@@ -154,7 +154,7 @@ KINDS = {
 
 # Regular session in the market's clock. Indices follow their cash segment.
 SESSIONS = {
-    "NSE": "0915-1530", "BSE": "0915-1530", "NFO": "0915-1530", "BFO": "0915-1530",
+    "NSE": "0915-1530", "BSE": "0915-1530", "NFO": "0915-1540", "BFO": "0915-1530",
     "NCO": "0915-1530", "CDS": "0900-1700", "BCD": "0900-1700",
     "MCX": "0900-2330", "GLOBAL_INDEX": "0000-2359:23456",
 }
@@ -1920,6 +1920,20 @@ class ZerodhaSource:
             gen = self.ws_generation + 1
         self.log("Enctoken refreshed; reconnecting")
         self._start_ws(gen)
+        threading.Thread(target=self._after_token_refresh, daemon=True, name="TokenRecovery").start()
+
+    def _after_token_refresh(self):
+        """A fresh token can answer symbols refused earlier; make the app ask them again."""
+        try:
+            self.instruments.ensure()
+            self._load_listings()
+        except Exception as e:  # noqa: BLE001 - a slow source must not block the notification
+            self.log(f"Reference data after token refresh not ready: {e}", "warn")
+        p = self.plugin
+        if p and p.alive:
+            p.notify("data.symbolInfoChanged", {})
+            p.push_watchlists()
+            self.log("Enctoken refreshed: symbol information reissued to the app")
 
     # ── REST ──
     def _base(self):

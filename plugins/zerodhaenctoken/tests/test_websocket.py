@@ -462,6 +462,24 @@ class Api8(unittest.TestCase):
             app.alive = False
             fake.close()
 
+    def test_token_refresh_reissues_symbol_info(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.instruments.ensure()
+            source._load_listings = lambda: None
+            source.awaiting_token = True
+            source.prompt_id = "prompt-1"
+            source._start_ws = lambda gen: None
+            source.on_prompt_answer("prompt-1", "fresh-token")
+            self.assertTrue(harness.wait_until(
+                lambda: bool(app.sock.payloads("data.symbolInfoChanged")), 3.0))
+            self.assertIn({}, app.sock.payloads("data.symbolInfoChanged"))
+        finally:
+            app.alive = False
+            fake.close()
+
     def test_three_index_watchlists_replace_the_sample_list(self):
         fake = fake_kite.FakeKite()
         source = harness.make_source(fake)

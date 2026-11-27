@@ -265,6 +265,15 @@ class PluginApi7(unittest.TestCase):
             self.assertEqual(manifest["api"], 10)
         self.assertEqual(plugin.API, 10)
 
+    def test_nfo_session_runs_to_1540(self):
+        fake = fake_kite.FakeKite()
+        try:
+            source = harness.make_source(fake)
+            self.assertEqual(source.symbol_info("NFO:NIFTY25NOVFUT")["session"], "0915-1540")
+            self.assertEqual(source.symbol_info("NSE:RELIANCE")["session"], "0915-1530")
+        finally:
+            fake.close()
+
     def test_continuous_future_maps_to_the_front_contract(self):
         fake = fake_kite.FakeKite()
         try:
