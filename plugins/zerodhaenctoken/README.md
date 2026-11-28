@@ -82,10 +82,11 @@ Two caveats about the source data:
 ## Company details and logo
 
 Kite's instrument master and personal API provide no logo, sector or industry — only a company `name`. For **NSE/BSE
-cash equities** the plugin fills in `icon`, `name`, `sector`, `industry` and `longDescription` from the same external
-company-info service used by the OpenAlgo plugin (`api.dharun.dev`). None of these calls carries credentials, and a
-failed lookup is cached for 60 seconds and never fails symbol info. Set **Company details and logo** to off to skip
-them entirely — useful with a large watchlist.
+cash equities** the plugin fills in `name`, `sector`, `industry` and `longDescription` from one published
+`metadata.json` (raw from `dharunashokkumar/api.dharun.dev` on GitHub), downloaded at most once a day and cached in
+`cache/company-profiles.json`. The logo URL still comes from `api.dharun.dev/v1/logos/<symbol>`. Neither call carries
+credentials, and a failed download backs off and never fails symbol info. Set **Company details and logo** to off to
+skip them entirely — useful with a large watchlist.
 
 ## Request headers
 
@@ -107,7 +108,7 @@ The WebSocket handshake carries the same `User-Agent`/`Accept-Language` plus the
 | `product` | `MIS` | Default product on the order ticket (MIS / CNC / NRML). |
 | `historyDaysMinute` | `30` | Days per intraday history request (Kite tolerates more; larger windows are split and merged). |
 | `historyDaysDaily` | `1900` | Days per day-history request (Kite's hard limit is 2000; 1900 leaves headroom). |
-| `companyDetails` | `true` | External logo/company details for cash equities. Each ticker is fetched at most once and cached in `cache/company-profiles.json` across restarts; failures back off and never delay a symbol's data. |
+| `companyDetails` | `true` | External logo/company details for cash equities. Details come from one metadata JSON a day, cached in `cache/company-profiles.json` across restarts; logos use `api.dharun.dev`. Failures back off and never delay a symbol's data. |
 | `quoteIntervalMs` | `0` | Minimum ms between a symbol's chart updates; 0 = every tick. |
 | `maxQuotesPerSecond` | `200` | Total chart/watchlist quote budget across all symbols; 0 = unlimited. A large watchlist cannot flood the app; the ticket and DOM are not counted. |
 | `apiUrl` / `wsUrl` / `masterUrl` | Kite defaults | Endpoints; change only if you proxy them. |
@@ -295,7 +296,7 @@ or account needed, and **no test ever places a live order**.
 OpenTrader subscribes to every symbol of the **active** watchlist (not just the rows on screen). With a 2,400-symbol
 list that is a continuous stream of ticks, so two settings help:
 
-- **Company details and logo** (on by default): turn off to skip the external sector/industry/logo lookups. Those
+- **Company details and logo** (on by default): turn off to skip the external metadata/logo lookups. Those
   are in-memory caches; with the list shown, every app restart would otherwise re-request them for thousands of
   symbols.
 - **Minimum ms between a symbol's chart updates** (0 by default, i.e. every tick): set 100–250 ms to cap chart

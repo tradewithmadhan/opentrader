@@ -422,11 +422,15 @@ class _Handler(BaseHTTPRequestHandler):
             text = ("SYMBOL,NAME_OF_COMPANY,SERIES,DATE_OF_LISTING,PAST_CLOSED_PRICE,FACE_VALUE,ISIN_NUMBER\n"
                     "SMECO,SME Co,ST,26-Nov-24,50.00,10,INE0SMECO123\n")
             return self._send(200, text.encode("utf-8"), {"Content-Type": "text/csv"})
-        if method == "GET" and path.startswith("/v1/companies/"):
-            return self._send(200, {"status": "success", "data": {
-                "company": "Reliance Industries Limited", "sector": "Energy",
-                "industry": "Refining", "oneLine": "An Indian conglomerate.",
-            }})
+        if method == "GET" and path == "/metadata.json":
+            return self._send(200, {"logos": [
+                {"id": "NSE:RELIANCE", "ticker": "RELIANCE",
+                 "company_name": "Reliance Industries Limited", "sector": "Energy",
+                 "industry": "Refining", "one_liner": "An Indian conglomerate."},
+                {"id": "NSE:TCS", "ticker": "TCS",
+                 "company_name": "Tata Consultancy Services Limited", "sector": "Technology Services",
+                 "industry": "Information Technology Services", "one_liner": "An Indian IT company."},
+            ]})
         if method == "GET" and path.startswith("/oms/instruments/events/"):
             rows = [
                 {"action_type": "dividend", "ex_date": "2024-08-19", "meta": {"ratio_1": 100, "ratio_2": 10}},

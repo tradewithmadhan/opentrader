@@ -199,66 +199,108 @@ class Headers(unittest.TestCase):
 class CompanyInfo(unittest.TestCase):
     def tearDown(self):
         plugin.COMPANY_API = "https://api.dharun.dev/v1"
+        plugin.COMPANY_METADATA_URL = (
+            "https://raw.githubusercontent.com/dharunashokkumar/api.dharun.dev/main/"
+            "data/logos/metadata.json")
 
-    def test_equity_gets_logo_and_company_details_from_the_external_service(self):
+    def test_equity_gets_logo_and_company_details_from_the_metadata(self):
         fake = fake_kite.FakeKite()
         plugin.COMPANY_API = fake.url + "/v1"
+        plugin.COMPANY_METADATA_URL = fake.url + "/metadata.json"
         try:
             source = harness.make_source(fake)
             info = source.symbol_info("NSE:RELIANCE")
             self.assertEqual(info["icon"], fake.url + "/v1/logos/RELIANCE")
-            self.assertNotIn("sector", info, "the first answer must not wait on the external service")
+            self.assertNotIn("sector", info, "the first answer must not wait on the metadata download")
             self.assertTrue(harness.wait_until(lambda: "RELIANCE" in source._profiles, 3.0))
             info = source.symbol_info("NSE:RELIANCE")
             self.assertEqual(info["name"], "Reliance Industries Limited")
             self.assertEqual(info["sector"], "Energy")
             self.assertEqual(info["industry"], "Refining")
             self.assertEqual(info["longDescription"], "An Indian conglomerate.")
-            source.symbol_info("NSE:RELIANCE")
-            self.assertEqual(fake.count("/v1/companies/RELIANCE"), 1, "the profile is cached")
+            source.symbol_info("NSE:TCS")
+            self.assertEqual(fake.count("/metadata.json"), 1, "one download serves every symbol")
+            self.assertEqual(fake.count("/v1/companies/"), 0, "the per-symbol API is no longer used")
             self.assertNotIn("icon", source.symbol_info("NFO:NIFTY25NOVFUT"))
             self.assertNotIn("icon", source.symbol_info("NSE_INDEX:NIFTY"))
         finally:
             fake.close()
 
-    def test_company_profile_is_fetched_once_and_cached_on_disk(self):
+    def test_company_metadata_is_fetched_once_and_cached_on_disk(self):
         import tempfile
         fake = fake_kite.FakeKite()
         plugin.COMPANY_API = fake.url + "/v1"
+        plugin.COMPANY_METADATA_URL = fake.url + "/metadata.json"
         folder = tempfile.mkdtemp(prefix="zerodha-profiles-")
         try:
             source = harness.make_source(fake)
             plugin.local_app_data = lambda: folder  # make_source uses a throwaway cache; pin it for this test
             source._profiles = source._read_profile_cache()
+            source._profile_day = source._read_profile_day()
             source._company_profile("RELIANCE")
-            source._company_profile("RELIANCE")
-            self.assertEqual(fake.count("/v1/companies/RELIANCE"), 1)
+            source._company_profile("TCS")
+            self.assertEqual(fake.count("/metadata.json"), 1, "one bulk fetch, not one per symbol")
             self.assertTrue(source._profile_cache_path().exists())
             other = harness.make_source(fake)
             plugin.local_app_data = lambda: folder
             other._profiles = other._read_profile_cache()
+            other._profile_day = other._read_profile_day()
             self.assertEqual(other._profiles["RELIANCE"]["sector"], "Energy")
-            self.assertEqual(fake.count("/v1/companies/RELIANCE"), 1, "a restart must not fetch it again")
+            self.assertEqual(fake.count("/metadata.json"), 1, "a restart must not fetch it again")
         finally:
             fake.close()
-            plugin.COMPANY_API = "https://api.dharun.dev/v1"
+
+    def test_startup_signals_once_after_metadata_and_reports_are_in(self):
+        fake = fake_kite.FakeKite()
+        plugin.COMPANY_API = fake.url + "/v1"
+        plugin.COMPANY_METADATA_URL = fake.url + "/metadata.json"
+        try:
+            source = harness.make_source(fake)
+            app = harness.make_plugin(source)
+            source.configure(harness.settings(fake))
+            self.assertTrue(harness.wait_until(lambda: source._startup_ready.is_set(), 15.0))
+            self.assertEqual(app.sock.payloads("data.symbolInfoChanged"), [{}],
+                             "one completion signal, after the metadata, not one per fetch")
+            self.assertEqual(source._profiles["RELIANCE"]["sector"], "Energy")
+            messages = [p.get("message") or "" for p in app.sock.payloads("plugin.toast")]
+            self.assertTrue(any("Pre-data ready" in m for m in messages))
+        finally:
+            fake.close()
+
+    def test_a_late_metadata_load_refreshes_cached_symbol_info(self):
+        fake = fake_kite.FakeKite()
+        plugin.COMPANY_API = fake.url + "/v1"
+        plugin.COMPANY_METADATA_URL = fake.url + "/metadata.json"
+        try:
+            source = harness.make_source(fake)
+            app = harness.make_plugin(source)  # gives the source a live connection to notify
+            source._startup_ready.set()  # a load after startup, not the one it already signalled
+            source._company_profile("RELIANCE")
+            self.assertEqual(app.sock.payloads("data.symbolInfoChanged"), [{}])
+            info = source.symbol_info("NSE:RELIANCE")
+            self.assertEqual(info["sector"], "Energy")
+            self.assertEqual(info["industry"], "Refining")
+        finally:
+            fake.close()
 
     def test_company_details_can_be_turned_off(self):
         fake = fake_kite.FakeKite()
         plugin.COMPANY_API = fake.url + "/v1"
+        plugin.COMPANY_METADATA_URL = fake.url + "/metadata.json"
         try:
             source = harness.make_source(fake)
             source.company_details = False
             info = source.symbol_info("NSE:RELIANCE")
             self.assertNotIn("icon", info)
             self.assertNotIn("sector", info)
-            self.assertEqual(fake.count("/v1/companies/RELIANCE"), 0)
+            self.assertEqual(fake.count("/metadata.json"), 0)
         finally:
             fake.close()
 
     def test_a_dead_external_service_never_breaks_symbol_info(self):
         fake = fake_kite.FakeKite()
         plugin.COMPANY_API = "http://127.0.0.1:1/v1"
+        plugin.COMPANY_METADATA_URL = "http://127.0.0.1:1/metadata.json"
         try:
             source = harness.make_source(fake)
             info = source.symbol_info("NSE:RELIANCE")

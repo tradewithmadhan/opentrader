@@ -52,7 +52,7 @@ def _ipv4_first_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 socket.getaddrinfo = _ipv4_first_getaddrinfo
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.7.5"
+PLUGIN_VERSION = "0.7.8"
 # Plugin API 12: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings),
 # 8 = data.symbolInfoChanged, plugin.toast and data.scripts, 9 = tradeTicker (continuous futures),
@@ -89,7 +89,11 @@ KITE_VERSION = "3.0.0"
 # Kite's instruments master and personal API carry no logo, sector or industry. The company-info service used by
 # the app's OpenAlgo plugin fills those in for cash equities; a failed lookup is cached briefly and never fails
 # symbol_info. Tests point this at their fake server.
-COMPANY_API = "https://api.dharun.dev/v1"
+COMPANY_API = "https://api.dharun.dev/v1"  # logos only; company details come from the published metadata JSON
+# One bulk file of company names, sectors and industries (the per-symbol API is no longer used for details).
+# A raw URL: the GitHub "blob" page serves HTML, not JSON.
+COMPANY_METADATA_URL = ("https://raw.githubusercontent.com/dharunashokkumar/api.dharun.dev/main/"
+                        "data/logos/metadata.json")
 # NSE's official listing lists carry a DATE OF LISTING per symbol, used to cap how far back the app asks for a
 # symbol that has not existed that long. The SME file has slightly different headers and 2-digit years.
 NSE_EQUITY_LIST_URL = nse.REPORTS["equity"]
@@ -1003,8 +1007,11 @@ class ZerodhaSource:
         self.last_poll = 0.0
         self.broker_poll = None
         self.order_seq = 0
-        # Company details never change in real time: cache them on disk, once per ticker, across restarts and days.
+        # Company details come from one published JSON per day; the derived per-ticker cache survives restarts.
         self._profiles = self._read_profile_cache()  # ticker → {name, sector, industry, oneLine}
+        self._profile_day = self._read_profile_day()
+        self._metadata_loading = False
+        self._startup_ready = threading.Event()  # set once master, NSE reports and metadata are all in
         self._profile_failed_until = 0.0
         self._profile_queue = queue.Queue()  # one background worker, so a watchlist never starts 30 HTTP calls
         self._profile_queued = set()
@@ -1953,9 +1960,14 @@ class ZerodhaSource:
             self._refresh_security_lists()
             self._refresh_nse_fno()
             self._refresh_holdings_events()
+            # The last pre-day fetch: sector/industry arrive with the metadata, so declare ready only
+            # after it too. A failure is best effort and still lets the app use the symbol data.
+            if self.company_details:
+                self._load_company_metadata()
+            self._startup_ready.set()
             if self.plugin is not None and self.plugin.alive:
-                self.toast("info", f"Pre-data ready — {len(self.instruments.rows)} instruments and NSE listings cached. "
-                                   f"You can use the app.")
+                self.toast("info", f"Pre-data ready — {len(self.instruments.rows)} instruments, NSE listings and "
+                                   f"company details cached. You can use the app.")
                 self.plugin.notify("data.symbolInfoChanged", {})
                 self.plugin.push_watchlists()
 
@@ -2179,14 +2191,28 @@ class ZerodhaSource:
         return plugin_data_dir() / "cache" / "company-profiles.json"
 
     @staticmethod
-    def _read_profile_cache():
-        """A bad or missing cache file must never stop the plugin starting."""
+    def _read_profile_file():
+        """The derived per-ticker cache and the day it was built; a bad file never stops the plugin."""
         try:
             with open(ZerodhaSource._profile_cache_path(), encoding="utf-8") as f:
                 data = json.load(f)
-            return {str(k): v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
         except (OSError, ValueError, TypeError):
-            return {}
+            return {}, ""
+        if not isinstance(data, dict):
+            return {}, ""
+        day = str(data.get("date") or "")
+        rows = data.get("profiles", data)  # tolerate the old flat cache of earlier versions
+        profiles = {str(k): v for k, v in rows.items() if isinstance(v, dict)} if isinstance(rows, dict) else {}
+        return profiles, day
+
+    @staticmethod
+    def _read_profile_cache():
+        """Just the profiles, for callers that don't care when they were fetched."""
+        return ZerodhaSource._read_profile_file()[0]
+
+    @staticmethod
+    def _read_profile_day():
+        return ZerodhaSource._read_profile_file()[1]
 
     def _profile_worker(self):
         """Fetch profiles one at a time. A large watchlist queues its symbols instead of spawning a thread each."""
@@ -2208,7 +2234,7 @@ class ZerodhaSource:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self._profiles, f)
+                json.dump({"date": self._profile_day, "profiles": self._profiles}, f)
             with self._PROFILE_WRITE_LOCK:
                 os.replace(tmp, path)
         except (OSError, TypeError, ValueError) as e:
@@ -2218,32 +2244,64 @@ class ZerodhaSource:
             except OSError:
                 pass
 
+    def _load_company_metadata(self):
+        """Single-flight wrapper: the startup worker and the profile worker can both ask for it."""
+        with self.lock:
+            if self._metadata_loading:
+                return
+            self._metadata_loading = True
+        try:
+            self._do_load_company_metadata()
+        finally:
+            with self.lock:
+                self._metadata_loading = False
+
+    def _do_load_company_metadata(self):
+        """One download of the published company JSON a day, instead of a call per symbol. The JSON
+        has all 5,000+ cash equities; the derived per-ticker cache is then reused across restarts."""
+        day = datetime.now(TZ_IST).strftime("%Y-%m-%d")
+        if self._profiles and self._profile_day == day:
+            return
+        answer = self._external_json(COMPANY_METADATA_URL, timeout=30)
+        rows = answer.get("logos") if isinstance(answer, dict) else None
+        if not isinstance(rows, list):
+            with self.lock:
+                self._profile_failed_until = time.monotonic() + 300.0
+            return
+        profiles = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            _, sep, ticker = str(row.get("id") or "").partition(":")
+            if not (sep and ticker):
+                continue
+            profile = {key: str(row[field]).strip() for key, field in (
+                ("name", "company_name"), ("sector", "sector"),
+                ("industry", "industry"), ("oneLine", "one_liner")) if row.get(field)}
+            if profile:
+                profiles[ticker] = profile  # symbol_info looks these up by the bare ticker
+        with self.lock:
+            self._profiles = profiles
+            self._profile_day = day
+        self._write_profile_cache()
+        # A late load (settings changed, or the first symbol asked after startup) still needs to
+        # invalidate the app's cached infos. During startup the completion point sends the one signal.
+        if self._startup_ready.is_set():
+            p = self.plugin
+            if p and p.alive:
+                p.notify("data.symbolInfoChanged", {})
+
     def _company_profile(self, ticker):
-        """sector/industry/name for a cash equity. Fetched at most once per ticker, then kept on disk for good."""
+        """Sector/industry/name from the published metadata, fetched once a day in the background."""
         with self.lock:
             hit = self._profiles.get(ticker)
             if hit is not None:
                 return hit
             if time.monotonic() < self._profile_failed_until:
                 return None
-        try:
-            answer = self._external_json(f"{COMPANY_API}/companies/{urllib.parse.quote(ticker, safe='')}")
-            row = (answer or {}).get("data") if isinstance(answer, dict) else None
-            profile = None
-            if isinstance(row, dict):
-                profile = {k: str(row[k]) for k in ("name", "company", "sector", "industry", "oneLine") if row.get(k)}
-                if profile.get("company") and not profile.get("name"):
-                    profile["name"] = profile["company"]
-        except Exception:  # noqa: BLE001 - enrichment is optional; never let it break a symbol
-            profile = None
+        self._load_company_metadata()
         with self.lock:
-            if profile is None:
-                self._profile_failed_until = time.monotonic() + 60.0
-            else:
-                self._profiles[ticker] = profile
-        if profile is not None:
-            self._write_profile_cache()
-        return profile
+            return self._profiles.get(ticker)
 
     # ── per-symbol history depth from NSE's listing lists (fetched by nse.py over one session) ──
     def _load_listings(self):

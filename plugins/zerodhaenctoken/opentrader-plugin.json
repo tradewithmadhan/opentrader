@@ -1,7 +1,7 @@
 {
   "id": "zerodhaenctoken",
   "name": "Zerodha (enctoken)",
-  "version": "0.7.5",
+  "version": "0.7.8",
   "publisher": "tradewithmadhan",
   "description": "Your Zerodha Kite account's market data on the charts: instruments, history and live ticks from the personal API and the Kite ticker, using a browser enctoken.",
   "api": 12,
