@@ -234,7 +234,9 @@ The plugin speaks **API 8** and uses the upstream features adopted in this fork:
   on the same five-minute cadence), grouped into sections by the report's `purpose`. **NSE Volume Gainers** and
   **NSE Corporate Announcements** (sections by `desc`) come from NSE's live feeds on the same cadence;
   **NSE Newly Listed** groups symbols first listed in the last 90 / 180 days from the cached listing CSVs (once a day);
-  **My Holdings — Upcoming Events** joins our holdings with the event calendar hourly. NSE's dated
+  **My Holdings — Upcoming Events** joins our holdings with the event calendar hourly, and **NSE FNO** holds the NSE
+  cash stocks that have NFO derivatives, derived from the daily master (218 in today's master; BSE has only index
+  derivatives, so no BSE stock list is offered). NSE's dated
   `sec_list_<ddmmyyyy>.csv` supplies one list per price band (**NSE 2% / 5% / 10% Price band**), two alphabetical
   halves for the 20% EQ series, **NSE 20% Price band SM**, and **NSE GSM STAGE** with sections per stage; because
   that file describes the *next* day, the previous trading day's file is read (Monday uses Friday), once a day.
@@ -261,7 +263,10 @@ The plugin speaks **API 8** and uses the upstream features adopted in this fork:
   each master load it sends `data.symbolInfoChanged` with `{}` so the app drops what it kept for **all** our symbols.
   That notification also accepts `{"tickers":["NSE:RELIANCE"]}` for just a few symbols — full symbols, as the app
   asks us — and drops their cached info, extra series and "unknown" state; the app then re-asks `data.symbolInfo`
-  and reloads bars for the ones on screen. Targeted notifications are planned but not wired yet. **Send sample
+  and reloads bars for the ones on screen. Targeted notifications are planned but not wired yet. Plugin API 12: the
+  plugin uses the app's `plugin.clock` offset for every quote time and forming-bar stamp, and reports a server time
+  read from Kite/NSE HTTP `Date` headers with `data.serverTime`; API 11 quotes also carry `bid`/`ask` and their sizes
+  for the chart's bid/ask lines (depth when Kite sends it, otherwise last price ± tick). **Send sample
   toasts on start** adds one sample of each level. `data.scripts` ships **Monthly Levels (Expiry H/L)**, **MA
   Cloud** and **CustomOne 5 values** from `scripts/`, read-only in the Indicators dialog with *Make a copy*. With **Remote indicators manifest
   URL** (a raw folder such as `…/plugin-indicators/`) the plugin also fetches `scripts.json` and `watchlists.json` at

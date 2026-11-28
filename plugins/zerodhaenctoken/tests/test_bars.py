@@ -261,7 +261,7 @@ class Seconds(unittest.TestCase):
         try:
             source = harness.make_source(fake)
             source.instruments.ensure()
-            at = datetime.now(IST).replace(hour=9, minute=15, second=0, microsecond=0)
+            at = datetime(2026, 11, 27, 9, 15, tzinfo=IST)  # a weekday: the fake feed has no weekend bars
             frm, to = int(at.timestamp()), int(at.timestamp()) + 300
             bars = source.bars("NSE:RELIANCE", "5S", frm, to, 10)
             self.assertEqual(len(bars), 10)
@@ -275,7 +275,7 @@ class Seconds(unittest.TestCase):
         try:
             source = harness.make_source(fake)
             source.instruments.ensure()
-            at = datetime.now(IST).replace(hour=9, minute=15, second=0, microsecond=0)
+            at = datetime(2026, 11, 27, 9, 15, tzinfo=IST)  # a weekday: the fake feed has no weekend bars
             frm, to = int(at.timestamp()), int(at.timestamp()) + 3600
             for resolution, token in (("2", "2minute"), ("4", "4minute"), ("60", "60minute"),
                                       ("120", "2hour"), ("180", "3hour"), ("240", "4hour")):

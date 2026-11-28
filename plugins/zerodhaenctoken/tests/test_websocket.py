@@ -342,6 +342,22 @@ class Api8(unittest.TestCase):
             app.alive = False
             fake.close()
 
+    def test_nse_fno_watchlist(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.instruments.ensure()
+            self.assertTrue(source._refresh_nse_fno())
+            self.assertEqual(source.nse_fno_symbols, ["NSE:RELIANCE"])
+            self.assertFalse(source._refresh_nse_fno(), "one pass per day")
+            self.assertTrue(source.send_watchlists())
+            sent = {w["id"]: w["name"] for w in app.sock.payloads("data.watchlists")[-1]["watchlists"]}
+            self.assertEqual(sent["zerodha-nse-fno"], "NSE FNO")
+        finally:
+            app.alive = False
+            fake.close()
+
     def test_price_band_and_gsm_watchlists(self):
         fake = fake_kite.FakeKite()
         source = harness.make_source(fake)
@@ -476,6 +492,43 @@ class Api8(unittest.TestCase):
             self.assertTrue(harness.wait_until(
                 lambda: bool(app.sock.payloads("data.symbolInfoChanged")), 3.0))
             self.assertIn({}, app.sock.payloads("data.symbolInfoChanged"))
+        finally:
+            app.alive = False
+            fake.close()
+
+    def test_server_clock_offset_and_server_time(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.set_clock({"offset": 5000, "source": "gateway"})
+            before = time.time()
+            q = source._quote_of("NSE:RELIANCE", {"price": 100})
+            after = time.time()
+            self.assertGreaterEqual(q["time"], before + 4.5)
+            self.assertLessEqual(q["time"], after + 5.5)
+            source.note_server_time(1795783190223)
+            self.assertIn({"time": 1795783190223}, app.sock.payloads("data.serverTime"))
+        finally:
+            app.alive = False
+            fake.close()
+
+    def test_quote_carries_bid_ask_and_sizes(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        app = harness.make_plugin(source)
+        try:
+            source.instruments.ensure()
+            source.set_subscriptions(["NSE:RELIANCE"])
+            token = source.instruments.row("NSE:RELIANCE")["token"]
+            depth = {"buy": [{"price": 99.9, "quantity": 5}], "sell": [{"price": 100.1, "quantity": 7}]}
+            source.on_ticks([{"instrument_token": token, "last_price": 100, "volume": 10,
+                              "ohlc": {"close": 99}, "depth": depth}])
+            q = app.sock.payloads("data.quote")[-1]
+            self.assertEqual(q["bid"], 99.9)
+            self.assertEqual(q["ask"], 100.1)
+            self.assertEqual(q["bidSize"], 5)
+            self.assertEqual(q["askSize"], 7)
         finally:
             app.alive = False
             fake.close()

@@ -15,6 +15,7 @@ Run it:
 """
 import base64
 import csv
+import email.utils
 import gzip
 import hashlib
 import http.client
@@ -35,13 +36,28 @@ from pathlib import Path
 
 import nse
 
+# This machine's IPv6 path to Kite can stall for ~40 s while IPv4 answers in ~20 ms. Browsers try both
+# addresses in parallel; http.client takes the first getaddrinfo answer. Prefer IPv4 for every HTTP call
+# the plugin makes (Kite REST/master, NSE reports, company profiles), falling back if a host has no A record.
+_original_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_first_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    try:
+        return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+    except socket.gaierror:
+        return _original_getaddrinfo(host, port, family, type, proto, flags)
+
+
+socket.getaddrinfo = _ipv4_first_getaddrinfo
+
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.7.1"
-# Plugin API 10: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
+PLUGIN_VERSION = "0.7.4"
+# Plugin API 12: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings),
 # 8 = data.symbolInfoChanged, plugin.toast and data.scripts, 9 = tradeTicker (continuous futures),
-# 10 = script syminfo fields (root, expiration, isin, baseCurrency, country, volumeType).
-API = 10
+# 10 = script syminfo fields, 11 = quote bid/ask, 12 = the app's server clock and our server time.
+API = 12
 DEV_CONNECTION_FILE = "OpenTraderPlugins/zerodhaenctoken-dev.json"
 
 TZ_IST = timezone(timedelta(hours=5, minutes=30), "Asia/Kolkata")
@@ -959,6 +975,11 @@ class ZerodhaSource:
         self.exchanges = []
         self.enctoken = ""
         self.user_id = ""
+        # API 12 clock: computer time + the app's offset, plus a server time read from HTTP Date headers.
+        self.clock_offset_ms = 0.0
+        self.clock_source = None
+        self.server_time_ms = 0.0
+        self._server_time_sent = 0.0
         self.instruments = Instruments(self)
         self.quotes = {}  # whole symbol → live price cache and forming bars
         self._ticks = {}  # whole symbol → [(epoch sec, price, volume delta)] for the app's second charts
@@ -998,6 +1019,8 @@ class ZerodhaSource:
         self.volume_gainers_symbols = []  # NSE volume gainers
         self.corporate_announcements_sections = []  # latest announcements, grouped by purpose
         self.newly_listed_sections = []  # 90 / 180 day listings from the cached listing CSVs
+        self.nse_fno_symbols = []  # NSE cash stocks that have NFO derivatives
+        self._nse_fno_at = 0.0  # derived from the daily master, so once a day is enough
         self.holdings_event_sections = []  # our holdings that have an upcoming calendar event
         self._holdings_events_at = 0.0  # local join, refreshed hourly rather than every five minutes
         self._newly_listed_at = 0.0  # the listing CSVs are day-stamped, so once a day is enough
@@ -1116,6 +1139,34 @@ class ZerodhaSource:
                      f"budget_skipped={counts['budget_skipped']} cached_bars={counts['cached_bars']} "
                      f"quotes_cached={cached} tokens={tokens}(full {full}) "
                      f"reconnects={counts['reconnects']}")
+
+    # ── server clock (Plugin API 12) ──
+    def app_clock_ms(self):
+        """Wall clock in milliseconds, corrected by the offset the app sent in plugin.clock."""
+        return time.time() * 1000 + self.clock_offset_ms
+
+    def set_clock(self, params):
+        """The app's server clock: quotes and request windows use its time, not an unsynced PC clock."""
+        offset = num(params.get("offset")) or 0
+        source = params.get("source")
+        with self.lock:
+            changed = offset != self.clock_offset_ms or source != self.clock_source
+            self.clock_offset_ms = float(offset)
+            self.clock_source = source
+        if changed:
+            self.log(f"Server clock: source={source or 'computer'}, offset={offset:.0f} ms")
+
+    def note_server_time(self, ms):
+        """A server time just read from an HTTP Date header; tell the app at most every five minutes."""
+        if not ms or not (ms > 0):
+            return
+        with self.lock:
+            self.server_time_ms = float(ms)
+            p = self.plugin
+            now = time.time()
+            if p and p.alive and now - self._server_time_sent >= 300:
+                self._server_time_sent = now
+                p.notify("data.serverTime", {"time": int(ms)})
 
     # ── settings and logging ──
     @staticmethod
@@ -1637,6 +1688,26 @@ class ZerodhaSource:
                  f"{len(sections)} windows, {'CHANGED' if changed else 'unchanged'}", category="nse")
         return changed
 
+    def _refresh_nse_fno(self):
+        """NSE cash stocks that have an NFO future or option, from today's master."""
+        now_mono = time.monotonic()
+        if now_mono - self._nse_fno_at < 86400:
+            return False
+        rows = self.instruments.rows
+        if not rows:
+            return False
+        self._nse_fno_at = now_mono
+        names = {str(r.get("name") or "").strip().upper() for r in rows
+                 if r["exchange"] == "NFO" and r.get("type") in ("futures", "option")}
+        symbols, _ = self._resolve_nse_symbols(sorted(names), rows)
+        with self.lock:
+            changed = symbols != self.nse_fno_symbols
+            if changed:
+                self.nse_fno_symbols = symbols
+        self.log(f"NSE FNO: {len(symbols)} cash stocks with derivatives, "
+                 f"{'CHANGED' if changed else 'unchanged'}", category="nse")
+        return changed
+
     def _refresh_holdings_events(self):
         """Our holdings that appear in the upcoming event calendar, grouped by purpose (local join)."""
         now_mono = time.monotonic()
@@ -1752,6 +1823,7 @@ class ZerodhaSource:
                 changed = self._refresh_corporate_announcements() or changed
                 changed = self._refresh_newly_listed() or changed
                 changed = self._refresh_security_lists() or changed
+                changed = self._refresh_nse_fno() or changed
                 changed = self._refresh_holdings_events() or changed
                 if changed:
                     self.push_watchlists()
@@ -1871,6 +1943,7 @@ class ZerodhaSource:
             self._refresh_corporate_announcements()
             self._refresh_newly_listed()
             self._refresh_security_lists()
+            self._refresh_nse_fno()
             self._refresh_holdings_events()
             if self.plugin is not None and self.plugin.alive:
                 self.toast("info", f"Pre-data ready — {len(self.instruments.rows)} instruments and NSE listings cached. "
@@ -1993,9 +2066,17 @@ class ZerodhaSource:
             if body is not None:
                 headers["Content-Type"] = "application/x-www-form-urlencoded"
                 payload = urllib.parse.urlencode({k: str(v) for k, v in body.items()})
+            sent = time.time()
             conn.request(method, path, body=payload, headers=headers)
             r = conn.getresponse()
             raw = r.read()
+            date = r.getheader("Date")  # an authoritative server time from a response we already made
+            if date:
+                try:
+                    server = email.utils.parsedate_to_datetime(date).timestamp() * 1000
+                    self.note_server_time(server + (time.time() - sent) * 500)
+                except (TypeError, ValueError, OverflowError):
+                    pass
             if (r.getheader("Content-Encoding") or "").lower() == "gzip":
                 raw = gzip.decompress(raw)
             return r.status, raw
@@ -2322,13 +2403,16 @@ class ZerodhaSource:
         price = q.get("price") or 0
         return round(price - tick_size, 10), round(price + tick_size, 10)
 
-    @staticmethod
-    def _quote_of(ticker, q):
+    def _quote_of(self, ticker, q):
         out = {
-            "ticker": ticker, "time": int(time.time()), "price": q["price"],
+            "ticker": ticker, "time": self.app_clock_ms() / 1000, "price": q["price"],
             "prevClose": q.get("prevClose"),
             "minute": list(q.get("minute") or []), "day": list(q.get("day") or []),
         }
+        # API 11: bid/ask for the chart's lines; size is 0 when the source gives no depth.
+        for key in ("bid", "ask", "bidSize", "askSize"):
+            if q.get(key) is not None:
+                out[key] = q[key]
         if q.get("fields"):
             out["fields"] = q["fields"]
         return out
@@ -2342,8 +2426,8 @@ class ZerodhaSource:
         """
         p = self.plugin
         self._perf["ticks"] += len(ticks)
-        now = int(time.time())
-        now_ms = time.time() * 1000
+        now_ms = self.app_clock_ms()
+        now = int(now_ms // 1000)
         messages = []
         quote_candidates = []  # (ticker, stamp, message) — the app's total quote budget is shared by all symbols
         with self.lock:
@@ -2403,6 +2487,16 @@ class ZerodhaSource:
                         self._ticks[ticker] = [x for x in ticks if x[0] >= cutoff][-20_000:]
                 if t.get("depth"):
                     q["depth"] = t["depth"]
+                buy = (t.get("depth") or {}).get("buy") or []
+                sell = (t.get("depth") or {}).get("sell") or []
+                q["bid"] = num(buy[0].get("price")) if buy else None
+                q["ask"] = num(sell[0].get("price")) if sell else None
+                q["bidSize"] = num(buy[0].get("quantity"), 0) if buy else 0
+                q["askSize"] = num(sell[0].get("quantity"), 0) if sell else 0
+                if q["bid"] is None:
+                    q["bid"] = round(price - tick_size, 10)
+                if q["ask"] is None:
+                    q["ask"] = round(price + tick_size, 10)
 
                 for name in targets:
                     if name not in self.subscribed:
@@ -2767,6 +2861,9 @@ class ZerodhaSource:
         if self.newly_listed_sections:
             lists.append({"id": "zerodha-newly-listed", "name": "NSE Newly Listed",
                           "symbols": [], "sections": self.newly_listed_sections})
+        if self.nse_fno_symbols:
+            lists.append({"id": "zerodha-nse-fno", "name": "NSE FNO",
+                          "symbols": list(self.nse_fno_symbols)[:1000], "sections": []})
         if self.holdings_event_sections:
             lists.append({"id": "zerodha-holdings-events", "name": "My Holdings — Upcoming Events",
                           "symbols": [], "sections": self.holdings_event_sections})
@@ -2929,7 +3026,7 @@ class ZerodhaSource:
         q = self.quotes.get(ticker)
         if not q:
             return None
-        now = time.time()
+        now = self.app_clock_ms() / 1000
         if resolution == "1D":
             bar, stamp = q.get("day"), ist_midnight(now)
         elif resolution == "1":
@@ -3619,6 +3716,8 @@ class Plugin:
             self.source.configure(p.get("settings", {}), p.get("provides"))
             if self.source.broker_enabled:
                 self.push_state()
+        elif method == "plugin.clock":
+            self.source.set_clock(p)
         elif method == "data.subscribe":
             self.source.set_subscriptions(p.get("tickers", []))
         elif method in ("broker.watchQuote", "broker.watchDepth"):

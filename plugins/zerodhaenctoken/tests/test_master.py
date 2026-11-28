@@ -1,12 +1,29 @@
 """The instrument master: Kite's CSV normalised into app symbols, searchable, cached across restarts."""
 
 import os
+import socket
 import unittest
 from datetime import timedelta
 
 import fake_kite
 import harness
 import plugin
+
+
+class Network(unittest.TestCase):
+    def test_ipv4_is_preferred_with_ipv6_fallback(self):
+        v6 = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 443, 0, 0))
+        v4 = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))
+
+        def fake(host, port, family=0, *args, **kwargs):
+            return [v4] if family == socket.AF_INET else [v6, v4]
+
+        old = plugin._original_getaddrinfo
+        plugin._original_getaddrinfo = fake
+        try:
+            self.assertEqual(plugin._ipv4_first_getaddrinfo("example.test", 443)[0][0], socket.AF_INET)
+        finally:
+            plugin._original_getaddrinfo = old
 
 
 class Parse(unittest.TestCase):
@@ -56,8 +73,8 @@ class SearchAndInfo(unittest.TestCase):
 
     def test_search_returns_whole_symbols(self):
         rows = self.source.search("REL")
-        self.assertEqual([r["ticker"] for r in rows], ["NSE:RELIANCE"])
-        self.assertEqual(rows[0]["type"], "stock")
+        self.assertEqual({r["ticker"] for r in rows}, {"NSE:RELIANCE", "NFO:RELIANCE26DECFUT"})
+        self.assertEqual(next(r["type"] for r in rows if r["ticker"] == "NSE:RELIANCE"), "stock")
 
     def test_multi_word_option_query_matches_the_description(self):
         rows = self.source.search("NIFTY 25000")
@@ -67,7 +84,9 @@ class SearchAndInfo(unittest.TestCase):
             "NIFTY 25000 CE 2026-11-25")
 
     def test_exchange_prefix_narrows(self):
-        self.assertEqual([r["ticker"] for r in self.source.search("NSE:REL")], ["NSE:RELIANCE"])
+        found = {r["ticker"] for r in self.source.search("NSE:REL")}
+        self.assertIn("NSE:RELIANCE", found)
+        self.assertIn("NFO:RELIANCE26DECFUT", found)
         # The app filters rows by the exchange the user typed; the plugin may return matches on other
         # segments (NFO's NIFTY future also matches "NIFTY"), so only the wanted row is asserted here.
         self.assertIn("NSE_INDEX:NIFTY", [r["ticker"] for r in self.source.search("NSE_INDEX:NIFTY")])
@@ -257,13 +276,13 @@ class ListingDepth(unittest.TestCase):
 
 
 class PluginApi7(unittest.TestCase):
-    def test_manifest_and_source_speak_api_10(self):
+    def test_manifest_and_source_speak_api_12(self):
         import json
         root = os.path.dirname(os.path.abspath(plugin.__file__))
         for name in ("opentrader-plugin.json", "opentrader-plugin.dev.json"):
             manifest = json.load(open(os.path.join(root, name), encoding="utf-8"))
-            self.assertEqual(manifest["api"], 10)
-        self.assertEqual(plugin.API, 10)
+            self.assertEqual(manifest["api"], 12)
+        self.assertEqual(plugin.API, 12)
 
     def test_nfo_session_runs_to_1540(self):
         fake = fake_kite.FakeKite()
