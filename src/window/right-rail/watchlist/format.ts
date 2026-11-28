@@ -5,7 +5,6 @@
  */
 import { marketSession } from "../../../data/market-session";
 import { localNumber } from "../../../i18n/format";
-import { groupThousands } from "../../chart/price-format";
 import { serverNow } from "../../../data/server-clock";
 
 export function isNegative(v: string): boolean {

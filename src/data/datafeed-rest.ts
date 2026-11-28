@@ -12,7 +12,7 @@ import { commands, type Candle, type History, type TickerInfo } from "../binding
 import { isTransientError, retryTransient } from "./connection";
 import { isNotFoundError, noteSymbolError } from "./unknown-symbols";
 import { isLocalSymbol, localSnapshot, localTickerInfo } from "./local-series";
-import { evaluateSpread, isSpreadSymbol, parseSpread, spreadKeepsCurrency, spreadLegs, spreadQuote, spreadShortName } from "./spread-symbol";
+import { evaluateSpread, isSpreadSymbol, parseSpread, spreadKeepsCurrency, spreadLegs, spreadQuote, spreadShortName, type LegQuote } from "./spread-symbol";
 
 export type { TickerInfo } from "../bindings";
 
@@ -194,7 +194,7 @@ async function spreadSnapshot(symbol: string, wanted?: () => boolean): Promise<S
   const legs = spreadLegs(symbol);
   const snaps = await Promise.all(legs.map((l) => getTickerSnapshot(l, wanted)));
   const byLeg = new Map(legs.map((l, k) => [l, snaps[k]]));
-  const q = spreadQuote(tree, (l) => byLeg.get(l));
+  const q = spreadQuote(tree, (l) => byLeg.get(l) as LegQuote | undefined);
   if (!q) throw new Error(`no quote: ${symbol}`);
   // The day's range as a bar's: the formula of the highs, of the lows and the last price, the extremes of them.
   const day = [q.last, evaluateSpread(tree, (l) => byLeg.get(l)?.dayHigh), evaluateSpread(tree, (l) => byLeg.get(l)?.dayLow)].filter((v) => !Number.isNaN(v));

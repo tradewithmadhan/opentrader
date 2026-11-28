@@ -31,6 +31,7 @@ Compare with `git diff upstream/main HEAD`.
 | `docs/gateway-endpoints.md` | — | fork-only / no upstream history |
 | `docs/new-provider-requirements.md` | — | fork-only / no upstream history |
 | `docs/provider-switching-plan.md` | — | fork-only / no upstream history |
+| `issues/fixed_app-server-time-offset-api.md` | 513f6694 Server clock: the market's time from the gateway, not the computer's clock | fork-only / no upstream history |
 | `issues/fixed_confirm-before-deleting-script.md` | 403fbeed Deleting a script asks first and takes it off every chart; layouts, alerts and chats ask too | fork-only / no upstream history |
 | `issues/fixed_dom-ladder-broker-depth.md` | 1085fca3 OpenAlgo 0.1.27: send broker.depth snapshots on upstream's protocol | fork-only / no upstream history |
 | `issues/fixed_expose-chart-primitives-to-scripts.md` | d1edcde7 Scripts: the bars in view, the chart type, drawings pinned to the pane<br>7218e3e9 oakscriptjs 0.20.0, lightweight-charts-indicators 0.27.0 | fork-only / no upstream history |
@@ -42,6 +43,7 @@ Compare with `git diff upstream/main HEAD`.
 | `issues/fixed_pine-style-input-widgets-for-scripts.md` | 5e110caa Script settings: timeframe drop-down, symbol search, text area, choice lists for numbers and enums | fork-only / no upstream history |
 | `issues/fixed_plugin-seconds-bars-not-live.md` | 179426ac Plugins: seconds bars update live from the plugin's quotes, on charts and in scripts | fork-only / no upstream history |
 | `issues/fixed_plugin-startup-data-not-loading.md` | 1085fca3 OpenAlgo 0.1.27: send broker.depth snapshots on upstream's protocol | fork-only / no upstream history |
+| `issues/fixed_plugin-watchlist-favorites-lost-on-restart.md` | 25774ac8 Plugin watchlists keep their favourite while the plugin waits for its login | fork-only / no upstream history |
 | `issues/fixed_script-editor-open-my-scripts-menu.md` | cff88899 Script editor: Open script… lists every saved script | fork-only / no upstream history |
 | `issues/fixed_script-session-corrections.md` | 84c88327 Rename fixed upstream issue drafts with fixed_ prefix | fork-only / no upstream history |
 | `issues/fixed_study-error-not-recalculated-on-symbol-change.md` | 1fcb3034 Studies ask for their other symbols again on another chart symbol, timeframe or inputs | fork-only / no upstream history |

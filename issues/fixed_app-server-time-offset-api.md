@@ -1,5 +1,7 @@
 # Feature request — a common server-time/offset API so charts and plugins use corrected time
 
+> **FIXED upstream** in `513f6694 / 422` (issue #422), adopted in this fork. Kept for reference.
+
 Status: **FILED** as https://github.com/deepentropy/opentrader/issues/422 (27/11/2026), on the user's explicit instruction. Do not make further changes to the live issue without the user's instruction.
 
 Paste everything below the line into the issue body.
