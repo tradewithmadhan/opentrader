@@ -3,6 +3,7 @@
 import os
 import socket
 import unittest
+from unittest.mock import patch
 from datetime import timedelta
 
 import fake_kite
@@ -24,6 +25,42 @@ class Network(unittest.TestCase):
             self.assertEqual(plugin._ipv4_first_getaddrinfo("example.test", 443)[0][0], socket.AF_INET)
         finally:
             plugin._original_getaddrinfo = old
+
+
+    @patch("plugin.socket.create_connection")
+    def test_rest_network_failure_is_transient(self, conn):
+        conn.side_effect = OSError("offline")
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        try:
+            with self.assertRaises(plugin.PluginError) as raised:
+                source._rest("/oms/user/margins")
+            self.assertEqual(raised.exception.code, -32005)
+        finally:
+            fake.close()
+
+    @patch("plugin.socket.create_connection")
+    def test_master_network_failure_is_transient(self, conn):
+        conn.side_effect = OSError("offline")
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        source.settings["masterUrl"] = "https://api.kite.trade/instruments"
+        try:
+            with self.assertRaises(plugin.PluginError) as raised:
+                source.fetch_master()
+            self.assertEqual(raised.exception.code, -32005)
+        finally:
+            fake.close()
+
+    def test_periodic_master_retry(self):
+        fake = fake_kite.FakeKite()
+        source = harness.make_source(fake)
+        try:
+            with patch.object(source.instruments, "ensure") as ensure:
+                source._retry_master()
+            ensure.assert_called_once()
+        finally:
+            fake.close()
 
 
 class Parse(unittest.TestCase):

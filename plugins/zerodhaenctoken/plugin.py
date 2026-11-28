@@ -52,7 +52,7 @@ def _ipv4_first_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 socket.getaddrinfo = _ipv4_first_getaddrinfo
 
 PLUGIN_ID = "zerodhaenctoken"
-PLUGIN_VERSION = "0.7.4"
+PLUGIN_VERSION = "0.7.5"
 # Plugin API 12: 3 = password settings / data folder / prompts / provides, 4 = data.watchlists,
 # 5 = data.events, 6 = extra series (OI) and instrument values (fields), 7 = broker pages (Holdings),
 # 8 = data.symbolInfoChanged, plugin.toast and data.scripts, 9 = tradeTicker (continuous futures),
@@ -1813,10 +1813,18 @@ class ZerodhaSource:
                  f"{'CHANGED' if changed else 'unchanged'}", category="nse")
         return changed
 
+    def _retry_master(self):
+        """Cheap when today's master is cached; refetches it after an outage when it was never loaded."""
+        try:
+            self.instruments.ensure()
+        except Exception as e:  # noqa: BLE001 - optional enrichment must not stop the other lists
+            self.log(f"Instrument master not ready: {self.clean(str(e))}", "warn")
+
     def _price_band_loop(self):
         """Refresh the NSE lists on start and every five minutes; send watchlists only when one changed."""
         while not self._price_band_stop.is_set():
             try:
+                self._retry_master()
                 changed = self._refresh_price_band()
                 changed = self._refresh_nse_calendars() or changed
                 changed = self._refresh_volume_gainers() or changed
@@ -2037,8 +2045,11 @@ class ZerodhaSource:
             if (r.getheader("Content-Encoding") or "").lower() == "gzip":
                 raw = gzip.decompress(raw)
             return raw.decode("utf-8", errors="replace")
-        except (OSError, http.client.HTTPException, PluginError) as e:
-            raise PluginError(f"Cannot download the instrument master ({self.clean(str(e))})") from None
+        except PluginError:
+            raise  # a final answer (a bad HTTP status) stays final
+        except (OSError, http.client.HTTPException) as e:
+            # The app retries transient errors; an unreachable source must not be treated as final.
+            raise PluginError(f"Cannot download the instrument master ({self.clean(str(e))})", -32005) from None
         finally:
             conn.close()
 
@@ -2081,7 +2092,8 @@ class ZerodhaSource:
                 raw = gzip.decompress(raw)
             return r.status, raw
         except (OSError, http.client.HTTPException) as e:
-            raise PluginError(f"Zerodha is not reachable ({self.clean(str(e))})") from None
+            # -32005 is the protocol's BUSY code: the app keeps retrying instead of caching a dead fetch.
+            raise PluginError(f"Zerodha is not reachable ({self.clean(str(e))})", -32005) from None
         finally:
             conn.close()
 

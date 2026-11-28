@@ -27,6 +27,11 @@ credential store per plugin version; upgrading does not carry the value over. Un
 `enctoken=empty`, history refuses to run and no ticks arrive, while symbol search still works from the public
 instrument CSV. The dev manifest deliberately uses a plain text field so this doesn't happen during development.
 
+**Network outages:** REST failures are answered with the transient `-32005` code so the app keeps retrying a fetch
+until it gets through; the ticker stream reconnects with backoff and re-subscribes the chart/watchlist tokens; and a
+failed instrument-master download is retried on the five-minute NSE worker. Today's cached master and listing files
+are reused, so a brief outage does not mean a 29 MB re-download.
+
 ## Verify a release download
 
 A plugin released outside OpenTrader's catalog is installed from file and shows a **not verified** warning: only
