@@ -1,10 +1,10 @@
 {
   "id": "openalgo",
   "name": "OpenAlgo (development)",
-  "version": "0.0.0-dev",
+  "version": "0.1.30-dev",
   "publisher": "tradewithmadhan",
   "description": "The OpenAlgo plugin while it is developed: you run plugin.py yourself, the app writes where to connect.",
-  "api": 2,
+  "api": 12,
   "provides": ["datafeed", "broker"],
   "exchanges": ["NSE", "BSE", "NFO", "BFO", "MCX", "CDS", "BCD", "NCO", "NCDEX", "BCO", "NSE_INDEX", "BSE_INDEX", "MCX_INDEX"],
   "runtime": { "type": "external", "connectionFile": "{localAppData}/OpenTraderPlugins/openalgo-dev.json" },

@@ -55,6 +55,7 @@ MASTERS = {
     ],
     "NFO": [
         _row("NIFTY25NOVFUT", "NIFTY", "NFO", "FUT", lotsize="75", expiry="25-Nov-26"),
+        _row("NIFTY25DECFUT", "NIFTY", "NFO", "FUT", lotsize="75", expiry="25-Dec-26"),
         _row("NIFTY25NOV25000CE", "NIFTY", "NFO", "CE", lotsize="75", expiry="25-Nov-26"),
     ],
 }

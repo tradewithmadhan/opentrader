@@ -1,10 +1,10 @@
 {
   "id": "openalgo",
   "name": "OpenAlgo",
-  "version": "0.1.28",
+  "version": "0.1.30",
   "publisher": "tradewithmadhan",
   "description": "Your OpenAlgo deployment in OpenTrader: the market segments of your account (NSE, BSE, NFO, MCX…) on the charts and its trading from the charts.",
-  "api": 3,
+  "api": 12,
   "provides": ["datafeed", "broker"],
   "exchanges": ["NSE", "BSE", "NFO", "BFO", "MCX", "CDS", "BCD", "NCO", "NCDEX", "BCO", "NSE_INDEX", "BSE_INDEX", "MCX_INDEX"],
   "runtime": { "type": "process", "entry": "bin/openalgo.exe", "args": [] },

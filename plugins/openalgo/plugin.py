@@ -16,6 +16,7 @@ The connection layer (everything below the source) is OpenTrader's plugin templa
 documented adaptations so a long request (a day of history) does not hold up the quote stream: the source locks
 its own parts (no outer lock in `handle`), and the stream reads the source's live-price cache.
 """
+import email.utils
 import http.client
 import json
 import os
@@ -24,12 +25,13 @@ import sys
 import threading
 import time
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PLUGIN_ID = "openalgo"  # the manifests' id
-PLUGIN_VERSION = "0.1.28"
-API = 3  # Plugin API 3: password settings in the credential store, per-plugin data folder
+PLUGIN_VERSION = "0.1.30"
+# API 12: password settings, per-plugin data folder, the app's server clock and our server time.
+API = 12
 DEV_CONNECTION_FILE = "OpenTraderPlugins/openalgo-dev.json"  # under {localAppData}, as in opentrader-plugin.dev.json
 DEBUG = os.environ.get("OPENALGO_DEBUG") == "1"  # OPENALGO_DEBUG=1: raw stream traffic on stdout (the key is redacted)
 
@@ -209,6 +211,19 @@ FILTER_KINDS = {  # the dialog's Type chip code → the app kind it asks for (mi
 }
 
 
+def expiry_date(value):
+    """A master's expiry (`25-Nov-26`, `2026-11-25`, …) as a date, or None when it is not one."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%d-%b-%y", "%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def display_name(name, row):
     """A master row as the dialog shows it. Stocks keep the plain name; a contract with an expiry reads
     `Name Strike TYPE Expiry` (e.g. "NIFTY 26100 CE 30-Oct-26"), skipping missing parts — the broker marks
@@ -260,6 +275,11 @@ class Instruments:
         self.loading = {}  # master exchange → the Event of its running pull (callers wait instead of refetching)
         self.unavailable = {}  # master exchange → until when (monotonic) a failed pull is not retried
         self.catalog = None  # the combined search catalog of every segment, built once and searched per keystroke
+        # Continuous futures: whole synthetic ticker ("NFO:NIFTY1!") → the whole front contract
+        # ("NFO:NIFTY25NOVFUT"). Rebuilt whenever a master lands; a roll updates it in place.
+        self.continuous = {}
+        # Set when the master worker finishes, so the broker toast waits for a ready catalog.
+        self.prefetch_done = threading.Event()
 
     def master_exchanges(self, exchanges):
         """The configured segments (the OpenAlgo segments themselves), plus the index tables of the cash ones
@@ -306,6 +326,8 @@ class Instruments:
                         self.catalog = None  # the combined search catalog is stale
                 if fetched is not None and not from_disk:
                     self._write_disk(exchange, today, fetched)  # a restart re-reads, no pull
+                if fetched is not None:
+                    self._rebuild_continuous()
             finally:
                 with self.lock:
                     self.loading.pop(exchange, None)
@@ -333,9 +355,44 @@ class Instruments:
             with self.lock:
                 self.rows[exchange], self.day[exchange] = disk, today
                 self.catalog = None  # the combined search catalog is stale
+            self._rebuild_continuous()
             return disk
         with self.lock:
             return self.rows.get(exchange) or []
+
+    def _rebuild_continuous(self):
+        """One synthetic `<ROOT>1!` per derivative root with more than one expiry. Its front is the
+        nearest upcoming contract; a roll updates the map and tells the app to refresh its charts."""
+        by_root = {}
+        for exchange, rows in list(self.rows.items()):
+            for row in rows:
+                if "FUT" not in str(first_of(row, "instrumenttype", "instrument_type") or "").upper():
+                    continue
+                exp = expiry_date(first_of(row, "expiry", "expiry_date"))
+                root = str(row.get("name") or "").strip().upper()
+                symbol = str(row.get("symbol") or "").strip()
+                if not (exp and symbol and root.isalnum()):
+                    continue
+                by_root.setdefault((exchange, root), []).append((exp, symbol))
+        continuous = {}
+        for (exchange, root), entries in by_root.items():
+            if len({e[0] for e in entries}) < 2:
+                continue
+            entries.sort(key=lambda e: (e[0], e[1]))
+            today = datetime.now(TZ_IST).date()
+            upcoming = [e for e in entries if e[0] >= today] or entries
+            exp, symbol = upcoming[0]
+            continuous[f"{exchange}:{root}1!"] = f"{exchange}:{symbol}"
+        with self.lock:
+            previous = self.continuous
+            self.continuous = continuous
+            self.catalog = None  # the catalog carries the synthetic entries too
+            rolled = [t for t, front in continuous.items() if previous.get(t) not in (None, front)]
+        if rolled:
+            p = self.source.plugin
+            if p and p.alive:
+                p.notify("data.symbolInfoChanged", {"tickers": rolled})
+            self.source.log(f"Continuous futures rolled: {', '.join(sorted(rolled))}")
 
     def catalog_get(self, exchanges):
         """The search catalog: every segment's rows flattened into one precomputed list
@@ -354,6 +411,16 @@ class Instruments:
                 out.append((symbol.upper(), str(row.get("name") or "").upper(),
                             str(first_of(row, "brsymbol", "broker_symbol") or "").upper(), f"{exchange}:{symbol}",
                             self.source._kind_of(exchange, row), display_name(row.get("name") or symbol, row)))
+        with self.lock:
+            continuous = dict(self.continuous)
+        allowed = set(self.master_exchanges(exchanges))
+        for whole in continuous:  # synthetic futures, so the dialog finds the front contract by its root
+            exchange, symbol = whole.split(":", 1)
+            if exchange not in allowed:
+                continue
+            root = symbol[:-2]
+            out.append((symbol.upper(), f"{root} CONTINUOUS FUTURE", symbol.upper(), whole,
+                        "futures", f"{root} Continuous Future"))
         with self.lock:  # a concurrent rebuild is fine: both see the same rows, the last one wins
             self.catalog = out
         return out
@@ -364,17 +431,63 @@ class Instruments:
         with self.lock:
             if self.worker and self.worker.is_alive():
                 return
+            self.prefetch_done.clear()
             self.worker = threading.Thread(
                 target=self._prefetch_all, args=(list(self.master_exchanges(exchanges)),), daemon=True)
             self.worker.start()
+
+    def _prune_caches(self):
+        """Keep only today's master per segment so a long-running install doesn't accumulate old files."""
+        today = datetime.now(TZ_IST).date()
+        removed = 0
+        try:
+            for path in self.cache_dir.glob("*.json"):
+                parts = path.stem.split("-")
+                if len(parts) < 4:
+                    continue
+                try:
+                    day = date.fromisoformat("-".join(parts[-3:]))
+                except ValueError:
+                    continue
+                if day == today:
+                    continue
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        if removed:
+            self.source.log(f"cache prune: removed {removed} stale file(s)")
+
     def _prefetch_all(self, exchanges):
-        for i, exchange in enumerate(exchanges):
-            if i:
-                time.sleep(2.0)  # a small gap between segments keeps the pulls under the rate limit
-            try:
-                self.rows_for(exchange)
-            except Exception:  # noqa: BLE001 - a failed pull retries on the next use; the worker must not die
-                pass
+        self._prune_caches()
+        # Only a cold master (nothing landed for today) is a download worth announcing; a restart that
+        # re-reads today's cache is silent.
+        need = [e for e in exchanges if not self.landed(e)]
+        if need:
+            self.source.toast("info", "Downloading instrument master — first start can take a moment")
+        try:
+            for i, exchange in enumerate(exchanges):
+                if i:
+                    time.sleep(2.0)  # a small gap between segments keeps the pulls under the rate limit
+                try:
+                    self.rows_for(exchange)
+                except Exception:  # noqa: BLE001 - a failed pull retries on the next use; the worker must not die
+                    pass
+            if need:
+                rows = sum(len(self.rows.get(e) or []) for e in exchanges)
+                self.source.toast("info", f"Instrument master ready — {rows} instruments cached. You can use the app.")
+            # Now that every segment's rows are here, ask the app to forget its unknown/cached infos
+            # and reload the charts and watchlists: symbols that were refused while the master loaded
+            # resolve this time (#400 / #423).
+            p = self.source.plugin
+            if p and p.alive:
+                p.notify("data.symbolInfoChanged", {})
+        finally:
+            # Even a failed pull releases the broker toast: the app can trade the symbols it already has.
+            self.prefetch_done.set()
 
     def _fetch(self, exchange):
         return self.source._fetch_instruments(exchange)
@@ -408,6 +521,11 @@ class OpenAlgoSource:
         self.plugin = None  # set by Plugin: the connection the log lines go through
         self.lock = threading.RLock()
         self.settings = {}
+        # API 12 clock: computer time + the app's offset, plus a server time read from HTTP Date headers.
+        self.clock_offset_ms = 0.0
+        self.clock_source = None
+        self.server_time_ms = 0.0
+        self._server_time_sent = 0.0
         self._rest_pool = []  # idle keep-alive connections (see "REST" below)
         self._rest_lock = threading.Lock()
         self.exchanges = []
@@ -444,6 +562,40 @@ class OpenAlgoSource:
         self.executions = []
         self.last_poll = 0.0
         self.rest_ok = False
+
+    # ── server clock (Plugin API 12) ──
+    def app_clock_ms(self):
+        """Wall clock in milliseconds, corrected by the offset the app sent in plugin.clock."""
+        return time.time() * 1000 + self.clock_offset_ms
+
+    def set_clock(self, params):
+        """The app's server clock: quotes use its time, not an unsynced computer clock."""
+        offset = num(params.get("offset")) or 0
+        source = params.get("source")
+        with self.lock:
+            changed = offset != self.clock_offset_ms or source != self.clock_source
+            self.clock_offset_ms = float(offset)
+            self.clock_source = source
+        if changed:
+            self.log(f"Server clock: source={source or 'computer'}, offset={offset:.0f} ms")
+
+    def toast(self, level, message):
+        """A toast through this source's connection, while the plugin is alive."""
+        p = self.plugin
+        if p and p.alive:
+            p.toast(level, message)
+
+    def note_server_time(self, ms):
+        """A server time just read from an HTTP Date header; tell the app at most every five minutes."""
+        if not ms or not (ms > 0):
+            return
+        with self.lock:
+            self.server_time_ms = float(ms)
+            p = self.plugin
+            now = time.time()
+            if p and p.alive and now - self._server_time_sent >= 300:
+                self._server_time_sent = now
+                p.notify("data.serverTime", {"time": int(ms)})
 
     # ── settings ──
     def configure(self, settings):
@@ -619,9 +771,17 @@ class OpenAlgoSource:
             if payload is not None:
                 headers["Content-Type"] = "application/json"
             try:
+                wall_start = time.time()
                 conn.request(method, path, body=payload, headers=headers)
                 sent = True
                 r = conn.getresponse()
+                date = r.getheader("Date")  # an authoritative server time from a response we already made
+                if date:
+                    try:
+                        server = email.utils.parsedate_to_datetime(date).timestamp() * 1000
+                        self.note_server_time(server + (time.time() - wall_start) * 500)
+                    except (TypeError, ValueError, OverflowError):
+                        pass
                 data = r.read()
                 if r.will_close:
                     conn.close()
@@ -698,8 +858,14 @@ class OpenAlgoSource:
         self.log(f"instruments {exchange}: {len(rows)} rows")
         return rows
 
+    def front_ticker(self, ticker):
+        """The whole ticker a continuous future trades as; every other symbol is itself."""
+        return self.instruments.continuous.get(ticker, ticker)
+
     def known(self, ticker):
         """True when `ticker` ("NSE:SBIN-EQ") is one of the plugin's symbols."""
+        if ticker in self.instruments.continuous and ticker.split(":", 1)[0] in self.exchanges:
+            return True
         exchange, sep, symbol = ticker.partition(":")
         if not (sep and symbol) or exchange not in self.exchanges:
             return False
@@ -711,11 +877,21 @@ class OpenAlgoSource:
     def tick(self, ticker):
         """One price step of `ticker`, from the master's tick size (the ticket's bid/ask spread).
         The lookup never waits for a pull: until the master lands, the app's default tick stands."""
-        row = self._instrument_row(ticker)
+        return self._tick_of(ticker.split(":", 1)[0], self._instrument_row(ticker))
+
+    @staticmethod
+    def _tick_of(exchange, row):
+        """The tick to use for a symbol. OpenAlgo's cash master reports 0.0001/0.0005/0.001 for
+        equities — not the exchange tick — which made the chart show four decimals and the ticket a
+        meaningless spread. NSE/BSE cash trades in 0.05 (the app's own provider uses it too).
+        The derivative segments' tick_size is sound, so it stands there."""
+        if exchange.upper() in ("NSE", "BSE"):
+            return 0.05
         size = num(first_of(row or {}, "tick_size", "ticksize"))
-        return size or 0.05
+        return size if size and size > 0 else 0.05
 
     def _instrument_row(self, ticker):
+        ticker = self.front_ticker(ticker)  # a continuous future reads its front contract's master row
         exchange, _, symbol = ticker.partition(":")
         for row in self.instruments.rows_peek(exchange):  # the row lives in the segment the symbol names itself; a pull is never awaited
             if row.get("symbol") == symbol:
@@ -832,7 +1008,10 @@ class OpenAlgoSource:
             raise PluginError(f"Unknown symbol {ticker}", -32004)
         exchange = ticker.split(":", 1)[0]
         symbol = ticker.partition(":")[2]
-        tick = num(first_of(row, "tick_size", "ticksize")) or 0.05
+        front = self.instruments.continuous.get(ticker)
+        if front:  # a continuous future takes its front contract's fields, but keeps its own name
+            symbol = front.partition(":")[2]
+        tick = self._tick_of(exchange, row)
         pricescale = max(2, round(1 / tick)) if tick < 1 else 100
         name = display_name(row.get("name") or symbol, row)
         lot = num(first_of(row, "lotsize", "lot_size")) or 1.0
@@ -875,6 +1054,15 @@ class OpenAlgoSource:
         if str(first_of(row, "instrumenttype", "instrument_type") or "").strip().upper() == "EQ" \
                 and not exchange.upper().endswith("_INDEX"):
             info["icon"] = f"https://api.dharun.dev/v1/logos/{symbol.upper()}"
+        if front:
+            # API 9/10: the continuous symbol trades as its front contract; scripts read its root
+            # and current contract's expiry. A roll sends data.symbolInfoChanged.
+            root = ticker.partition(":")[2][:-2]  # strip the "1!" of `<ROOT>1!`
+            info.update({"tradeTicker": front, "root": root,
+                         "name": f"{root} Continuous Future", "description": f"{root} Continuous Future"})
+            exp = expiry_date(first_of(row, "expiry", "expiry_date"))
+            if exp:
+                info["expiration"] = exp.isoformat()
         return info
 
     def _long_description(self, symbol, row, lot):
@@ -1231,6 +1419,7 @@ class OpenAlgoSource:
         raise PluginError(f"Resolution {resolution} is not served", -32602)
 
     def bars(self, ticker, resolution, frm, to, count_back):
+        ticker = self.front_ticker(ticker)  # a continuous chart is the front contract's history
         exchange, _, symbol = ticker.partition(":")
         interval = self._interval_for(resolution)
         try:
@@ -1351,6 +1540,9 @@ class OpenAlgoSource:
             v = num(r.get("volume"), 0)
             if ts is None or o is None or h is None or low is None or c is None:
                 continue
+            # A closed-market row can carry zeros for the whole OHLC; keeping it draws a wick to 0.
+            if min(o, h, low, c) <= 0 or h < low:
+                continue
             t = int(ts) // 1000 if ts > 1e12 else int(ts)
             if daily:  # a daily bar sits at its trading day's midnight in the market's clock
                 t = ist_midnight(t)
@@ -1453,13 +1645,14 @@ class OpenAlgoSource:
         """The last price and the forming minute / day bar, from the WebSocket cache. A depth
         subscription (mode 3) also carries the best bid / ask, which the order ticket's ladder
         shows; a plain quote stream has none."""
+        front = self.front_ticker(ticker)  # the stream's ticks land under the front contract's ticker
         with self.lock:
-            q = self.quotes.get(ticker)
-            minute = list(self.minute_bars.get(ticker) or [])
-            day = list(self.day_bars.get(ticker) or [])
+            q = self.quotes.get(front)
+            minute = list(self.minute_bars.get(front) or [])
+            day = list(self.day_bars.get(front) or [])
         if not q:
             return None
-        now = int(time.time())
+        now = int(self.app_clock_ms() // 1000)
         return {"ticker": ticker, "time": now, "price": q["price"], "prevClose": q.get("prevClose"),
                 "bid": q.get("bid"), "ask": q.get("ask"),
                 "minute": self._minute_bar(minute, now // 60 * 60, q["price"]),
@@ -1507,7 +1700,7 @@ class OpenAlgoSource:
     def has_quotes(self):
         """Whether any subscribed ticker has a cached price (the watchlist is not blank)."""
         with self.lock:
-            return any(self.quotes.get(t) for t in self.subscribed)
+            return any(self.quotes.get(self.front_ticker(t)) for t in self.subscribed)
 
     def poll_quotes_rest(self):
         """Refresh the quote cache from REST /quotes (fallback when the WebSocket is
@@ -1515,7 +1708,8 @@ class OpenAlgoSource:
         for ticker in list(self.subscribed):
             if not self.known(ticker):
                 continue
-            exchange, _, symbol = ticker.partition(":")
+            front = self.front_ticker(ticker)
+            exchange, _, symbol = front.partition(":")
             try:
                 answer = self._post("/api/v1/quotes", {"symbol": symbol, "exchange": exchange})
             except PluginError:
@@ -1526,7 +1720,7 @@ class OpenAlgoSource:
             if price is None or price <= 0:
                 continue
             with self.lock:
-                q = self.quotes.get(ticker) or {}
+                q = self.quotes.get(front) or {}
                 q["price"] = price
                 if answer.get("prev_close") is not None:
                     q["prevClose"] = num(answer.get("prev_close"))
@@ -1998,8 +2192,12 @@ class OpenAlgoSource:
         def resync(wanted):
             send_text(json.dumps({"action": "unsubscribe_all"}))
             if wanted:
-                symbols = [{"exchange": t.split(":", 1)[0], "symbol": t.split(":", 1)[1]}
-                           for t in sorted(wanted) if ":" in t]
+                symbols = []
+                for t in sorted(wanted):
+                    if ":" not in t:
+                        continue
+                    exchange, _, symbol = self.front_ticker(t).partition(":")
+                    symbols.append({"exchange": exchange, "symbol": symbol})
                 request = {"action": "subscribe", "mode": 3 if depth else "Quote", "symbols": symbols}
                 if depth:
                     request["depth"] = 5
@@ -2163,11 +2361,14 @@ class OpenAlgoSource:
         else:
             return
         price = num(first_of(r, "ltp", "last_price", "last", "price"))
-        if price is None:
+        if price is None or price <= 0:
+            # A holiday / closed-session stream can send ltp = 0 as a sentinel. Treating it as a trade
+            # would seed the forming minute and day bars with a zero, leaving a wick to 0 on the chart.
+            # The REST poller and the Zerodha plugin already reject these; the socket must too.
             if not self.ws_shape_warned:
-                self.ws_shape_warned = True  # once: a market_data message without a price
-                self.log("stream: a market_data message arrived without a price (run with OPENALGO_DEBUG=1 "
-                         "to see the raw traffic)", "warn", "ws")
+                self.ws_shape_warned = True  # once: a market_data message without a usable price
+                self.log("stream: a market_data message arrived without a usable price (run with "
+                         "OPENALGO_DEBUG=1 to see the raw traffic)", "warn", "ws")
             return
         self.last_ws_tick = time.time()  # the socket feeds prices; the REST fallback stands down
         ts = num(first_of(r, "ltt", "timestamp", "ts", "time"))
@@ -2284,12 +2485,8 @@ class OpenAlgoSource:
         """The subscribed whole symbol a bare echo belongs to, when exactly one matches (the provider's
         identity rule: an ambiguous bare echo resolves to nothing rather than to the wrong listing)."""
         with self.lock:
-            matches = [t for t in self.subscribed if t.split(":", 1)[-1] == bare]
-        return matches[0] if len(matches) == 1 else None
-        """The subscribed whole symbol a bare echo belongs to, when exactly one matches (the provider's
-        identity rule: an ambiguous bare echo resolves to nothing rather than to the wrong listing)."""
-        with self.lock:
-            matches = [t for t in self.subscribed if t.split(":", 1)[-1] == bare]
+            matches = [t for t in self.subscribed
+                       if t.split(":", 1)[-1] == bare or self.front_ticker(t).partition(":")[2] == bare]
         return matches[0] if len(matches) == 1 else None
 
 
@@ -2324,6 +2521,7 @@ class Plugin:
         self.alive = False
         self.pushed_connected = False  # what the last broker.state push reported
         self.last_state_push = 0.0
+        self.broker_toast_sent = False  # one "books are live" toast per connection, after the master is ready
 
     # ── JSON-RPC ──
     def send(self, message):
@@ -2333,6 +2531,20 @@ class Plugin:
 
     def notify(self, method, params):
         self.send({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def toast(self, level, message):
+        """A short, non-blocking message on the user's charts (Plugin API 8)."""
+        if self.alive:
+            self.notify("plugin.toast", {"level": level, "message": str(message)})
+
+    def maybe_broker_toast(self):
+        """The broker's books are live: say so once, and only once the instrument master is ready,
+        so the toasts read connected → downloading → ready → broker live."""
+        if (self.broker_toast_sent or not self.source.rest_ok
+                or not self.source.instruments.prefetch_done.is_set()):
+            return
+        self.broker_toast_sent = True
+        self.toast("info", "Broker connected — account books are live")
 
     def log(self, message, level="info", category="api"):
         """A line in the plugin's log in Settings (stdout reaches it too, but without a level).
@@ -2455,6 +2667,8 @@ class Plugin:
         if method == "plugin.configure":
             self.source.configure(p.get("settings", {}))
             self.forward_subscription()
+        elif method == "plugin.clock":
+            self.source.set_clock(p)
         elif method == "data.subscribe":
             raw = p.get("tickers", [])
             self.tickers = {t for t in raw if self.source.known(t)}
@@ -2531,6 +2745,7 @@ class Plugin:
                 # the ticket kept refusing a working plugin ("Broker not connected").
                 rest_ok = self.source.rest_ok
                 now = time.time()
+                self.maybe_broker_toast()
                 if (self.source.positions or events or rest_ok != self.pushed_connected
                         or now - self.last_state_push >= 30.0):
                     self.push_state()
@@ -2552,7 +2767,10 @@ class Plugin:
             raise PluginError(welcome["error"].get("message", "refused"))
         self.sock.settimeout(None)
         self.alive = True
-        self.log(f"Connected to {welcome.get('result', {}).get('app', 'OpenTrader')} (Plugin API {welcome.get('result', {}).get('api')})")
+        app_name = welcome.get("result", {}).get("app", "OpenTrader")
+        self.log(f"Connected to {app_name} (Plugin API {welcome.get('result', {}).get('api')})")
+        self.broker_toast_sent = False
+        self.toast("info", f"Connected to {app_name} — preparing data")
         self.push_state()
         self.pushed_connected = self.source.rest_ok  # what the connect-time push just reported
         self.last_state_push = time.time()

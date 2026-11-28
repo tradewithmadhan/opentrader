@@ -3,6 +3,7 @@ a setting (`historyDaysMinute`, `historyDaysSeconds`, `historyDaysDaily`), never
 """
 
 import unittest
+from unittest.mock import patch
 
 import fake_openalgo
 import harness
@@ -13,6 +14,26 @@ SYMBOL = "NSE:RELIANCE"
 
 def midnight(day):
     return int(fake_openalgo.ist_day(day).timestamp())
+
+
+class Bars(unittest.TestCase):
+    def setUp(self):
+        self.fake = fake_openalgo.FakeOpenAlgo()
+        self.source = harness.make_source(self.fake)
+
+    def tearDown(self):
+        self.fake.close()
+
+    def test_a_zero_row_is_not_a_bar(self):
+        rows = [
+            {"timestamp": 1000000, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"timestamp": 2000000, "open": 0, "high": 0, "low": 0, "close": 0, "volume": 0},
+            {"timestamp": 3000000, "open": 100, "high": 0, "low": 0, "close": 100, "volume": 10},
+        ]
+        with patch.object(self.source, "_post", return_value=rows):
+            bars = self.source._window_fetch("NSE", "RELIANCE", "D", True, 0, 4000000, 10, 0)
+        self.assertEqual(len(bars), 1)
+        self.assertEqual(bars[0][1:5], [100, 101, 99, 100])
 
 
 class Intervals(unittest.TestCase):

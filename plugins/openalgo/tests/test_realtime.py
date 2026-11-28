@@ -66,6 +66,16 @@ class TicksReachTheAppAtOnce(unittest.TestCase):
         self.assertEqual(quote["day"][4], 2500.0)
         self.assertEqual(quote["day"][5], 5000.0)
 
+    def test_a_zero_price_tick_is_not_a_trade(self):
+        # A holiday stream can send ltp = 0; it must not seed a wick to zero in the forming bars.
+        self.source._ws_message(market_data(2500.0, volume=5000))
+        self.source._ws_message(market_data(0.0))
+        self.assertEqual(len(self.app.sock.payloads("data.quote")), 1)
+        quote = self.source.quote(EQ)
+        self.assertEqual(quote["price"], 2500.0)
+        self.assertEqual(quote["minute"][3], 2500.0)
+        self.assertEqual(quote["day"][3], 2500.0)
+
     def test_a_live_stream_push_needs_no_loop(self):
         self.source.configure(harness.settings(self.fake))
         self.assertTrue(self.fake.ws.connected.wait(5.0), "the fake stream accepted the connection")

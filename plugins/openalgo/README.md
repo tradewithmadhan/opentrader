@@ -2,11 +2,14 @@
 
 Your OpenAlgo deployment in OpenTrader: the OpenAlgo segments of your broker account (NSE, BSE, NFO, BFO, MCX,
 CDS, BCD, NCO, NCDEX — and the index segments NSE_INDEX, BSE_INDEX, MCX_INDEX) on the charts, and its trading
-from the charts. One file, Python 3.9+, standard library only. Plugin API 3 (whole symbols, `NSE:SBIN-EQ`):
-the app speaks whole symbols — the exchange prefix is the app's exchange, the ticker is OpenAlgo's symbol.
+from the charts. One file, Python 3.9+, standard library only. Plugin API 12 (whole symbols, `NSE:SBIN-EQ`):
+the app speaks whole symbols — the exchange prefix is the app's exchange, the ticker is OpenAlgo's symbol. Quotes
+use the app's server-clock offset and the plugin reports a server time read from OpenAlgo HTTP `Date` headers,
+so a computer whose clock is off still shows the right time.
 The **API key** is a password setting, kept in the system credential store and never shown again, so it must
 be re-entered once when upgrading from 0.1.27. Logs and the instrument cache live in the plugin's own data
-folder (removed when the plugin is removed). The wire behavior
+folder (removed when the plugin is removed); only today's master file per segment is kept, older ones are pruned
+on the next start. The wire behavior
 mirrors the app's built-in OpenAlgo provider (verified live), index symbols included: an index keeps its own
 prefix, `NSE_INDEX:NIFTY`.
 
@@ -22,6 +25,12 @@ prefix, `NSE_INDEX:NIFTY`.
   from the plugin's `product` setting (MIS by default).
 - Status changes (filled, cancelled, rejected) become events in the app; every order live-confirms, because
   OpenAlgo has no demo mode (`isDemo: false`).
+- **Continuous futures**: every derivative root with more than one expiry gets a `<ROOT>1!` symbol (for example
+  `NFO:NIFTY1!`). It follows the nearest upcoming contract, serves that contract's quotes and history, and trades
+  as it (`tradeTicker`); a monthly roll sends `data.symbolInfoChanged` so open charts keep following the front.
+- **Toasts** mark the moments a trader waits for: connection, the instrument master starting to download on a cold
+  start, the master being ready, and the broker books going live. Today's cached master makes the first and last
+  of those instant on a restart.
 
 ## Install (development)
 

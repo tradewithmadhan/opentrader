@@ -7,11 +7,66 @@ Fix C (0.1.18): a 429 on `/symbol` is not an answer about the symbol. Cached as 
 as "Unknown symbol" (-32004, final: the app unsubscribes it) for the rest of the day.
 """
 
+import json
+import os
+import time
 import unittest
+from unittest.mock import patch
 
 import fake_openalgo
 import harness
 import plugin
+
+
+class TickSize(unittest.TestCase):
+    def setUp(self):
+        self.fake = fake_openalgo.FakeOpenAlgo()
+        self.source = harness.make_source(self.fake)
+        self.source.instruments.rows_for("NSE")
+
+    def tearDown(self):
+        self.fake.close()
+
+    def test_cash_tick_is_the_exchanges_not_the_masters(self):
+        # The OpenAlgo cash master reports 0.0001 / 0.0005 / 0.001; the exchange ticks 0.05,
+        # so the chart shows two decimals instead of three or four.
+        self.assertEqual(self.source.tick("NSE:TCS"), 0.05)
+        with patch.object(self.source, "_calendar_session", return_value=None):
+            info = self.source.symbol_info("NSE:RELIANCE")
+        self.assertEqual(info["pricescale"], 20)
+        # The derivative segments' tick_size is sound and is still used as sent.
+        self.assertEqual(self.source._tick_of("NFO", {"tick_size": "0.05"}), 0.05)
+
+
+class ServerClock(unittest.TestCase):
+    def setUp(self):
+        self.fake = fake_openalgo.FakeOpenAlgo()
+        self.source = harness.make_source(self.fake)
+        self.app = harness.make_plugin(self.source)
+
+    def tearDown(self):
+        self.app.alive = False
+        self.fake.close()
+
+    def test_manifests_declare_api_12(self):
+        root = os.path.dirname(os.path.abspath(plugin.__file__))
+        for name in ("opentrader-plugin.json", "opentrader-plugin.dev.json"):
+            with open(os.path.join(root, name), encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["api"], 12)
+        self.assertEqual(plugin.API, 12)
+
+    def test_app_clock_offset_applies_to_quote_time(self):
+        self.source.set_clock({"offset": 5000, "source": "gateway"})
+        self.source.quotes["NSE:RELIANCE"] = {"price": 100.0}
+        before = time.time()
+        quote = self.source.quote("NSE:RELIANCE")
+        after = time.time()
+        self.assertGreaterEqual(quote["time"], before + 4.0)  # int() truncates the seconds
+        self.assertLessEqual(quote["time"], after + 5.0)
+
+    def test_server_time_is_notified(self):
+        self.source.note_server_time(1795783190223)
+        self.assertIn({"time": 1795783190223}, self.app.sock.payloads("data.serverTime"))
 
 
 class HttpShape(unittest.TestCase):
