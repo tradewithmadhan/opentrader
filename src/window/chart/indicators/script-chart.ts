@@ -15,7 +15,8 @@ import { TradingCalendar } from "oakscriptjs";
 import type { ChartContext, SymbolInfo } from "oakscriptjs/script";
 import { textOnColor } from "lightweight-charts-drawing/core/color";
 import { DEFAULT_SYMBOL } from "../../../backtester/types";
-import { getTickerInfo, isLocalSymbol, type TickerInfo } from "../../../data/datafeed";
+import { getTickerInfo, type TickerInfo } from "../../../data/datafeed";
+import { isLocalSymbol } from "../../../data/local-series";
 import { cachedSymbolSessions, type SessionId, type SymbolSessions } from "../../../data/session";
 import { titleCase } from "../../../data/title-case";
 

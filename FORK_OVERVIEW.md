@@ -39,6 +39,7 @@ Compare with `git diff upstream/main HEAD`.
 | `issues/fixed_maximized-chart-resets-on-tab-switch.md` | a639bbcd Charts: each tab keeps its maximized chart across tab switches | fork-only / no upstream history |
 | `issues/fixed_order-drag-modify-not-working.md` | 1085fca3 OpenAlgo 0.1.27: send broker.depth snapshots on upstream's protocol<br>84c88327 Rename fixed upstream issue drafts with fixed_ prefix | fork-only / no upstream history |
 | `issues/fixed_order-ticket-product-selection.md` | 84c88327 Rename fixed upstream issue drafts with fixed_ prefix | fork-only / no upstream history |
+| `issues/fixed_other-symbol-lower-timeframe-bars-never-extend.md` | 4c4516c4 Scripts: lower-timeframe bars follow the chart back on scroll-back | fork-only / no upstream history |
 | `issues/fixed_pass-symbol-metadata-to-scripts.md` | c70a9458 Scripts read every syminfo field and the symbol's dividends, splits and earnings | fork-only / no upstream history |
 | `issues/fixed_pine-style-input-widgets-for-scripts.md` | 5e110caa Script settings: timeframe drop-down, symbol search, text area, choice lists for numbers and enums | fork-only / no upstream history |
 | `issues/fixed_plugin-seconds-bars-not-live.md` | 179426ac Plugins: seconds bars update live from the plugin's quotes, on charts and in scripts | fork-only / no upstream history |
